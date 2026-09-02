@@ -1,0 +1,50 @@
+# Obsidian Agent Workspace - 本地配置
+# 项目根：/Users/xbpd/Projects/个人工作台
+
+vault:
+  path: /Users/xbpd/Documents/xbpd_obsidian   # 主 vault（可改）
+  # 未来可扩展多 vault 列表
+
+templates:
+  dir: 资料库/模版        # 相对 vault.path，Templater 模板目录
+
+index:
+  database: ./data/vault.db   # 相对项目根
+
+security:
+  bind_host: 127.0.0.1
+  scan_exclude:            # 目录名/路径片段命中即剪枝（v0.2 §7.4）
+    - .obsidian
+    - .claudian
+    - .codex
+    - .hermes
+    - .claude
+    - copilot
+    - .trash
+    - 附件
+    - credentials
+    - .git
+    - __pycache__
+    - node_modules
+    - .venv
+    - .pi
+  extension_ignore:        # 不进入 markdown 索引（v0.2 §7.4）
+    - .pdf
+    - .png
+    - .jpg
+    - .jpeg
+    - .gif
+    - .webp
+    - .epub
+    - .excalidraw
+    - .canvas
+    - .base
+    - .zip
+  reject_symlink_escape: true
+
+watchdog:
+  enabled: true
+  debounce_ms: 500
+
+server:
+  port: 8787
