@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS index_events (      -- tombstone / secret-skip audit 
 """
 
 _VALUE_TYPES = ("string", "number", "bool", "list", "yaml")
+STATUS_KEYS = ("状态", "status")  # 统一语义（P1-M2-3）
 
 
 def now_iso() -> str:
@@ -72,13 +74,26 @@ def now_iso() -> str:
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)  # FastAPI threadpool + watchdog 线程
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
     return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection, name: str = "write"):
+    """显式事务（P1-M2-1）：upsert+relations+event 必须同一事务。"""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
 def classify_value(value: Any) -> tuple[str, str]:

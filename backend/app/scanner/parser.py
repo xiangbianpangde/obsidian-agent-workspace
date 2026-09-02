@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -65,11 +67,13 @@ def _as_list(value) -> list[str]:
     return [str(value)]
 
 
-def parse_markdown(path: Path, vault_root: Path) -> ParsedFile:
-    """Parse one markdown file. Caller guarantees exclusions were applied."""
+def parse_markdown(path: Path, vault_root: Path, raw_bytes: bytes | None = None) -> ParsedFile:
+    """Parse one markdown file. Caller guarantees exclusions were applied.
+    P1-M2-2: raw_bytes 由调用方一次性读取（确保 raw 与 hash 来自同一 snapshot）。"""
     rel = path.relative_to(vault_root).as_posix()
     st = path.stat()
-    raw_bytes = path.read_bytes()
+    if raw_bytes is None:
+        raw_bytes = path.read_bytes()
     sha256 = hashlib.sha256(raw_bytes).hexdigest()
     text = raw_bytes.decode("utf-8", errors="replace")
 

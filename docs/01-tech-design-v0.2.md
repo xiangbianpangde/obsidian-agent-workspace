@@ -134,7 +134,7 @@ personal-workspace/
 ## 10. 里程碑
 
 - **M1** Vault Scanner + 索引（30s 扫描 + sha256 + watchdog 增量）← 本轮
-- M2 API（文件树/内容/保存 409/创建 409/标签/模板）
+- **M2** API（文件树/内容/保存 409/创建 409/标签/状态；**templates 端点归 M4**）← 本轮
 - M3 前端三栏（编辑器 + 预览 + 标签面板）
 - M4 模板创建链路（L1 变量 + offset + L2 路由 + JS 降级）
 - M5 安全验收 + sample-vault + README

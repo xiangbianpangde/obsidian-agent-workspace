@@ -1,44 +1,46 @@
-"""Watchdog: 增量监听 CREATE/MODIFY/MOVE；DELETE 只记录 tombstone（v0.2 §7 / v0.1 §7.2）。
-Sol M1-A：per-path debounce；Sol M1-B：与全量扫描互斥（扫描期间事件入队）。"""
+"""Watchdog: 增量监听 CREATE/MODIFY/MOVE；DELETE 只记录 tombstone（v0.2 §7）。
+P1-M2-1: 专用 connection + 原子 coordinator（CREATE/MODIFY/MOVE/DELETE 全部过协调）+ per-path debounce。"""
 from __future__ import annotations
 
 import threading
 import time
 from collections import deque
+from pathlib import Path as _P
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ..config import AppConfig
-from ..database import sqlite
-from ..scanner.vault_scanner import _excluded, upsert_one
+from ..scanner.vault_scanner import process_event
 
 
 class ScanCoordinator:
-    """全量扫描与 watchdog 的互斥协调器（Sol M1-B）。"""
+    """全量扫描与事件处理的原子互斥（P1-M2-1：check→queue 无竞态）。"""
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._mutex = threading.Lock()
+        self._scanning = False
         self._pending: deque = deque()
 
-    @property
-    def scanning(self) -> bool:
-        return self._lock.locked()
+    def begin_scan(self) -> None:
+        with self._mutex:
+            self._scanning = True
 
-    def acquire(self) -> None:
-        self._lock.acquire()
-
-    def release(self) -> None:
-        self._lock.release()
-
-    def queue(self, item: tuple[str, str]) -> None:
-        if len(self._pending) < 5000:
-            self._pending.append(item)
-
-    def drain(self) -> list[tuple[str, str]]:
-        items = list(self._pending)
-        self._pending.clear()
+    def end_scan(self) -> list[tuple[str, str]]:
+        with self._mutex:
+            self._scanning = False
+            items = list(self._pending)
+            self._pending.clear()
         return items
+
+    def dispatch(self, event: tuple[str, str]) -> bool:
+        """返回 True = 调用方立即处理；False = 已入队（扫描结束后 replay）。"""
+        with self._mutex:
+            if self._scanning:
+                if len(self._pending) < 5000:
+                    self._pending.append(event)
+                return False
+        return True
 
 
 class VaultEventHandler(FileSystemEventHandler):
@@ -59,52 +61,46 @@ class VaultEventHandler(FileSystemEventHandler):
         self._last_by_path[rel] = now
         return False
 
-    @staticmethod
-    def _rel(path: str) -> str:
-        # path 已是 event.src_path；只取相对部分（绝对路径拆分由 observer 保证在 vault 内）
-        return str(path)
-
-    def _handle(self, kind: str, rel: str) -> None:
-        if _excluded(rel, self.cfg.scan_exclude):
-            sqlite.record_event(self.conn, "excluded", rel)
-            self.conn.commit()
+    def _emit(self, kind: str, rel: str) -> None:
+        if not rel or rel.startswith("."):
+            return
+        if matches_exclude(self.cfg, rel):
             return
         if self._debounce(rel):
             return
-        if self.coordinator is not None and self.coordinator.scanning:
-            self.coordinator.queue((kind, rel))
-            return
-        upsert_one(self.cfg, self.conn, rel, kind=kind)
+        if self.coordinator is not None:
+            if not self.coordinator.dispatch((kind, rel)):
+                return
+        process_event(self.cfg, self.conn, kind, rel)
 
     def on_created(self, event):
         if not event.is_directory:
-            self._handle("created", _rel_to_vault(self.cfg, event.src_path))
+            self._emit("created", _rel_to_vault(self.cfg, event.src_path))
 
     def on_modified(self, event):
         if not event.is_directory:
-            self._handle("modified", _rel_to_vault(self.cfg, event.src_path))
+            self._emit("modified", _rel_to_vault(self.cfg, event.src_path))
 
     def on_moved(self, event):
-        if not event.is_directory:
-            self._handle("moved", _rel_to_vault(self.cfg, event.dest_path))
-            sqlite.remove_file(self.conn, _rel_to_vault(self.cfg, event.src_path))
-            sqlite.record_event(
-                self.conn, "moved", _rel_to_vault(self.cfg, event.src_path),
-                "->" + _rel_to_vault(self.cfg, event.dest_path),
-            )
-            self.conn.commit()
+        if event.is_directory:
+            return
+        dest = _rel_to_vault(self.cfg, event.dest_path)
+        src = _rel_to_vault(self.cfg, event.src_path)
+        self._emit("moved_in", dest)
+        self._emit("moved_out", src)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            rel = _rel_to_vault(self.cfg, event.src_path)
-            sqlite.remove_file(self.conn, rel)
-            sqlite.record_event(self.conn, "deleted", rel)
-            self.conn.commit()
+            self._emit("deleted", _rel_to_vault(self.cfg, event.src_path))
+
+
+def matches_exclude(cfg: AppConfig, rel: str) -> bool:
+    from ..security.path_guard import matches_scan_exclude
+
+    return matches_scan_exclude(cfg.vault_root, rel, cfg.scan_exclude)
 
 
 def _rel_to_vault(cfg: AppConfig, src_path: str) -> str:
-    from pathlib import Path as _P
-
     p = _P(src_path)
     try:
         return str(p.relative_to(cfg.vault_root))

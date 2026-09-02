@@ -46,6 +46,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     templates_dir = Path(tpl_cfg.get("dir") or "资料库/模版")
     if not templates_dir.is_absolute():
         templates_dir = vault_path / templates_dir
+    templates_dir = templates_dir.resolve()  # NFD/NFC 归一化（macOS）
 
     idx_cfg = raw.get("index", {}) or {}
     db_path = Path(idx_cfg.get("database") or "./data/vault.db")
