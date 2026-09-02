@@ -18,6 +18,8 @@ _PATTERNS: list[re.Pattern] = [
     re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    # env 风格：无引号赋值 OPENAI_API_KEY=sk-... / KEY=value (Sol M1-D)
+    re.compile(r"(?m)^\\s*(?:export\\s+)?[A-Z][A-Z0-9_]*(?:_(?:KEY|TOKEN|SECRET|PASSWORD))\\s*=\\s*\\S{8,}"),
 ]
 
 

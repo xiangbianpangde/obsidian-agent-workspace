@@ -25,8 +25,12 @@ def _excluded(rel_or_name: str, exclude: list[str]) -> bool:
     return False
 
 
-def scan_vault(cfg: AppConfig, conn, *, record_secrets: bool = True) -> dict:
-    """Full scan of vault into SQLite (single transaction). Returns stats."""
+def scan_vault(cfg: AppConfig, conn, *, record_secrets: bool = True,
+               coordinator=None) -> dict:
+    """Full scan of vault into SQLite (single transaction). Returns stats.
+    Sol M1-B: 可选 coordinator —— 扫描期间 watchdog 事件入队，结束后 replay。"""
+    if coordinator is not None:
+        coordinator.acquire()
     t0 = time.time()
     run_id = sqlite.begin_scan(conn)
 
@@ -107,6 +111,10 @@ def scan_vault(cfg: AppConfig, conn, *, record_secrets: bool = True) -> dict:
     duration_ms = int((time.time() - t0) * 1000)
     sqlite.finish_scan(conn, run_id, n_files, n_secret, duration_ms)
     conn.commit()
+    if coordinator is not None:
+        coordinator.release()
+        for kind, rel in coordinator.drain():   # replay 扫描期间积压事件
+            upsert_one(cfg, conn, rel, kind=kind)
     return {
         "run_id": run_id,
         "files_indexed": n_files,
