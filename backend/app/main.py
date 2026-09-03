@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import files as files_api
 from .api import tags as tags_api
+from .api import templates as templates_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import init_state
@@ -37,9 +38,10 @@ async def lifespan(app: FastAPI):
         watchdog_conn.close()
 
 
-app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m2", lifespan=lifespan)
+app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lifespan)
 app.include_router(files_api.router, prefix="/api", tags=["files"])
 app.include_router(tags_api.router, prefix="/api", tags=["tags"])
+app.include_router(templates_api.router, prefix="/api", tags=["templates"])
 
 
 @app.get("/api/health")

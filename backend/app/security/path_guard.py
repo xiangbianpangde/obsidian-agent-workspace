@@ -127,3 +127,14 @@ def resolve_for_read_snapshot(cfg: AppConfig, relative_or_abs: str):
 def resolve_for_create(cfg: AppConfig, relative_or_abs: str) -> Path:
     """创建边界：write 边界（文件允许不存在）。"""
     return resolve_for_write(cfg, relative_or_abs)
+
+
+def resolve_for_template_read(cfg: AppConfig, relative_or_abs: str) -> Path:
+    """模板读取边界：必须在 templates_dir 内，且是 .md 文件，只读。"""
+    full = resolve_in_vault(cfg, relative_or_abs)
+    _reject_non_note(full)
+    if not is_within(cfg.templates_dir, full.absolute()):
+        raise PathError(f"template must be located inside templates_dir: {relative_or_abs}")
+    if not full.is_file():
+        raise PathError(f"template not found: {relative_or_abs}")
+    return full
