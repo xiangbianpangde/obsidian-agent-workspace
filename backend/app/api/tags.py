@@ -35,18 +35,20 @@ def tags_overview(conn=Depends(get_conn)):
     ).fetchall()
 
     by_file: dict[int, list] = {}
+    tag_file_pairs: set[tuple[int, int]] = set()
     for r in status_rows:
         by_file.setdefault(r["file_id"], []).append(r)
+        tag_file_pairs.add((r["tag_id"], r["file_id"]))
 
     tag_status: dict[int, Counter] = {}
-    for r in status_rows:
-        picked = pick_status(by_file.get(r["file_id"], []))
+    for tag_id, file_id in tag_file_pairs:
+        picked = pick_status(by_file.get(file_id, []))
         if picked is None:
             continue
         _, value = picked
         values = value if isinstance(value, list) else [value]
         for v in values:
-            tag_status.setdefault(r["tag_id"], Counter())[v] += 1
+            tag_status.setdefault(tag_id, Counter())[v] += 1
 
     result = []
     for t in tag_rows:

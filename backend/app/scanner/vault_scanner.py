@@ -120,6 +120,11 @@ def process_event(cfg: AppConfig, conn, kind: str, rel: str) -> None:
         return
 
     if kind in ("moved_out", "deleted"):
+        # MUST-1: 终态事件 replay 乱序防护 —— path 已重新存在则视为 stale，不盲删
+        if full.exists() or full.is_symlink():
+            sqlite.record_event(conn, "stale_terminal", rel, f"{kind} ignored, path re-created")
+            conn.commit()
+            return
         with sqlite.transaction(conn):
             sqlite.remove_file(conn, rel)
             sqlite.record_event(conn, "deleted", rel)

@@ -92,14 +92,36 @@ def resolve_for_read(cfg: AppConfig, relative_or_abs: str) -> Path:
 
 
 def resolve_for_write(cfg: AppConfig, relative_or_abs: str) -> Path:
-    """note 写边界：vault 内 + .md + 非排除区 + 模板目录禁止写。"""
-    rel = Path(relative_or_abs).as_posix()
-    _reject_excluded(cfg, rel)
-    full = resolve_in_vault(cfg, rel)
+    """note 写边界：vault 内 + .md + 非排除区（canonical 校验）+ 模板目录禁止写。"""
+    full = resolve_in_vault(cfg, relative_or_abs)
+    try:
+        canonical_rel = full.relative_to(cfg.vault_root).as_posix()
+    except ValueError:
+        raise PathError(f"path escapes vault: {relative_or_abs}") from None
+    _reject_excluded(cfg, canonical_rel)
     _reject_non_note(full)
     if is_within(cfg.templates_dir, full.absolute()):
-        raise PathError(f"templates dir is read-only: {rel}")
+        raise PathError(f"templates dir is read-only: {canonical_rel}")
     return full
+
+
+def resolve_for_read_snapshot(cfg: AppConfig, relative_or_abs: str):
+    """P1-M2-4 FINAL（MUST-2）：canonical resolve → canonical rel 检查 exclude → 单次 read_bytes
+    → 同一份 bytes 跑 secret detector。返回 (full, raw_bytes)，hash/parse/response 全部复用同一 snapshot。"""
+    full = resolve_in_vault(cfg, relative_or_abs)
+    try:
+        canonical_rel = full.relative_to(cfg.vault_root).as_posix()
+    except ValueError:
+        raise PathError(f"path escapes vault: {relative_or_abs}") from None
+    _reject_excluded(cfg, canonical_rel)   # canonical 后检查（内部 symlink 不再绕开排除区）
+    _reject_non_note(full)
+    if not full.is_file():
+        raise PathError(f"not a file: {canonical_rel}")
+    raw_bytes = full.read_bytes()
+    hit, note = looks_like_secret(raw_bytes.decode("utf-8", errors="replace"))
+    if hit:
+        raise PathError(f"file blocked by secret guard ({note}): {full.name}")
+    return full, raw_bytes
 
 
 def resolve_for_create(cfg: AppConfig, relative_or_abs: str) -> Path:

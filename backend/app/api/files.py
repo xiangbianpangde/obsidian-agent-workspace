@@ -20,7 +20,7 @@ from ..scanner.vault_scanner import upsert_one
 from ..security.path_guard import (
     PathError,
     resolve_for_create,
-    resolve_for_read,
+    resolve_for_read_snapshot,
     resolve_for_write,
 )
 from ..state import get_cfg
@@ -28,16 +28,25 @@ from ..status import pick_status
 
 router = APIRouter()
 
+import unicodedata
+
 _path_locks: dict[str, threading.Lock] = {}
 _path_locks_guard = threading.Lock()
 
 
 def _lock_for(path: str) -> threading.Lock:
+    # Sol P2: key 改为 canonical/NFC resolved path，避免相对/绝对路径别名竞争
+    try:
+        cfg = get_cfg()
+        full = (cfg.vault_root / path).resolve(strict=False)
+        key = unicodedata.normalize("NFC", str(full))
+    except Exception:
+        key = unicodedata.normalize("NFC", path)
     with _path_locks_guard:
-        lock = _path_locks.get(path)
+        lock = _path_locks.get(key)
         if lock is None:
             lock = threading.Lock()
-            _path_locks[path] = lock
+            _path_locks[key] = lock
         return lock
 
 
@@ -156,13 +165,11 @@ def files_tree(conn=Depends(get_conn)):
 @router.get("/file/content")
 def file_content(path: str = Query(...), conn=Depends(get_conn)):
     try:
-        full = resolve_for_read(get_cfg(), path)
+        full, raw_bytes = resolve_for_read_snapshot(get_cfg(), path)  # MUST-2: canonical + 单次快照
     except PathError as e:
         raise HTTPException(400, str(e))
     if not full.is_file():
         raise HTTPException(404, f"file not found: {path}")
-    # P1-M2-2: 单次字节快照 → hash → decode → parse（避免 raw/hash 版本不一致）
-    raw_bytes = full.read_bytes()
     sha = hashlib.sha256(raw_bytes).hexdigest()
     text = raw_bytes.decode("utf-8", errors="replace")
     parsed = parse_markdown(full, get_cfg().vault_root, raw_bytes=raw_bytes)
