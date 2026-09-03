@@ -1,10 +1,14 @@
-"""AgentsView Adapter (v0.2 rev2 / 第二个 P0).
-实现权威会话 API DTO 契约与双通道传输 (P1-AV-1)。
-传输层：
-1. CliTransport (官方推荐主路径)：优先调用 agentsview CLI 获得权威 Session API DTO；
-2. SqliteRoTransport (高效只读回退)：当 CLI 不可用时，通过只读 SQLite 连接并执行 DTO 规范化映射。
+"""AgentsView Adapter (v0.2 rev3 / 第二个 P0).
+实现权威会话 API DTO 契约与真正的双通道传输 (P1-AV-1)。
+传输层架构：
+1. CliTransport (官方 Session API 主路径，P0 默认基准)：
+   真正通过 subprocess 调用 agentsview session list/get/messages/tool-calls --json，
+   天然复用官方对 daemon 与只读 SQLite 的判断及官方 DTO。
+2. SqliteRoTransport (低延迟直连回退)：
+   当 CLI 未安装、不可执行或执行超时时，透明回退至本地 SQLite 只读直连查询，
+   并将结果严格规范化映射为官方 Session API DTO。
 安全边界：
-- 严格只读模式: mode=ro (严禁 immutable=1, Sol 修正)
+- 严格只读模式: mode=ro (严禁 immutable=1)
 - PRAGMA query_only=ON; PRAGMA busy_timeout=2000;
 - 短生命周期连接，按需获取，立即释放，不阻塞 WAL checkpoint。
 """
@@ -31,7 +35,7 @@ class AgentsViewError(Exception):
 
 
 class AgentsViewAdapter:
-    def __init__(self, cfg: AppConfig):
+    def __init__(self, cfg: AppConfig, force_transport: str | None = None):
         self.cfg = cfg
         self.db_path = cfg.agentsview_db_path or (
             Path.home() / ".agentsview" / "sessions.db"
@@ -39,8 +43,14 @@ class AgentsViewAdapter:
         self.cli_path = cfg.agentsview_cli_path or (
             Path.home() / ".local" / "bin" / "agentsview"
         )
+        # 支持测试中注入 force_transport='cli' 或 force_transport='sqlite-ro'
+        self._force_transport = force_transport
 
     def _cli_available(self) -> bool:
+        if self._force_transport == "sqlite-ro":
+            return False
+        if self._force_transport == "cli":
+            return True
         return bool(
             self.cli_path
             and self.cli_path.is_file()
@@ -90,7 +100,7 @@ class AgentsViewAdapter:
         return None
 
     def get_status(self) -> dict[str, Any]:
-        """探测 agentsview 连通性、传输模式与基本元数据。"""
+        """探测 agentsview 连通性、传输通道与基本元数据。"""
         transport = "cli" if self._cli_available() else "sqlite-ro"
         conn = self._get_ro_connection()
         try:
@@ -144,7 +154,7 @@ class AgentsViewAdapter:
                 "SELECT COUNT(*) c FROM sessions WHERE started_at >= ?", (t_7d,)
             ).fetchone()["c"]
 
-            # 4. 最近活跃的 8 场会话 (格式化为标准 DTO)
+            # 4. 最近活跃的 8 场会话
             recent_sess_rows = conn.execute(
                 """
                 SELECT id, project, machine, agent, first_message, display_name, session_name,
@@ -169,6 +179,8 @@ class AgentsViewAdapter:
             "recent_sessions": recent_sessions,
         }
 
+    # ======================== 核心业务双通道调度 (P1-AV-1) ========================
+
     def list_sessions(
         self,
         *,
@@ -178,10 +190,47 @@ class AgentsViewAdapter:
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """有界分页查询会话列表 (返回权威 Session DTO)。"""
+        """查询会话列表 (主路径: CLI Transport; 回退: SQLite-RO)。"""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
 
+        # 1. 优先尝试官方 CLI Transport (P1-AV-1)
+        if self._cli_available() and offset == 0:
+            try:
+                cmd = [
+                    str(self.cli_path),
+                    "session",
+                    "list",
+                    "--limit",
+                    str(limit),
+                    "--include-one-shot",
+                    "--include-automated",
+                    "--json",
+                ]
+                if agent and agent.strip() and agent.strip().lower() != "all":
+                    cmd.extend(["--agent", agent.strip()])
+                if project and project.strip() and project.strip().lower() != "all":
+                    cmd.extend(["--project", project.strip()])
+
+                res = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=2.5, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    raw = json.loads(res.stdout)
+                    sessions_raw = raw.get("sessions", [])
+                    total = raw.get("total", len(sessions_raw))
+                    sessions = [_normalize_cli_session(s) for s in sessions_raw]
+                    return {
+                        "sessions": sessions,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": len(sessions) < total,
+                    }
+            except Exception:
+                pass  # CLI 异常或超时，透明回退至只读 SQLite
+
+        # 2. 回退路径: SQLite-RO Transport
         conn = self._get_ro_connection()
         try:
             where_clauses = ["1=1"]
@@ -203,7 +252,6 @@ class AgentsViewAdapter:
                 params.extend([kw, kw, kw])
 
             where_str = " AND ".join(where_clauses)
-
             total = conn.execute(
                 f"SELECT COUNT(*) c FROM sessions WHERE {where_str}", tuple(params)
             ).fetchone()["c"]
@@ -230,7 +278,21 @@ class AgentsViewAdapter:
         }
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        """查询单场会话元数据详情 (权威 Session DTO)。"""
+        """查询单场会话详情 (主路径: CLI Transport; 回退: SQLite-RO)。"""
+        # 1. 优先尝试官方 CLI Transport (P1-AV-1)
+        if self._cli_available():
+            try:
+                cmd = [str(self.cli_path), "session", "get", session_id, "--json"]
+                res = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=2.0, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    raw = json.loads(res.stdout)
+                    return _normalize_cli_session(raw)
+            except Exception:
+                pass
+
+        # 2. 回退路径: SQLite-RO
         conn = self._get_ro_connection()
         try:
             row = conn.execute(
@@ -246,20 +308,56 @@ class AgentsViewAdapter:
     def get_messages(
         self, session_id: str, from_ordinal: int = 0, limit: int = 50
     ) -> dict[str, Any]:
-        """
-        有界分页查询会话消息流 (P1-AV-3 & P2-2).
-        算法：查询 limit + 1 条，精确判定 has_more 与 next_ordinal。
-        """
+        """查询会话消息流 (主路径: CLI Transport; 回退: SQLite-RO)。"""
         limit = max(1, min(limit, 100))
         from_ordinal = max(0, from_ordinal)
 
+        # 1. 优先尝试官方 CLI Transport (P1-AV-1)
+        if self._cli_available():
+            try:
+                cmd = [
+                    str(self.cli_path),
+                    "session",
+                    "messages",
+                    session_id,
+                    "--from",
+                    str(from_ordinal),
+                    "--limit",
+                    str(limit),
+                    "--json",
+                ]
+                res = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=2.5, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    raw = json.loads(res.stdout)
+                    raw_msgs = raw.get("messages", [])
+                    messages = [_normalize_cli_message(m) for m in raw_msgs]
+                    next_ord = (
+                        messages[-1]["ordinal"] + 1 if messages else from_ordinal
+                    )
+                    # CLI 若未提供 total，则通过简单探测判断
+                    total = raw.get("total") or (from_ordinal + len(messages))
+                    has_more = len(messages) >= limit
+                    return {
+                        "session_id": session_id,
+                        "messages": messages,
+                        "from_ordinal": from_ordinal,
+                        "limit": limit,
+                        "total": total,
+                        "next_ordinal": next_ord,
+                        "has_more": has_more,
+                    }
+            except Exception:
+                pass
+
+        # 2. 回退路径: SQLite-RO (使用 LIMIT limit + 1 精确探测 has_more, Sol P2-2)
         conn = self._get_ro_connection()
         try:
             total = conn.execute(
                 "SELECT COUNT(*) c FROM messages WHERE session_id = ?", (session_id,)
             ).fetchone()["c"]
 
-            # 查 limit + 1 条以精准判断是否有下一页 (Sol P2-2)
             rows = conn.execute(
                 """
                 SELECT ordinal, role, content, timestamp, model, thinking_text
@@ -294,8 +392,29 @@ class AgentsViewAdapter:
     def get_tool_calls(
         self, session_id: str, limit: int = 100
     ) -> dict[str, Any]:
-        """查询指定会话的工具调用明细 (Sol P2-1: 有界查询)。"""
+        """查询指定会话的工具调用明细 (主路径: CLI Transport; 回退: SQLite-RO)。"""
         limit = max(1, min(limit, 200))
+
+        # 1. 优先尝试官方 CLI Transport (P1-AV-1)
+        if self._cli_available():
+            try:
+                cmd = [str(self.cli_path), "session", "tool-calls", session_id, "--json"]
+                res = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=2.5, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    raw = json.loads(res.stdout)
+                    calls_raw = raw if isinstance(raw, list) else raw.get("tool_calls", [])
+                    calls = [_normalize_cli_tool_call(tc) for tc in calls_raw[:limit]]
+                    return {
+                        "session_id": session_id,
+                        "tool_calls": calls,
+                        "count": len(calls),
+                    }
+            except Exception:
+                pass
+
+        # 2. 回退路径: SQLite-RO (有界 LIMIT)
         conn = self._get_ro_connection()
         try:
             rows = conn.execute(
@@ -316,10 +435,9 @@ class AgentsViewAdapter:
         return {"session_id": session_id, "tool_calls": calls, "count": len(calls)}
 
 
-# ======================== 权威 Session API DTO 映射 (P1-AV-1) ========================
+# ======================== 权威 Session API DTO 规范化映射 (P1-AV-1) ========================
 
 def _format_session_dto(r) -> dict[str, Any]:
-    """标准化映射为官方 Session DTO。"""
     keys = r.keys()
     title = r["display_name"] or r["session_name"] or r["first_message"] or "未命名会话"
     clean_title = title.splitlines()[0][:120].strip() if title else "未命名会话"
@@ -340,7 +458,6 @@ def _format_session_dto(r) -> dict[str, Any]:
 
 
 def _format_message_dto(r) -> dict[str, Any]:
-    """标准化映射为官方 Message DTO。"""
     keys = r.keys()
     ts = r["timestamp"] if "timestamp" in keys else None
     return {
@@ -348,14 +465,13 @@ def _format_message_dto(r) -> dict[str, Any]:
         "role": r["role"],
         "content": r["content"] or "",
         "timestamp": ts,
-        "created_at": ts,  # 对齐 Contract
+        "created_at": ts,
         "model": r["model"] if "model" in keys else "",
         "thinking_text": r["thinking_text"] if "thinking_text" in keys else "",
     }
 
 
 def _format_tool_call_dto(r) -> dict[str, Any]:
-    """标准化映射为官方 ToolCall DTO。"""
     keys = r.keys()
     input_str = r["input_json"] if "input_json" in keys else None
     parsed_args = None
@@ -374,4 +490,50 @@ def _format_tool_call_dto(r) -> dict[str, Any]:
         "input_json": input_str,
         "result_summary": result_raw,
         "result_content": result_raw,
+    }
+
+
+def _normalize_cli_session(s: dict[str, Any]) -> dict[str, Any]:
+    title = s.get("display_name") or s.get("session_name") or s.get("first_message") or "未命名会话"
+    clean_title = title.splitlines()[0][:120].strip() if title else "未命名会话"
+    return {
+        "id": s.get("id"),
+        "project": s.get("project", "default"),
+        "machine": s.get("machine", "local"),
+        "agent": s.get("agent", "unknown"),
+        "title": clean_title,
+        "first_message": (s.get("first_message") or "")[:300],
+        "started_at": s.get("started_at"),
+        "ended_at": s.get("ended_at"),
+        "message_count": s.get("message_count", 0),
+        "user_message_count": s.get("user_message_count", 0),
+        "cwd": s.get("cwd"),
+        "git_branch": s.get("git_branch"),
+    }
+
+
+def _normalize_cli_message(m: dict[str, Any]) -> dict[str, Any]:
+    ts = m.get("timestamp") or m.get("created_at")
+    return {
+        "ordinal": m.get("ordinal", 0),
+        "role": m.get("role", "unknown"),
+        "content": m.get("content", ""),
+        "timestamp": ts,
+        "created_at": ts,
+        "model": m.get("model", ""),
+        "thinking_text": m.get("thinking_text", ""),
+    }
+
+
+def _normalize_cli_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
+    inp = tc.get("input_json") or tc.get("arguments")
+    res = tc.get("result_content") or tc.get("result_summary") or ""
+    return {
+        "id": str(tc.get("id", "")),
+        "tool_name": tc.get("tool_name", "unknown"),
+        "category": tc.get("category", "tool"),
+        "arguments": inp,
+        "input_json": json.dumps(inp) if isinstance(inp, dict) else str(inp or ""),
+        "result_summary": str(res)[:2000],
+        "result_content": str(res)[:2000],
     }

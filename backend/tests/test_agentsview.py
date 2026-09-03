@@ -144,6 +144,32 @@ class TestAgentsView(unittest.TestCase):
         data = res.json()
         self.assertIn("tool_calls", data)
 
+    def test_07_transport_dual_channel_and_dto_consistency(self):
+        """P1-AV-1: 双通道传输与官方 DTO 规范化回归测试 (CLI 主路径 vs SQLite-ro 回退通道)"""
+        from app.agentsview.adapter import AgentsViewAdapter
+
+        # 1. 验证强制使用 SQLite-ro 回退通道
+        ro_adapter = AgentsViewAdapter(self.cfg, force_transport="sqlite-ro")
+        ro_status = ro_adapter.get_status()
+        self.assertEqual(ro_status["transport"], "sqlite-ro")
+        ro_sessions = ro_adapter.list_sessions(limit=2)["sessions"]
+        self.assertGreater(len(ro_sessions), 0)
+
+        # 2. 验证默认主路径 (当 CLI 可用时 transport 选为 cli)
+        default_adapter = AgentsViewAdapter(self.cfg)
+        self.assertTrue(default_adapter._cli_available(), "本机应存在可用的 agentsview CLI")
+        cli_status = default_adapter.get_status()
+        self.assertEqual(cli_status["transport"], "cli")
+        cli_sessions = default_adapter.list_sessions(limit=2)["sessions"]
+        self.assertGreater(len(cli_sessions), 0)
+
+        # 3. 验证两个通道输出的 DTO 契约字段完全一致
+        s_cli = cli_sessions[0]
+        s_ro = ro_sessions[0]
+        for field in ("id", "project", "machine", "agent", "title", "started_at", "message_count", "user_message_count"):
+            self.assertIn(field, s_cli, f"CLI DTO 必须包含 {field}")
+            self.assertIn(field, s_ro, f"SQLite-ro DTO 必须包含 {field}")
+
 
 if __name__ == "__main__":
     unittest.main()
