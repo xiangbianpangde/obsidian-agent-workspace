@@ -24,9 +24,15 @@ class AppConfig:
     debounce_ms: int = 500
     raw: dict = field(default_factory=dict)
 
+    def __post_init__(self):
+        # 统一规范化路径，避免 macOS /var -> /private/var 前缀不一致
+        self.vault_path = self.vault_path.resolve()
+        self.templates_dir = self.templates_dir.resolve()
+        self.database_path = self.database_path.resolve()
+
     @property
     def vault_root(self) -> Path:
-        return self.vault_path.resolve()
+        return self.vault_path
 
 
 def load_config(path: Path | str | None = None) -> AppConfig:

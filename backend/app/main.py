@@ -13,7 +13,7 @@ from .api import tags as tags_api
 from .api import templates as templates_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
-from .state import init_state
+from .state import get_cfg, init_state
 
 observer = None
 
@@ -21,8 +21,11 @@ observer = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global observer
-    cfg = load_config()
-    init_state(cfg)
+    try:
+        cfg = get_cfg()
+    except Exception:
+        cfg = load_config()
+        init_state(cfg)
     watchdog_conn = None
     if cfg.watchdog_enabled:
         from .watch.watcher import ScanCoordinator, start_watcher

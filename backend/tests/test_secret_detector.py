@@ -43,6 +43,12 @@ class TestSecretDetector(unittest.TestCase):
         hit, _ = looks_like_secret('api_key = "verysecret1234567890"')
         self.assertTrue(hit)
 
+    def test_large_file_beyond_256k_hits(self):
+        # P1-M5-NEW-1: 验证密钥位于 256k 之后仍能被全量检出
+        large_content = "x" * 300_000 + "\nOPENAI_API_KEY=plainlongsecret"
+        hit, note = looks_like_secret(large_content)
+        self.assertTrue(hit, f"should hit beyond 256k (got {note})")
+
 
 if __name__ == "__main__":
     unittest.main()

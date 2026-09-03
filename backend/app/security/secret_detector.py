@@ -23,11 +23,10 @@ _PATTERNS: list[re.Pattern] = [
 ]
 
 
-def looks_like_secret(content: str, max_chars: int = 256_000) -> tuple[bool, str]:
-    """Return (is_secret, matched_pattern_description). Content is scanned, not stored."""
-    sample = content[:max_chars]
+def looks_like_secret(content: str) -> tuple[bool, str]:
+    """Return (is_secret, matched_pattern_description). Content is scanned in full, not stored (P1-M5-NEW-1)."""
     for i, pat in enumerate(_PATTERNS):
-        m = pat.search(sample)
+        m = pat.search(content)
         if m:
             return True, f"pattern#{i}"
     return False, ""

@@ -37,7 +37,7 @@
 ## 3. 架构与技术栈
 
 ```
-前端 React+Vite+Tailwind+CodeMirror 6+remark/rehype+Zustand
+前端 现代化轻量自包含 SPA (Tailwind CSS CDN + Marked.js + Highlight.js + Lucide Icons)
          │ REST (本地 127.0.0.1)
 后端 FastAPI + SQLite(watchdog 增量) + python-frontmatter
          │
