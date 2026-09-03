@@ -129,12 +129,23 @@ def resolve_for_create(cfg: AppConfig, relative_or_abs: str) -> Path:
     return resolve_for_write(cfg, relative_or_abs)
 
 
-def resolve_for_template_read(cfg: AppConfig, relative_or_abs: str) -> Path:
-    """模板读取边界：必须在 templates_dir 内，且是 .md 文件，只读。"""
+def resolve_for_template_read_snapshot(cfg: AppConfig, relative_or_abs: str):
+    """P1-M4-2: 模板安全读取快照：canonical resolve → templates_dir 内 → .md → 单次 read_bytes
+    → 同一份 bytes 跑 looks_like_secret 检测（命中 400）→ 返回 (full, raw_bytes)。"""
     full = resolve_in_vault(cfg, relative_or_abs)
     _reject_non_note(full)
     if not is_within(cfg.templates_dir, full.absolute()):
         raise PathError(f"template must be located inside templates_dir: {relative_or_abs}")
     if not full.is_file():
         raise PathError(f"template not found: {relative_or_abs}")
+    raw_bytes = full.read_bytes()
+    hit, note = looks_like_secret(raw_bytes.decode("utf-8", errors="replace"))
+    if hit:
+        raise PathError(f"template blocked by secret guard ({note}): {full.name}")
+    return full, raw_bytes
+
+
+def resolve_for_template_read(cfg: AppConfig, relative_or_abs: str) -> Path:
+    """模板读取边界：必须在 templates_dir 内，且是 .md 文件，只读。"""
+    full, _ = resolve_for_template_read_snapshot(cfg, relative_or_abs)
     return full

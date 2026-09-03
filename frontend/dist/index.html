@@ -362,8 +362,20 @@
       return await res.json();
     }
 
-    // 格式化维基链接
+    // 格式化维基链接与 .base 嵌入降级 (v0.2 §5)
     function renderWikiLinks(html) {
+      // 1. .base 嵌入降级: ![[...base#锚点]]
+      html = html.replace(/!\[\[([^\]]+\.base(?:#[^\]|]+)?)(?:\|([^\]]+))?\]\]/g, (match, baseTarget) => {
+        return `<div class="bg-[#252233] border border-purple-900/60 p-2.5 rounded my-2 text-xs flex items-center justify-between text-purple-200 shadow-sm">
+                  <div class="flex items-center space-x-2">
+                    <span class="px-1.5 py-0.5 rounded bg-purple-950 text-purple-400 font-mono text-[10px] border border-purple-800/40">Obsidian Base Embed</span>
+                    <span class="font-mono text-slate-300 text-[11px]">${baseTarget.trim()}</span>
+                  </div>
+                  <span class="text-[10px] text-purple-400 bg-purple-900/30 px-2 py-0.5 rounded border border-purple-800/30">Open in Obsidian</span>
+                </div>`;
+      });
+
+      // 2. 普通维基链接: [[Note]] 或 [[Note|Alias]]
       return html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, note, alias) => {
         const text = alias || note;
         return `<a href="javascript:void(0)" onclick="openByTitle('${note.trim()}')" class="wikilink">[[${text}]]</a>`;
