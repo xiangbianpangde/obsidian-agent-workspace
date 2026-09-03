@@ -266,10 +266,17 @@ def get_asset(
     path: str = Query(..., description="图片或附件路径"),
     note_path: str | None = Query(None, description="引用该资源的笔记相对路径"),
 ):
-    """安全提供 Vault 内图片与附件二进制流，支持根据当前笔记上下文相对解析。"""
+    """安全提供 Vault 内图片与附件二进制流，支持根据当前笔记上下文相对解析 (P1-NEW-2 加固)。"""
     try:
         full = resolve_for_asset_read(get_cfg(), path, note_path)
     except PathError as e:
         raise HTTPException(400, str(e))
     media_type, _ = mimetypes.guess_type(str(full))
-    return FileResponse(full, media_type=media_type or "application/octet-stream")
+    # P1-NEW-2: 防止 MIME 混淆嗅探并限制主动脚本执行
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'",
+    }
+    return FileResponse(
+        full, media_type=media_type or "application/octet-stream", headers=headers
+    )

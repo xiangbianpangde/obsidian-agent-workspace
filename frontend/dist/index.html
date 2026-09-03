@@ -15,6 +15,8 @@
   <!-- KaTeX LaTeX 数学公式渲染库 -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <!-- DOMPurify 工业级 XSS 防护库 (P1-NEW-1) -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -436,25 +438,50 @@
       return await res.json();
     }
 
-    // 格式化 LaTeX 数学公式（KaTeX 渲染）
+    // HTML 安全转义 (P1-NEW-1)
+    function escapeHtml(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // 格式化 LaTeX 数学公式（KaTeX 渲染，附带代码块跳过保护）
     function renderLatex(text) {
       if (!window.katex) return text;
+      // 保护 code 块与 inline code，不把其中的 $ 误认作数学公式 (Sol P2)
+      const codeTokens = [];
+      text = text.replace(/(```[\s\S]*?```|`[^`\n]+`)/g, (match) => {
+        const id = `%%MATH_TOKEN_${codeTokens.length}%%`;
+        codeTokens.push(match);
+        return id;
+      });
+
       // 1. 块级公式 $$...$$
       text = text.replace(/\$\$([\s\S]+?)\$\$/g, (match, expr) => {
         try {
-          return katex.renderToString(expr.trim(), { displayMode: true, throwOnError: false });
+          return katex.renderToString(expr.trim(), { displayMode: true, throwOnError: false, trust: false });
         } catch(e) {
-          return `<div class="text-rose-400 font-mono text-xs my-2">${match}</div>`;
+          return `<div class="text-rose-400 font-mono text-xs my-2">${escapeHtml(match)}</div>`;
         }
       });
-      // 2. 行内公式 $...$ (排除转义和紧邻空白字符)
+      // 2. 行内公式 $...$ (排除转义)
       text = text.replace(/(^|[^\\])\$([^\$\n]+?)\$/g, (match, prefix, expr) => {
         try {
-          return prefix + katex.renderToString(expr.trim(), { displayMode: false, throwOnError: false });
+          return prefix + katex.renderToString(expr.trim(), { displayMode: false, throwOnError: false, trust: false });
         } catch(e) {
           return match;
         }
       });
+
+      // 还原代码块
+      codeTokens.forEach((token, idx) => {
+        text = text.replace(`%%MATH_TOKEN_${idx}%%`, () => token);
+      });
+
       return text;
     }
 
@@ -662,35 +689,44 @@
       }
     }
 
-    // 渲染【笔记属性 (Properties)】面板（参照用户截图）
+    // 渲染【笔记属性 (Properties)】面板 (P1-NEW-1: 严密 XSS 转义; Sol P2: 无状态与自定义状态精准回显)
     function renderNoteProperties(data) {
       el.propsGrid.innerHTML = '';
       el.propsPanel.classList.remove('hidden');
 
       const meta = data.metadata || {};
-      const st = Array.isArray(data.statuses) && data.statuses.length ? data.statuses[0] : (data.statuses || '未整理');
+      let st = '';
+      if (Array.isArray(data.statuses) && data.statuses.length > 0) {
+        st = data.statuses[0];
+      } else if (typeof data.statuses === 'string' && data.statuses) {
+        st = data.statuses;
+      } else {
+        st = '无状态';
+      }
       state.currentStatus = st;
 
       // 1. 状态 (带快速下拉)
       const stCard = document.createElement('div');
       stCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between';
+      
+      const standardStatuses = ['无状态', '未整理', '进行中', '已完成', '已整理', '未开始'];
+      let optionsHtml = standardStatuses.map(opt => `<option value="${escapeHtml(opt)}" ${st === opt ? 'selected' : ''}>${escapeHtml(opt)}</option>`).join('');
+      if (!standardStatuses.includes(st) && st) {
+        optionsHtml += `<option value="${escapeHtml(st)}" selected>${escapeHtml(st)} (自定义)</option>`;
+      }
+
       stCard.innerHTML = `
         <div class="flex items-center text-[11px] text-slate-400 mb-1">
           <i data-lucide="list-checks" class="w-3 h-3 mr-1 text-purple-400"></i>状态
         </div>
         <div class="flex items-center space-x-1">
           <select id="props-select-status" class="w-full bg-[#1e1e24] text-xs text-purple-200 border border-purple-800/60 rounded px-1.5 py-0.5 focus:outline-none">
-            <option value="未整理" ${st==='未整理'?'selected':''}>未整理</option>
-            <option value="进行中" ${st==='进行中'?'selected':''}>进行中</option>
-            <option value="已完成" ${st==='已完成'?'selected':''}>已完成</option>
-            <option value="已整理" ${st==='已整理'?'selected':''}>已整理</option>
-            <option value="未开始" ${st==='未开始'?'selected':''}>未开始</option>
+            ${optionsHtml}
           </select>
         </div>
       `;
       el.propsGrid.appendChild(stCard);
 
-      // 状态下拉切换事件绑定
       const selectEl = stCard.querySelector('#props-select-status');
       selectEl.addEventListener('change', async (e) => {
         const newStatus = e.target.value;
@@ -705,7 +741,7 @@
             })
           });
           await openFile(state.currentPath);
-          loadStatusesCenter(); // 刷新状态中心
+          loadStatusesCenter();
           loadTags();
         } catch(err) {
           alert('修改状态失败: ' + err.message);
@@ -713,11 +749,11 @@
         }
       });
 
-      // 2. 标签 (tags) 胶囊列表
+      // 2. 标签 (tags) 胶囊列表 (严格 escapeHtml)
       if (data.tags && data.tags.length > 0) {
         const tagCard = document.createElement('div');
         tagCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between col-span-1 sm:col-span-2';
-        const pills = data.tags.map(t => `<span class="bg-[#363446] text-purple-200 px-1.5 py-0.5 rounded text-[11px] border border-purple-800/40">#${t}</span>`).join(' ');
+        const pills = data.tags.map(t => `<span class="bg-[#363446] text-purple-200 px-1.5 py-0.5 rounded text-[11px] border border-purple-800/40">#${escapeHtml(t)}</span>`).join(' ');
         tagCard.innerHTML = `
           <div class="flex items-center text-[11px] text-slate-400 mb-1">
             <i data-lucide="tag" class="w-3 h-3 mr-1 text-purple-400"></i>tags
@@ -727,7 +763,7 @@
         el.propsGrid.appendChild(tagCard);
       }
 
-      // 3. 其它属性（时间、上课内容等）
+      // 3. 其它属性 (严格 escapeHtml)
       Object.entries(meta).forEach(([k, v]) => {
         if (k === '状态' || k === 'status' || k === 'tags') return;
         const card = document.createElement('div');
@@ -735,14 +771,14 @@
         
         let valHtml = '';
         if (Array.isArray(v)) {
-          valHtml = v.map(item => `<span class="bg-[#33333f] text-slate-200 px-1.5 py-0.5 rounded text-[10px] mr-1">${item}</span>`).join('');
+          valHtml = v.map(item => `<span class="bg-[#33333f] text-slate-200 px-1.5 py-0.5 rounded text-[10px] mr-1">${escapeHtml(item)}</span>`).join('');
         } else {
-          valHtml = `<span class="font-mono text-slate-200 truncate text-[11px]">${v}</span>`;
+          valHtml = `<span class="font-mono text-slate-200 truncate text-[11px]">${escapeHtml(v)}</span>`;
         }
 
         card.innerHTML = `
           <div class="flex items-center text-[11px] text-slate-400 mb-1 truncate">
-            <i data-lucide="hash" class="w-3 h-3 mr-1 text-slate-500"></i>${k}
+            <i data-lucide="hash" class="w-3 h-3 mr-1 text-slate-500"></i>${escapeHtml(k)}
           </div>
           <div class="truncate">${valHtml}</div>
         `;
@@ -793,13 +829,25 @@
       }
       
       // 先进行 LaTeX 公式转换 (KaTeX)
-      let precessed = renderLatex(content);
+      let processed = renderLatex(content);
       
       // 再通过 Marked 解析 Markdown
-      let html = marked.parse(precessed);
+      let html = marked.parse(processed);
 
-      // 最后进行静态资源/图片、维基链接与 .base 嵌入替换
+      // 进行静态资源/图片、维基链接与 .base 嵌入替换
       html = renderSpecialEmbeds(html);
+
+      // P1-NEW-1: 终极 DOMPurify 工业级清洗，杜绝任何 Stored XSS 风险
+      if (window.DOMPurify) {
+        html = DOMPurify.sanitize(html, {
+          ADD_TAGS: [
+            'math', 'annotation', 'semantics', 'mrow', 'mi', 'mn', 'mo',
+            'msup', 'msub', 'mfrac', 'msqrt', 'mspace', 'mtext', 'mover',
+            'munder', 'munderover', 'mtable', 'mtr', 'mtd', 'mpadded'
+          ],
+          ADD_ATTR: ['aria-hidden', 'encoding', 'style', 'display', 'target', 'loading']
+        });
+      }
 
       el.preview.innerHTML = html;
     }
@@ -929,7 +977,7 @@
       }
     }
 
-    // 选中某个工作流状态，展示属于该状态的笔记列表
+    // 选中某个工作流状态，展示属于该状态的笔记列表 (P1-NEW-1: 严密 escapeHtml)
     async function selectStatus(statusName) {
       state.activeStatus = statusName;
       el.activeStatusTitle.textContent = `[${statusName}] 笔记列表`;
@@ -948,18 +996,22 @@
         data.files.forEach(f => {
           const item = document.createElement('div');
           item.className = 'p-1.5 bg-[#252530] hover:bg-purple-950/60 rounded border border-[#333342] cursor-pointer flex flex-col justify-between';
+          const titleText = escapeHtml(f.title || f.filename);
+          const folderText = escapeHtml(f.folder || '根目录');
+          const tagBadge = f.tags && f.tags.length ? `<span class="text-purple-400 bg-purple-950 px-1 rounded">#${escapeHtml(f.tags[0])}</span>` : '';
+          
           item.innerHTML = `
-            <div class="text-slate-200 font-medium truncate text-xs">${f.title || f.filename}</div>
+            <div class="text-slate-200 font-medium truncate text-xs">${titleText}</div>
             <div class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
-              <span class="truncate max-w-[140px]">${f.folder || '根目录'}</span>
-              ${f.tags && f.tags.length ? `<span class="text-purple-400 bg-purple-950 px-1 rounded">#${f.tags[0]}</span>` : ''}
+              <span class="truncate max-w-[140px]">${folderText}</span>
+              ${tagBadge}
             </div>
           `;
           item.addEventListener('click', () => openFile(f.path));
           el.statusFilesList.appendChild(item);
         });
       } catch (err) {
-        el.statusFilesList.innerHTML = `<div class="text-rose-400 text-xs py-4">查询失败: ${err.message}</div>`;
+        el.statusFilesList.innerHTML = `<div class="text-rose-400 text-xs py-4">查询失败: ${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -972,14 +1024,14 @@
           const pill = document.createElement('button');
           pill.className = 'text-xs bg-[#282834] hover:bg-purple-900/60 text-slate-300 hover:text-purple-200 px-2.5 py-1 rounded-full border border-[#373748] flex items-center transition';
           pill.innerHTML = `
-            <span>#${t.tag}</span>
+            <span>#${escapeHtml(t.tag)}</span>
             <span class="ml-1 text-[10px] text-slate-500 font-mono">(${t.count})</span>
           `;
           pill.addEventListener('click', () => selectTag(t.tag));
           el.tagsCloud.appendChild(pill);
         });
       } catch (err) {
-        el.tagsCloud.innerHTML = `<div class="text-rose-400 text-xs">加载标签失败: ${err.message}</div>`;
+        el.tagsCloud.innerHTML = `<div class="text-rose-400 text-xs">加载标签失败: ${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -1007,15 +1059,15 @@
             const row = document.createElement('div');
             row.className = 'p-1.5 bg-[#1e1e24] hover:bg-purple-950/60 rounded border border-[#2e2e3a] cursor-pointer flex items-center justify-between';
             row.innerHTML = `
-              <div class="truncate text-slate-200 font-medium">${file.title || file.filename}</div>
-              <span class="text-[9px] text-purple-400 bg-purple-900/30 px-1 rounded shrink-0 ml-1">${stName}</span>
+              <div class="truncate text-slate-200 font-medium">${escapeHtml(file.title || file.filename)}</div>
+              <span class="text-[9px] text-purple-400 bg-purple-900/30 px-1 rounded shrink-0 ml-1">${escapeHtml(stName)}</span>
             `;
             row.addEventListener('click', () => openFile(file.path));
             el.tagFilesList.appendChild(row);
           });
         });
       } catch (err) {
-        el.tagFilesList.innerHTML = `<div class="text-rose-400 text-[10px]">加载标签失败: ${err.message}</div>`;
+        el.tagFilesList.innerHTML = `<div class="text-rose-400 text-[10px]">加载标签失败: ${escapeHtml(err.message)}</div>`;
       }
     }
 

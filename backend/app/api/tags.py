@@ -219,16 +219,26 @@ def files_by_status(status: str = Query(...), conn=Depends(get_conn)):
         if status in cur_statuses:
             matched_ids.append(f)
 
-    # 查询这些笔记的 tags
+    # 单次批量查询所有命中笔记的 tags (消除 N+1，Sol P2)
+    matched_fids = [f["id"] for f in matched_ids]
+    tags_map: dict[int, list[str]] = {}
+    if matched_fids:
+        placeholders = ",".join("?" for _ in matched_fids)
+        rows = conn.execute(
+            f"""
+            SELECT ft.file_id, t.name
+            FROM file_tags ft
+            JOIN tags t ON t.id = ft.tag_id
+            WHERE ft.file_id IN ({placeholders})
+            ORDER BY t.name
+            """,
+            tuple(matched_fids),
+        ).fetchall()
+        for r in rows:
+            tags_map.setdefault(r["file_id"], []).append(r["name"])
+
     results = []
     for f in matched_ids:
-        tags = [
-            r["name"]
-            for r in conn.execute(
-                "SELECT t.name FROM tags t JOIN file_tags ft ON ft.tag_id=t.id WHERE ft.file_id=?",
-                (f["id"],),
-            )
-        ]
         results.append(
             {
                 "path": f["path"],
@@ -237,7 +247,7 @@ def files_by_status(status: str = Query(...), conn=Depends(get_conn)):
                 "folder": f["folder"],
                 "modified_at": f["modified_at"],
                 "hash": f["hash"],
-                "tags": tags,
+                "tags": tags_map.get(f["id"], []),
             }
         )
 

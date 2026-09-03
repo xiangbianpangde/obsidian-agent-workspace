@@ -145,8 +145,9 @@ def resolve_for_template_read_snapshot(cfg: AppConfig, relative_or_abs: str):
     return full, raw_bytes
 
 
+# P1-NEW-2: 严禁 SVG（同源主动可执行脚本风险）与 PDF（独立附件），仅允许纯被动位图
 _ALLOWED_ASSET_EXTS = {
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".pdf", ".ico"
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico"
 }
 
 
@@ -169,21 +170,27 @@ def resolve_for_asset_read(cfg: AppConfig, asset_path: str, note_path: str | Non
         if is_within(vault_root, candidate) and candidate.is_file():
             cand = candidate
 
-    # 3. 若为纯文件名（Obsidian 常见附件），尝试在 vault 内精确查找同名资源
+    # 3. 若为纯文件名（Obsidian 常见附件），精准 basename 匹配，重名歧义时报错避免猜测 (Sol P2)
     if cand is None and "/" not in asset_str and "\\" not in asset_str:
-        matches = list(vault_root.glob(f"**/{asset_str}"))
-        for m in matches:
-            m_res = m.resolve(strict=False)
-            if is_within(vault_root, m_res) and m_res.is_file():
-                cand = m_res
-                break
+        exact_matches = []
+        for p in vault_root.rglob("*"):
+            if p.is_file() and p.name == asset_str:
+                resolved_p = p.resolve(strict=False)
+                if is_within(vault_root, resolved_p):
+                    rel = resolved_p.relative_to(vault_root).as_posix()
+                    if not matches_scan_exclude(vault_root, rel, cfg.scan_exclude):
+                        exact_matches.append(resolved_p)
+        if len(exact_matches) == 1:
+            cand = exact_matches[0]
+        elif len(exact_matches) > 1:
+            raise PathError(f"ambiguous asset name ({len(exact_matches)} matches found): please specify relative path")
 
     if cand is None or not cand.is_file():
         raise PathError(f"asset not found: {asset_str}")
 
-    # 4. 扩展名白名单校验
+    # 4. 扩展名白名单校验 (严格禁止 SVG)
     if cand.suffix.lower() not in _ALLOWED_ASSET_EXTS:
-        raise PathError(f"asset extension not allowed: {cand.suffix}")
+        raise PathError(f"asset extension not allowed: {cand.suffix} (SVG and active formats prohibited)")
 
     # 5. 排除区校验
     canonical_rel = cand.relative_to(vault_root).as_posix()
