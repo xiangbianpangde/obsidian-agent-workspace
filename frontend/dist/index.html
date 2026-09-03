@@ -15,8 +15,8 @@
   <!-- KaTeX LaTeX 数学公式渲染库 -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <!-- DOMPurify 工业级 XSS 防护库 (P1-NEW-1) -->
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
+  <!-- DOMPurify 工业级 XSS 防护库 (升级至安全版本，P1-NEW-1) -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -500,16 +500,16 @@
                 </div>`;
       });
 
-      // 2. Obsidian 维基格式图片: ![[image.png]] 或 ![[image.png|300]]
+      // 2. Obsidian 维基格式图片: ![[image.png]] 或 ![[image.png|300]] (无内联 onerror, P1-NEW-1)
       html = html.replace(/!\[\[([^\]|]+\.(?:png|jpg|jpeg|webp|gif|svg|bmp))(?:\s*\|\s*(\d+))?\]\]/gi, (match, imgPath, width) => {
         let cleanImg = imgPath.trim();
         try { cleanImg = decodeURIComponent(cleanImg); } catch(e) {}
         const url = `/api/asset?path=${encodeURIComponent(cleanImg)}&note_path=${encodeURIComponent(currentNote)}`;
         const wStyle = width ? `style="width:${width}px; max-width:100%;"` : '';
-        return `<img src="${url}" alt="${cleanImg}" loading="lazy" ${wStyle} class="block my-2 rounded max-h-96 shadow" onerror="this.alt='[无法加载图片: '+this.alt+']'; this.className='text-xs text-rose-400 border border-dashed border-rose-800 p-2 my-1 rounded block';" />`;
+        return `<img src="${url}" alt="${escapeHtml(cleanImg)}" loading="lazy" ${wStyle} class="block my-2 rounded max-h-96 shadow" />`;
       });
 
-      // 3. 标准 Markdown 图片: 将相对路径重写为 /api/asset (防止 Marked 双重 URL 转义)
+      // 3. 标准 Markdown 图片: 将相对路径重写为 /api/asset (无内联 onerror, P1-NEW-1)
       html = html.replace(/<img\s+([^>]*?)src=["']([^"']+)["']([^>]*?)>/gi, (match, before, src, after) => {
         if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:') || src.startsWith('/api/asset')) {
           return match;
@@ -517,13 +517,13 @@
         let cleanSrc = src;
         try { cleanSrc = decodeURIComponent(src); } catch(e) {}
         const safeSrc = `/api/asset?path=${encodeURIComponent(cleanSrc)}&note_path=${encodeURIComponent(currentNote)}`;
-        return `<img ${before}src="${safeSrc}"${after} loading="lazy" class="rounded max-h-96 my-2 shadow block" onerror="this.alt='[图片加载失败: '+this.src+']';" />`;
+        return `<img ${before}src="${safeSrc}"${after} loading="lazy" class="rounded max-h-96 my-2 shadow block" />`;
       });
 
-      // 4. 普通维基链接: [[Note]] 或 [[Note|Alias]]
+      // 4. 普通维基链接: 采用 data-wikilink + 事件委托，彻底消除 javascript: 伪协议与 inline onclick (P1-NEW-1)
       html = html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, note, alias) => {
         const text = alias || note;
-        return `<a href="javascript:void(0)" onclick="openByTitle('${note.trim()}')" class="wikilink">[[${text}]]</a>`;
+        return `<span class="wikilink cursor-pointer select-none" data-wikilink="${escapeHtml(note.trim())}">[[${escapeHtml(text)}]]</span>`;
       });
 
       return html;
@@ -574,7 +574,7 @@
           dirHeader.innerHTML = `
             <i data-lucide="chevron-right" class="w-3.5 h-3.5 mr-1 text-slate-500 transition-transform duration-150"></i>
             <i data-lucide="folder" class="w-3.5 h-3.5 mr-1.5 text-purple-400/80"></i>
-            <span class="truncate font-medium">${item.name}</span>
+            <span class="truncate font-medium">${escapeHtml(item.name)}</span>
           `;
 
           const childrenContainer = document.createElement('div');
@@ -614,9 +614,9 @@
           fileEl.innerHTML = `
             <div class="flex items-center truncate mr-2">
               ${statusBadge}
-              <span class="truncate">${item.title || item.filename}</span>
+              <span class="truncate">${escapeHtml(item.title || item.filename)}</span>
             </div>
-            ${item.tags && item.tags.length ? `<span class="text-[10px] text-slate-500 bg-[#252530] px-1 rounded">#${item.tags[0]}</span>` : ''}
+            ${item.tags && item.tags.length ? `<span class="text-[10px] text-slate-500 bg-[#252530] px-1 rounded">#${escapeHtml(item.tags[0])}</span>` : ''}
           `;
 
           fileEl.addEventListener('click', () => openFile(item.path));
@@ -653,8 +653,8 @@
           const row = document.createElement('div');
           row.className = 'p-1.5 rounded hover:bg-[#282832] cursor-pointer text-xs flex flex-col';
           row.innerHTML = `
-            <div class="text-slate-200 font-medium truncate">${item.title || item.filename}</div>
-            <div class="text-[10px] text-slate-500 truncate">${item.path}</div>
+            <div class="text-slate-200 font-medium truncate">${escapeHtml(item.title || item.filename)}</div>
+            <div class="text-[10px] text-slate-500 truncate">${escapeHtml(item.path)}</div>
           `;
           row.addEventListener('click', () => openFile(item.path));
           list.appendChild(row);
@@ -837,20 +837,44 @@
       // 进行静态资源/图片、维基链接与 .base 嵌入替换
       html = renderSpecialEmbeds(html);
 
-      // P1-NEW-1: 终极 DOMPurify 工业级清洗，杜绝任何 Stored XSS 风险
-      if (window.DOMPurify) {
-        html = DOMPurify.sanitize(html, {
-          ADD_TAGS: [
-            'math', 'annotation', 'semantics', 'mrow', 'mi', 'mn', 'mo',
-            'msup', 'msub', 'mfrac', 'msqrt', 'mspace', 'mtext', 'mover',
-            'munder', 'munderover', 'mtable', 'mtr', 'mtd', 'mpadded'
-          ],
-          ADD_ATTR: ['aria-hidden', 'encoding', 'style', 'display', 'target', 'loading']
-        });
+      // P1-NEW-1: 终极 DOMPurify 工业级清洗，组件缺失时严格 Fail-Closed
+      if (!window.DOMPurify) {
+        el.preview.textContent = "安全警告：DOMPurify 清洗组件加载失败，为防止 XSS 风险已暂停渲染富文本。请检查网络。";
+        return;
       }
+
+      html = DOMPurify.sanitize(html, {
+        ADD_TAGS: [
+          'math', 'annotation', 'semantics', 'mrow', 'mi', 'mn', 'mo',
+          'msup', 'msub', 'mfrac', 'msqrt', 'mspace', 'mtext', 'mover',
+          'munder', 'munderover', 'mtable', 'mtr', 'mtd', 'mpadded'
+        ],
+        ADD_ATTR: ['aria-hidden', 'encoding', 'style', 'display', 'target', 'loading', 'data-wikilink']
+      });
 
       el.preview.innerHTML = html;
     }
+
+    // P1-NEW-1: 预览区事件委托（消除所有 inline onclick 与 inline onerror）
+    el.previewPane.addEventListener('click', (e) => {
+      const link = e.target.closest('[data-wikilink]');
+      if (link) {
+        e.preventDefault();
+        const note = link.getAttribute('data-wikilink');
+        if (note) openByTitle(note);
+      }
+    });
+
+    el.previewPane.addEventListener('error', (e) => {
+      if (e.target && e.target.tagName === 'IMG') {
+        const alt = e.target.getAttribute('alt') || '图片';
+        e.target.style.display = 'none';
+        const warn = document.createElement('div');
+        warn.className = 'text-xs text-rose-400 border border-dashed border-rose-800 p-2 my-1 rounded block';
+        warn.textContent = `[无法加载图片: ${alt}]`;
+        e.target.parentNode.insertBefore(warn, e.target);
+      }
+    }, true);
 
     el.editor.addEventListener('input', () => {
       if (state.viewMode !== 'edit') {
@@ -959,13 +983,14 @@
           else if (st.status === '未开始') badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700/50';
 
           card.className = `p-2 rounded border cursor-pointer hover:border-purple-500 transition flex flex-col justify-between ${badgeColor}`;
+          const topTagsHtml = st.top_tags.slice(0, 2).map(t => `#${escapeHtml(t.tag)}`).join(' ');
           card.innerHTML = `
             <div class="flex items-center justify-between">
-              <span class="font-bold text-xs truncate">${st.status}</span>
+              <span class="font-bold text-xs truncate">${escapeHtml(st.status)}</span>
               <span class="font-mono text-xs font-semibold px-1 rounded bg-black/30">${st.count}</span>
             </div>
             <div class="text-[10px] text-slate-400 mt-1 truncate">
-              ${st.top_tags.slice(0, 2).map(t => `#${t.tag}`).join(' ')}
+              ${topTagsHtml}
             </div>
           `;
           card.addEventListener('click', () => selectStatus(st.status));
