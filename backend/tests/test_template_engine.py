@@ -3,8 +3,14 @@
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from datetime import datetime
+from pathlib import Path
+
+_backend_dir = str(Path(__file__).resolve().parents[1])
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 
 from app.template.engine import (
     compute_target_path,
