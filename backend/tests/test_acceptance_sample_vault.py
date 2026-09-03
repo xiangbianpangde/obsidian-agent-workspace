@@ -51,6 +51,33 @@ class TestAcceptanceSampleVault(unittest.TestCase):
             encoding="utf-8",
         )
 
+        # P1-M5-NEW-2: 构造符号链接测试样例
+        # 1. 内部指向 .obsidian 排除区
+        obsidian_dir = cls.vault_dir / ".obsidian"
+        obsidian_dir.mkdir(parents=True, exist_ok=True)
+        (obsidian_dir / "internal.md").write_text("# 内部配置笔记\n", encoding="utf-8")
+        try:
+            os.symlink(str(obsidian_dir / "internal.md"), str(cls.vault_dir / "safe_link.md"))
+        except OSError:
+            pass
+
+        # 2. 内部指向 credentials 排除区
+        cred_dir = cls.vault_dir / "credentials"
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        (cred_dir / "private.md").write_text("# 私密笔记\n", encoding="utf-8")
+        try:
+            os.symlink(str(cred_dir / "private.md"), str(cls.vault_dir / "cred_link.md"))
+        except OSError:
+            pass
+
+        # 3. 外部逃逸 symlink
+        try:
+            outside_tmp = Path(cls.test_dir) / "outside_private.md"
+            outside_tmp.write_text("# 外部私密\n", encoding="utf-8")
+            os.symlink(str(outside_tmp), str(cls.vault_dir / "escape_link.md"))
+        except OSError:
+            pass
+
         # 构造 AppConfig
         cls.cfg = AppConfig(
             vault_path=cls.vault_dir,
@@ -258,6 +285,20 @@ class TestAcceptanceSampleVault(unittest.TestCase):
 
         # 5. 代码层无 DELETE API
         self.assertIn(self.client.delete("/api/file?path=demo.md").status_code, (404, 405))
+
+        # 6. P1-M5-NEW-2: 符号链接安全断言
+        # 内部指向 .obsidian / credentials 排除区的软链接不得被索引，直接读取必须被 400 拒绝
+        self.assertEqual(self.client.get("/api/file/content?path=safe_link.md").status_code, 400)
+        self.assertEqual(self.client.get("/api/file/content?path=cred_link.md").status_code, 400)
+        self.assertEqual(self.client.get("/api/file/content?path=escape_link.md").status_code, 400)
+
+        # 检查数据库中确实没有这三个文件
+        conn = sqlite.connect(self.cfg.database_path)
+        bad_count = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE path IN ('safe_link.md', 'cred_link.md', 'escape_link.md')"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(bad_count, 0, "排除区符号链接绝不得进入 files 索引表")
 
     def test_09_sample_vault_hermetic_repro(self):
         """验收 9: Sample Vault 一键零摩擦复现能力验证"""

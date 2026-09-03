@@ -46,14 +46,19 @@ def scan_vault(cfg: AppConfig, conn, *, coordinator=None) -> dict:
             full = Path(dirpath) / fname
             rel = full.relative_to(vault_root).as_posix()
 
-            if cfg.reject_symlink_escape and full.is_symlink():
-                try:
-                    target = full.resolve(strict=True)
-                except OSError:
-                    target = Path("/")
-                if not (target == vault_root or target.is_relative_to(vault_root)):
-                    sqlite.record_event(conn, "excluded", rel, "symlink escape")
-                    continue
+            # P1-M5-NEW-2: 符号链接越界与内部指向排除区双重拦截
+            canonical = full.resolve(strict=False)
+            if not (canonical == vault_root or canonical.is_relative_to(vault_root)):
+                sqlite.record_event(conn, "excluded", rel, "symlink escape")
+                continue
+            try:
+                canonical_rel = canonical.relative_to(vault_root).as_posix()
+            except ValueError:
+                sqlite.record_event(conn, "excluded", rel, "symlink escape")
+                continue
+            if matches_scan_exclude(vault_root, canonical_rel, exclude):
+                sqlite.record_event(conn, "excluded", rel, "symlink target in excluded zone")
+                continue
 
             try:
                 raw = full.read_bytes()
@@ -109,11 +114,12 @@ def _upsert_parsed(conn, parsed) -> None:
 
 
 def process_event(cfg: AppConfig, conn, kind: str, rel: str) -> None:
-    """单事件处理（watchdog 与扫描后重放共用）。显式事务（P1-M2-1）。"""
+    """单事件处理（watchdog 与扫描后重放共用）。显式事务（P1-M2-1, P1-M5-NEW-2）。"""
     from ..security.path_guard import resolve_in_vault
 
     try:
         full = resolve_in_vault(cfg, rel)
+        canonical_rel = full.relative_to(cfg.vault_root).as_posix()
     except Exception as e:  # noqa: BLE001
         sqlite.record_event(conn, "excluded", rel, f"path rejected: {e}")
         conn.commit()
@@ -132,8 +138,9 @@ def process_event(cfg: AppConfig, conn, kind: str, rel: str) -> None:
 
     if not full.is_file() or full.suffix.lower() != ".md":
         return
-    if matches_scan_exclude(cfg.vault_root, rel, cfg.scan_exclude):
-        sqlite.record_event(conn, "excluded", rel)
+    # P1-M5-NEW-2: 使用 canonical_rel 判断 exclude，彻底杜绝内部 symlink 绕过
+    if matches_scan_exclude(cfg.vault_root, canonical_rel, cfg.scan_exclude):
+        sqlite.record_event(conn, "excluded", rel, "target in excluded zone")
         conn.commit()
         return
 
