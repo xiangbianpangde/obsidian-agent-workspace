@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Obsidian Agent Workspace</title>
+  <title>Personal AI Workspace</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons -->
@@ -15,7 +15,7 @@
   <!-- KaTeX LaTeX 数学公式渲染库 -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <!-- DOMPurify 工业级 XSS 防护库 (升级至官方最新安全版本 3.4.13，P1-NEW-1) -->
+  <!-- DOMPurify 工业级 XSS 防护库 (官方最新 3.4.13) -->
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.13/dist/purify.min.js"></script>
   <script>
     tailwind.config = {
@@ -65,41 +65,60 @@
 </head>
 <body class="bg-[#18181b] text-slate-200 h-screen flex flex-col select-none overflow-hidden font-sans">
 
-  <!-- 顶部导航栏 -->
+  <!-- 顶部全局导航栏 -->
   <header class="h-12 bg-[#202024] border-b border-[#2e2e38] flex items-center justify-between px-4 z-10 shrink-0">
     <div class="flex items-center space-x-3">
       <div class="flex items-center text-purple-400 font-bold text-sm tracking-wide">
-        <i data-lucide="brain" class="w-5 h-5 mr-2"></i>
-        <span>Obsidian Agent Workspace</span>
+        <i data-lucide="layout-grid" class="w-5 h-5 mr-2"></i>
+        <span>Personal AI Workspace</span>
       </div>
-      <span class="text-xs bg-[#2e2e3a] text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">Personal Knowledge Layer</span>
-      <span id="vault-path-badge" class="text-xs text-slate-400 hidden sm:inline-block max-w-xs truncate border-l border-slate-700 pl-3">连接中...</span>
+      <span class="text-xs bg-[#2e2e3a] text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">AI OS P0</span>
+    </div>
+
+    <!-- 顶栏核心工作区切换 (双核架构: Obsidian 知识中心 ↔ AgentsView 会话中心) -->
+    <div class="flex items-center space-x-1 bg-[#18181b] p-0.5 rounded-lg border border-[#333342] text-xs">
+      <button id="nav-mode-obsidian" class="px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm">
+        <i data-lucide="book-open" class="w-3.5 h-3.5 mr-1.5"></i>知识中心 (Obsidian)
+      </button>
+      <button id="nav-mode-agentsview" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
+        <i data-lucide="bot" class="w-3.5 h-3.5 mr-1.5 text-emerald-400"></i>AI 会话中心 (AgentsView)
+        <span id="badge-agent-total" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-emerald-950 text-emerald-300 rounded-full border border-emerald-800/50">1800+</span>
+      </button>
     </div>
 
     <div class="flex items-center space-x-4 text-xs">
-      <div class="flex items-center space-x-2 text-slate-400">
+      <!-- 知识模式下的统计 -->
+      <div id="obsidian-header-stats" class="flex items-center space-x-2 text-slate-400">
         <span>笔记: <b id="stat-files" class="text-slate-200">-</b></span>
         <span>·</span>
         <span>标签: <b id="stat-tags" class="text-slate-200">-</b></span>
         <span>·</span>
-        <span class="flex items-center text-emerald-400"><i data-lucide="radio" class="w-3 h-3 mr-1 animate-pulse"></i>Watchdog 增量</span>
+        <span class="flex items-center text-emerald-400"><i data-lucide="radio" class="w-3 h-3 mr-1 animate-pulse"></i>增量监听</span>
+        <button id="btn-new-file" class="ml-2 bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded flex items-center transition shadow-sm">
+          <i data-lucide="plus" class="w-3.5 h-3.5 mr-1"></i>新建笔记
+        </button>
+        <button id="btn-toggle-right" title="折叠/展开右侧面板" class="p-1 rounded bg-[#2c2c36] hover:bg-[#383848] text-slate-300">
+          <i data-lucide="panel-right" class="w-4 h-4"></i>
+        </button>
       </div>
-      <button id="btn-new-file" class="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded flex items-center transition shadow-sm">
-        <i data-lucide="plus" class="w-3.5 h-3.5 mr-1"></i>新建笔记
-      </button>
-      <!-- 右侧栏折叠触发按钮 -->
-      <button id="btn-toggle-right" title="折叠/展开右侧面板" class="p-1 rounded bg-[#2c2c36] hover:bg-[#383848] text-slate-300">
-        <i data-lucide="panel-right" class="w-4 h-4"></i>
-      </button>
+
+      <!-- 会话模式下的快速刷新 -->
+      <div id="agentsview-header-stats" class="hidden items-center space-x-2 text-slate-400">
+        <span class="text-xs text-slate-400 font-mono" id="av-version-badge">AgentsView v0.40.1</span>
+        <span>·</span>
+        <span class="flex items-center text-emerald-400"><i data-lucide="database" class="w-3 h-3 mr-1"></i>只读直连</span>
+        <button id="btn-refresh-av" title="刷新会话数据" class="ml-2 bg-[#2c2c38] hover:bg-[#393948] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3e3e50]">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1"></i>刷新
+        </button>
+      </div>
     </div>
   </header>
 
-  <!-- 主体三栏布局 -->
-  <div class="flex-1 flex overflow-hidden relative">
+  <!-- ======================== 工作区 1: Obsidian 知识工作台 ======================== -->
+  <div id="workspace-obsidian" class="flex-1 flex overflow-hidden relative">
     
     <!-- 左栏：文件树 -->
     <aside class="w-72 bg-[#1c1c20] border-r border-[#2e2e38] flex flex-col shrink-0">
-      <!-- 搜索框 -->
       <div class="p-2 border-b border-[#2a2a34]">
         <div class="relative">
           <i data-lucide="search" class="w-4 h-4 absolute left-2.5 top-2.5 text-slate-400"></i>
@@ -107,7 +126,6 @@
                  class="w-full bg-[#27272e] text-xs text-slate-200 pl-8 pr-3 py-2 rounded focus:outline-none focus:ring-1 focus:ring-purple-500 border border-[#373744]">
         </div>
       </div>
-      <!-- 文件树列表 -->
       <div id="file-tree-container" class="flex-1 overflow-y-auto p-2 text-xs">
         <div class="text-slate-500 text-center py-8">正在读取本地 Vault 索引...</div>
       </div>
@@ -115,18 +133,15 @@
 
     <!-- 中间栏：Markdown 编辑器、属性面板与渲染区 -->
     <main class="flex-1 flex flex-col bg-[#18181b] overflow-hidden min-w-0">
-      <!-- 文件操作顶栏 -->
       <div id="editor-header" class="h-10 bg-[#222228] border-b border-[#2e2e38] flex items-center justify-between px-4 shrink-0">
         <div class="flex items-center space-x-3 overflow-hidden">
           <i data-lucide="file-text" class="w-4 h-4 text-purple-400 shrink-0"></i>
           <span id="current-file-path" class="text-xs text-slate-300 font-mono truncate">未选择文件</span>
-          <!-- 属性面板展开/折叠快捷开关 -->
           <button id="btn-toggle-props" class="hidden text-[10px] text-purple-300 bg-purple-950/60 border border-purple-800/50 px-2 py-0.5 rounded hover:bg-purple-900/60">
             <i data-lucide="sliders-horizontal" class="w-2.5 h-2.5 inline mr-1"></i>笔记属性
           </button>
         </div>
 
-        <!-- 视图切换与保存 -->
         <div id="editor-actions" class="flex items-center space-x-2 hidden">
           <div class="bg-[#2a2a34] p-0.5 rounded flex items-center text-xs">
             <button id="view-edit" class="px-2 py-0.5 rounded bg-purple-600 text-white flex items-center">
@@ -151,12 +166,10 @@
           <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400 shrink-0"></i>
           <span><b>并发冲突：</b>该文件已被外部修改！为保护资产，已阻止保存覆盖。</span>
         </div>
-        <button id="btn-reload-conflict" class="bg-amber-700 hover:bg-amber-600 text-white px-2.5 py-0.5 rounded text-xs">
-          重新载入最新版本
-        </button>
+        <button id="btn-reload-conflict" class="bg-amber-700 hover:bg-amber-600 text-white px-2.5 py-0.5 rounded text-xs">重新载入最新版本</button>
       </div>
 
-      <!-- Obsidian 风格【笔记属性 (Properties)】面板区 (可折叠) -->
+      <!-- 笔记属性面板 (可折叠) -->
       <div id="note-properties-panel" class="hidden bg-[#202026] border-b border-[#2e2e38] p-3 text-xs">
         <div class="flex items-center justify-between text-slate-400 font-semibold mb-2.5">
           <div class="flex items-center space-x-1.5 text-slate-300">
@@ -165,20 +178,16 @@
           </div>
           <button id="btn-close-props" class="text-[10px] text-slate-500 hover:text-slate-300">收起</button>
         </div>
-        <div id="props-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-          <!-- 动态渲染属性项 -->
-        </div>
+        <div id="props-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5"></div>
       </div>
 
       <!-- 编辑/预览主体区 -->
       <div class="flex-1 flex overflow-hidden relative">
-        <!-- 编辑文本框 -->
         <div id="edit-pane" class="flex-1 h-full flex flex-col overflow-hidden">
           <textarea id="markdown-editor" 
                     placeholder="选择左侧文件开始浏览或编辑..."
                     class="w-full h-full bg-[#18181b] text-slate-200 p-6 mono-font text-sm leading-relaxed resize-none focus:outline-none border-none overflow-y-auto selection:bg-purple-900 selection:text-purple-100"></textarea>
         </div>
-        <!-- 预览面板 (支持 LaTeX 公式、图片、维基链接) -->
         <div id="preview-pane" class="flex-1 h-full bg-[#1c1c22] border-l border-[#2e2e38] overflow-y-auto p-8 markdown-body hidden">
           <div id="markdown-preview" class="max-w-3xl mx-auto"></div>
         </div>
@@ -187,8 +196,6 @@
 
     <!-- 右栏：【状态中心】与【标签中心】自由转换工作面板 (可折叠) -->
     <aside id="right-sidebar" class="w-80 bg-[#1e1e24] border-l border-[#2e2e38] flex flex-col shrink-0 transition-all duration-200">
-      
-      <!-- 顶栏 Tab 切换: 状态中心 vs 标签中心 -->
       <div class="h-10 border-b border-[#2e2e38] px-2 flex items-center justify-between text-xs bg-[#222228]">
         <div class="flex space-x-1 bg-[#18181b] p-0.5 rounded border border-[#333342]">
           <button id="tab-status-center" class="px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]">
@@ -203,20 +210,17 @@
         </button>
       </div>
 
-      <!-- 视图 1: 状态中心 (Status Center) 默认展示 -->
+      <!-- 视图 1: 状态中心 -->
       <div id="view-status-center" class="flex-1 flex flex-col overflow-hidden">
         <div class="p-3 border-b border-[#2c2c38] bg-[#22222a]">
           <div class="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider flex items-center justify-between">
             <span>工作流状态看板</span>
             <span id="status-total-badge" class="text-[10px] text-purple-300 font-mono">统计中...</span>
           </div>
-          <!-- 状态大卡片列表 -->
           <div id="statuses-cards" class="grid grid-cols-2 gap-1.5">
             <div class="text-slate-500 text-xs py-4 col-span-2 text-center">正在汇总工作流状态...</div>
           </div>
         </div>
-
-        <!-- 选中状态下的笔记列表 -->
         <div class="flex-1 flex flex-col overflow-hidden p-3 bg-[#1e1e24]">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold text-purple-300 flex items-center">
@@ -231,9 +235,8 @@
         </div>
       </div>
 
-      <!-- 视图 2: 标签中心 (Tag Center) -->
+      <!-- 视图 2: 标签中心 -->
       <div id="view-tag-center" class="flex-1 flex flex-col overflow-hidden hidden">
-        <!-- 标签筛选结果展示 -->
         <div id="tag-filter-view" class="p-3 border-b border-[#2c2c38] bg-[#24242c] hidden">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold text-purple-300 flex items-center">
@@ -244,8 +247,6 @@
           <div id="tag-status-pills" class="flex flex-wrap gap-1 mb-2"></div>
           <div id="tag-files-list" class="max-h-56 overflow-y-auto space-y-1 text-xs pr-1"></div>
         </div>
-
-        <!-- 全局高频标签库 -->
         <div class="flex-1 overflow-y-auto p-3">
           <div class="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider">高频知识标签</div>
           <div id="tags-cloud" class="flex flex-wrap gap-1.5">
@@ -253,8 +254,118 @@
           </div>
         </div>
       </div>
-
     </aside>
+  </div>
+
+  <!-- ======================== 工作区 2: AgentsView AI 会话中心 ======================== -->
+  <div id="workspace-agentsview" class="flex-1 flex flex-col overflow-hidden hidden bg-[#16161a]">
+    
+    <!-- 顶部工作流活跃度概览指标条 -->
+    <div class="bg-[#1e1e24] border-b border-[#2d2d38] px-6 py-3 shrink-0">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="bg-[#24242c] p-3 rounded-lg border border-[#343442]">
+          <div class="text-[11px] text-slate-400 flex items-center mb-1">
+            <i data-lucide="messages-square" class="w-3.5 h-3.5 mr-1.5 text-purple-400"></i>总会话数
+          </div>
+          <div class="text-xl font-bold text-slate-100 font-mono" id="av-stat-total">-</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">覆盖 12 种 Agent 引擎</div>
+        </div>
+        <div class="bg-[#24242c] p-3 rounded-lg border border-[#343442]">
+          <div class="text-[11px] text-slate-400 flex items-center mb-1">
+            <i data-lucide="zap" class="w-3.5 h-3.5 mr-1.5 text-amber-400"></i>近 7 天高频活跃
+          </div>
+          <div class="text-xl font-bold text-amber-300 font-mono" id="av-stat-7d">-</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">最近 24 小时: <span id="av-stat-24h" class="text-slate-300 font-semibold">-</span> 场</div>
+        </div>
+        <div class="bg-[#24242c] p-3 rounded-lg border border-[#343442]">
+          <div class="text-[11px] text-slate-400 flex items-center mb-1">
+            <i data-lucide="message-circle" class="w-3.5 h-3.5 mr-1.5 text-blue-400"></i>交互消息总量
+          </div>
+          <div class="text-xl font-bold text-blue-300 font-mono" id="av-stat-msgs">-</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">含对话、思考与工具交互</div>
+        </div>
+        <div class="bg-[#24242c] p-3 rounded-lg border border-[#343442]">
+          <div class="text-[11px] text-slate-400 flex items-center mb-1">
+            <i data-lucide="cpu" class="w-3.5 h-3.5 mr-1.5 text-emerald-400"></i>主力 Agent 矩阵
+          </div>
+          <div class="text-xs text-slate-200 mt-1 space-x-1.5" id="av-stat-top-agents">
+            <span>加载中...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 过滤工具栏 (Agent 单选胶囊 + 项目选择 + 搜索) -->
+    <div class="bg-[#202028] border-b border-[#2d2d38] px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
+      <!-- Agent 矩阵胶囊行 -->
+      <div id="av-agent-pills" class="flex flex-wrap items-center gap-1.5 text-xs">
+        <button data-agent="all" class="px-3 py-1 rounded-full bg-purple-600 text-white font-medium shadow-sm">全部 Agent</button>
+      </div>
+
+      <!-- 项目筛选与搜索框 -->
+      <div class="flex items-center space-x-2">
+        <select id="av-select-project" class="bg-[#272730] text-xs text-slate-300 border border-[#3c3c4e] rounded px-2.5 py-1.5 focus:outline-none">
+          <option value="all">全部项目 (All Projects)</option>
+        </select>
+        <div class="relative">
+          <i data-lucide="search" class="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-500"></i>
+          <input id="av-input-search" type="text" placeholder="搜索会话首问或标题..." 
+                 class="bg-[#272730] text-xs text-slate-200 pl-8 pr-3 py-1.5 rounded border border-[#3c3c4e] focus:outline-none focus:ring-1 focus:ring-purple-500 w-48 sm:w-64">
+        </div>
+      </div>
+    </div>
+
+    <!-- AI 会话双栏主浏览区 (左列表 · 右沉浸详情) -->
+    <div class="flex-1 flex overflow-hidden">
+      <!-- 左侧：会话卡片流 -->
+      <div class="w-96 bg-[#1a1a20] border-r border-[#2d2d38] flex flex-col shrink-0">
+        <div class="p-2 border-b border-[#292934] text-[11px] text-slate-400 flex items-center justify-between">
+          <span>会话列表 (<span id="av-matched-count" class="font-mono text-purple-300 font-bold">0</span>)</span>
+          <span class="text-[10px] text-slate-500">按最新活跃时间倒序</span>
+        </div>
+        <div id="av-sessions-list" class="flex-1 overflow-y-auto p-2 space-y-1.5 text-xs">
+          <div class="text-slate-500 text-center py-12">正在拉取 AI 会话列表...</div>
+        </div>
+      </div>
+
+      <!-- 右侧：会话沉浸式详情与消息/工具流 -->
+      <div class="flex-1 flex flex-col bg-[#16161a] overflow-hidden">
+        <!-- 会话详情顶栏 -->
+        <div id="av-detail-header" class="h-12 bg-[#202026] border-b border-[#2d2d38] px-5 flex items-center justify-between shrink-0">
+          <div class="flex items-center space-x-3 overflow-hidden">
+            <span id="av-detail-agent-badge" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-950 text-purple-300 border border-purple-800/60">-</span>
+            <span id="av-detail-title" class="text-xs text-slate-200 font-semibold truncate">请在左侧选择一场会话开始回溯</span>
+          </div>
+
+          <div id="av-detail-tabs" class="hidden items-center space-x-1 bg-[#18181b] p-0.5 rounded border border-[#333342] text-xs">
+            <button id="tab-av-msgs" class="px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]">
+              <i data-lucide="message-square" class="w-3 h-3 mr-1"></i>对话流 (<span id="av-count-msgs">0</span>)
+            </button>
+            <button id="tab-av-tools" class="px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]">
+              <i data-lucide="wrench" class="w-3 h-3 mr-1"></i>工具调用 (<span id="av-count-tools">0</span>)
+            </button>
+          </div>
+        </div>
+
+        <!-- 会话上下文元数据小条 -->
+        <div id="av-detail-meta-bar" class="hidden bg-[#1c1c22] border-b border-[#282834] px-5 py-1.5 text-[11px] text-slate-400 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <div>项目: <span id="av-meta-project" class="text-slate-200 font-medium font-mono">-</span></div>
+          <div>工作目录: <span id="av-meta-cwd" class="text-slate-300 font-mono text-[10px] truncate max-w-sm inline-block align-bottom">-</span></div>
+          <div>分支: <span id="av-meta-branch" class="text-slate-300 font-mono text-[10px]">-</span></div>
+          <div>开始: <span id="av-meta-time" class="text-slate-400">-</span></div>
+        </div>
+
+        <!-- 消息流面板 -->
+        <div id="av-pane-messages" class="flex-1 overflow-y-auto p-6 space-y-4">
+          <div class="text-slate-500 text-center py-20">请在左侧选择会话进行历史回溯</div>
+        </div>
+
+        <!-- 工具调用明细面板 -->
+        <div id="av-pane-tools" class="flex-1 overflow-y-auto p-6 space-y-3 hidden">
+          <div class="text-slate-500 text-center py-20">暂无工具调用</div>
+        </div>
+      </div>
+    </div>
 
   </div>
 
@@ -268,7 +379,6 @@
         <button id="btn-close-modal" class="text-slate-400 hover:text-slate-200"><i data-lucide="x" class="w-4 h-4"></i></button>
       </div>
 
-      <!-- Tab 切换 -->
       <div class="flex border-b border-[#333342] text-xs">
         <button id="tab-create-tpl" class="pb-2 px-3 border-b-2 border-purple-500 text-purple-300 font-semibold flex items-center">
           <i data-lucide="sparkles" class="w-3.5 h-3.5 mr-1"></i>使用 Obsidian 模板
@@ -278,7 +388,6 @@
         </button>
       </div>
 
-      <!-- 模板创建视图 -->
       <div id="view-tpl-create" class="space-y-3">
         <div>
           <label class="block text-xs text-slate-300 mb-1">选择 Obsidian 模板</label>
@@ -291,7 +400,6 @@
           <input id="input-tpl-title" type="text" placeholder="例如: 图神经网络实战笔记"
                  class="w-full bg-[#18181b] text-xs text-slate-200 p-2.5 rounded border border-[#3c3c4e] focus:outline-none focus:ring-1 focus:ring-purple-500 font-medium">
         </div>
-        <!-- 建议路径提示 -->
         <div class="bg-[#1c1c22] p-2.5 rounded border border-[#2e2e3a] text-[11px] text-slate-300 flex items-start space-x-2">
           <i data-lucide="folder-output" class="w-4 h-4 text-purple-400 shrink-0 mt-0.5"></i>
           <div>
@@ -299,14 +407,12 @@
             <div id="tpl-suggested-path" class="font-mono text-purple-200 break-all mt-0.5">-</div>
           </div>
         </div>
-        <!-- JS 降级提醒 -->
         <div id="tpl-js-warning" class="hidden bg-amber-950/40 border border-amber-800/60 p-2.5 rounded text-[11px] text-amber-200 flex items-center space-x-2">
           <i data-lucide="info" class="w-4 h-4 text-amber-400 shrink-0"></i>
           <span>包含 Templater JS 动态代码块：创建时将完整保留并在 Obsidian 中执行。</span>
         </div>
       </div>
 
-      <!-- 空白笔记视图 -->
       <div id="view-blank-create" class="space-y-3 hidden">
         <div>
           <label class="block text-xs text-slate-300 mb-1">笔记相对路径 (含 .md)</label>
@@ -333,6 +439,7 @@
   <script>
     // 全局状态管理
     const state = {
+      workspaceMode: 'obsidian', // 'obsidian' | 'agentsview'
       config: null,
       treeData: null,
       currentPath: null,
@@ -342,14 +449,31 @@
       currentStatus: null,
       activeTag: null,
       activeStatus: null,
-      viewMode: 'split', // 'edit', 'preview', 'split'
-      rightTab: 'status', // 'status' | 'tags'
-      rightCollapsed: false
+      viewMode: 'split',
+      rightTab: 'status',
+      rightCollapsed: false,
+      // AgentsView 状态
+      avStatus: null,
+      avOverview: null,
+      avSelectedAgent: 'all',
+      avSelectedProject: 'all',
+      avSearchQuery: '',
+      avCurrentSessionId: null,
+      avCurrentTab: 'messages' // 'messages' | 'tools'
     };
 
-    // DOM 元素引用
+    // DOM 引用字典
     const el = {
-      vaultPath: document.getElementById('vault-path-badge'),
+      navModeObsidian: document.getElementById('nav-mode-obsidian'),
+      navModeAgentsview: document.getElementById('nav-mode-agentsview'),
+      workspaceObsidian: document.getElementById('workspace-obsidian'),
+      workspaceAgentsview: document.getElementById('workspace-agentsview'),
+      obsidianHeaderStats: document.getElementById('obsidian-header-stats'),
+      agentsviewHeaderStats: document.getElementById('agentsview-header-stats'),
+      badgeAgentTotal: document.getElementById('badge-agent-total'),
+      avVersionBadge: document.getElementById('av-version-badge'),
+      btnRefreshAv: document.getElementById('btn-refresh-av'),
+      // Obsidian DOM
       statFiles: document.getElementById('stat-files'),
       statTags: document.getElementById('stat-tags'),
       treeContainer: document.getElementById('file-tree-container'),
@@ -394,8 +518,44 @@
       inputNewContent: document.getElementById('input-new-content'),
       viewEdit: document.getElementById('view-edit'),
       viewPreview: document.getElementById('view-preview'),
-      viewSplit: document.getElementById('view-split')
+      viewSplit: document.getElementById('view-split'),
+      // AgentsView DOM
+      avStatTotal: document.getElementById('av-stat-total'),
+      avStat7d: document.getElementById('av-stat-7d'),
+      avStat24h: document.getElementById('av-stat-24h'),
+      avStatMsgs: document.getElementById('av-stat-msgs'),
+      avStatTopAgents: document.getElementById('av-stat-top-agents'),
+      avAgentPills: document.getElementById('av-agent-pills'),
+      avSelectProject: document.getElementById('av-select-project'),
+      avInputSearch: document.getElementById('av-input-search'),
+      avMatchedCount: document.getElementById('av-matched-count'),
+      avSessionsList: document.getElementById('av-sessions-list'),
+      avDetailTitle: document.getElementById('av-detail-title'),
+      avDetailAgentBadge: document.getElementById('av-detail-agent-badge'),
+      avDetailTabs: document.getElementById('av-detail-tabs'),
+      avDetailMetaBar: document.getElementById('av-detail-meta-bar'),
+      avMetaProject: document.getElementById('av-meta-project'),
+      avMetaCwd: document.getElementById('av-meta-cwd'),
+      avMetaBranch: document.getElementById('av-meta-branch'),
+      avMetaTime: document.getElementById('av-meta-time'),
+      tabAvMsgs: document.getElementById('tab-av-msgs'),
+      tabAvTools: document.getElementById('tab-av-tools'),
+      avCountMsgs: document.getElementById('av-count-msgs'),
+      avCountTools: document.getElementById('av-count-tools'),
+      avPaneMessages: document.getElementById('av-pane-messages'),
+      avPaneTools: document.getElementById('av-pane-tools')
     };
+
+    // HTML 安全转义 (P1-NEW-1)
+    function escapeHtml(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
 
     // 初始化 Marked Markdown 渲染器
     marked.setOptions({
@@ -408,7 +568,7 @@
       breaks: true
     });
 
-    // 自定义渲染器：处理 Dataview 块
+    // 处理 Dataview 块
     const renderer = new marked.Renderer();
     const origCode = renderer.code.bind(renderer);
     renderer.code = function(code, language) {
@@ -430,29 +590,16 @@
       if (!res.ok) {
         let errData = {};
         try { errData = await res.json(); } catch(e) {}
-        const error = new Error(errData.detail || `HTTP ${res.status}`);
+        const error = new Error(errData.message || errData.detail || `HTTP ${res.status}`);
         error.status = res.status;
-        error.detail = errData.detail;
         throw error;
       }
       return await res.json();
     }
 
-    // HTML 安全转义 (P1-NEW-1)
-    function escapeHtml(str) {
-      if (str == null) return '';
-      return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-    }
-
     // 格式化 LaTeX 数学公式（KaTeX 渲染，附带代码块跳过保护）
     function renderLatex(text) {
       if (!window.katex) return text;
-      // 保护 code 块与 inline code，不把其中的 $ 误认作数学公式 (Sol P2)
       const codeTokens = [];
       text = text.replace(/(```[\s\S]*?```|`[^`\n]+`)/g, (match) => {
         const id = `%%MATH_TOKEN_${codeTokens.length}%%`;
@@ -468,7 +615,7 @@
           return `<div class="text-rose-400 font-mono text-xs my-2">${escapeHtml(match)}</div>`;
         }
       });
-      // 2. 行内公式 $...$ (排除转义)
+      // 2. 行内公式 $...$
       text = text.replace(/(^|[^\\])\$([^\$\n]+?)\$/g, (match, prefix, expr) => {
         try {
           return prefix + katex.renderToString(expr.trim(), { displayMode: false, throwOnError: false, trust: false });
@@ -477,7 +624,6 @@
         }
       });
 
-      // 还原代码块
       codeTokens.forEach((token, idx) => {
         text = text.replace(`%%MATH_TOKEN_${idx}%%`, () => token);
       });
@@ -485,23 +631,23 @@
       return text;
     }
 
-    // 格式化图片与维基链接与 .base 嵌入降级
+    // 格式化图片、维基链接与 .base 嵌入
     function renderSpecialEmbeds(html) {
       const currentNote = state.currentPath || '';
 
-      // 1. .base 嵌入降级: ![[...base#锚点]]
+      // 1. .base 嵌入降级
       html = html.replace(/!\[\[([^\]]+\.base(?:#[^\]|]+)?)(?:\|([^\]]+))?\]\]/g, (match, baseTarget) => {
         return `<div class="bg-[#252233] border border-purple-900/60 p-2.5 rounded my-2 text-xs flex items-center justify-between text-purple-200 shadow-sm">
                   <div class="flex items-center space-x-2">
                     <span class="px-1.5 py-0.5 rounded bg-purple-950 text-purple-400 font-mono text-[10px] border border-purple-800/40">Obsidian Base Embed</span>
-                    <span class="font-mono text-slate-300 text-[11px]">${baseTarget.trim()}</span>
+                    <span class="font-mono text-slate-300 text-[11px]">${escapeHtml(baseTarget.trim())}</span>
                   </div>
                   <span class="text-[10px] text-purple-400 bg-purple-900/30 px-2 py-0.5 rounded border border-purple-800/30">Open in Obsidian</span>
                 </div>`;
       });
 
-      // 2. Obsidian 维基格式图片: ![[image.png]] 或 ![[image.png|300]] (无内联 onerror, P1-NEW-1)
-      html = html.replace(/!\[\[([^\]|]+\.(?:png|jpg|jpeg|webp|gif|svg|bmp))(?:\s*\|\s*(\d+))?\]\]/gi, (match, imgPath, width) => {
+      // 2. Obsidian 维基格式图片: ![[image.png]]
+      html = html.replace(/!\[\[([^\]|]+\.(?:png|jpg|jpeg|webp|gif|bmp))(?:\s*\|\s*(\d+))?\]\]/gi, (match, imgPath, width) => {
         let cleanImg = imgPath.trim();
         try { cleanImg = decodeURIComponent(cleanImg); } catch(e) {}
         const url = `/api/asset?path=${encodeURIComponent(cleanImg)}&note_path=${encodeURIComponent(currentNote)}`;
@@ -509,7 +655,7 @@
         return `<img src="${url}" alt="${escapeHtml(cleanImg)}" loading="lazy" ${wStyle} class="block my-2 rounded max-h-96 shadow" />`;
       });
 
-      // 3. 标准 Markdown 图片: 将相对路径重写为 /api/asset (无内联 onerror, P1-NEW-1)
+      // 3. 标准 Markdown 图片
       html = html.replace(/<img\s+([^>]*?)src=["']([^"']+)["']([^>]*?)>/gi, (match, before, src, after) => {
         if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:') || src.startsWith('/api/asset')) {
           return match;
@@ -520,7 +666,7 @@
         return `<img ${before}src="${safeSrc}"${after} loading="lazy" class="rounded max-h-96 my-2 shadow block" />`;
       });
 
-      // 4. 普通维基链接: 采用 data-wikilink + 事件委托，彻底消除 javascript: 伪协议与 inline onclick (P1-NEW-1)
+      // 4. 普通维基链接 (data-wikilink 事件委托)
       html = html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, note, alias) => {
         const text = alias || note;
         return `<span class="wikilink cursor-pointer select-none" data-wikilink="${escapeHtml(note.trim())}">[[${escapeHtml(text)}]]</span>`;
@@ -529,12 +675,36 @@
       return html;
     }
 
-    // 1. 加载配置与状态
+    // ======================== 工作区切换 (Obsidian ↔ AgentsView) ========================
+    function setWorkspaceMode(mode) {
+      state.workspaceMode = mode;
+      if (mode === 'obsidian') {
+        el.navModeObsidian.className = 'px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm';
+        el.navModeAgentsview.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+        el.workspaceObsidian.classList.remove('hidden');
+        el.workspaceAgentsview.classList.add('hidden');
+        el.obsidianHeaderStats.classList.remove('hidden');
+        el.agentsviewHeaderStats.classList.add('hidden');
+      } else {
+        el.navModeAgentsview.className = 'px-3 py-1 rounded bg-emerald-600 text-white font-medium flex items-center transition shadow-sm';
+        el.navModeObsidian.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+        el.workspaceAgentsview.classList.remove('hidden');
+        el.workspaceObsidian.classList.add('hidden');
+        el.agentsviewHeaderStats.classList.remove('hidden');
+        el.obsidianHeaderStats.classList.add('hidden');
+        loadAgentsViewData(); // 载入会话中心数据
+      }
+      lucide.createIcons();
+    }
+
+    el.navModeObsidian.addEventListener('click', () => setWorkspaceMode('obsidian'));
+    el.navModeAgentsview.addEventListener('click', () => setWorkspaceMode('agentsview'));
+
+    // ======================== Obsidian 核心逻辑 ========================
     async function loadConfig() {
       try {
         const data = await api('/config');
         state.config = data;
-        el.vaultPath.textContent = data.vault_path;
         el.statFiles.textContent = data.stats.files;
         el.statTags.textContent = data.stats.tags;
       } catch (err) {
@@ -542,7 +712,6 @@
       }
     }
 
-    // 2. 加载并渲染文件树
     async function loadFileTree() {
       try {
         const root = await api('/files/tree');
@@ -550,7 +719,7 @@
         renderTree(root, el.treeContainer);
         lucide.createIcons();
       } catch (err) {
-        el.treeContainer.innerHTML = `<div class="text-rose-400 p-2">加载文件树失败: ${err.message}</div>`;
+        el.treeContainer.innerHTML = `<div class="text-rose-400 p-2">加载文件树失败: ${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -628,7 +797,6 @@
       container.appendChild(list);
     }
 
-    // 搜索文件
     el.fileSearch.addEventListener('input', (e) => {
       const q = e.target.value.trim();
       if (!state.treeData) return;
@@ -664,7 +832,6 @@
       lucide.createIcons();
     });
 
-    // 3. 打开文件
     async function openFile(path) {
       try {
         el.conflictAlert.classList.add('hidden');
@@ -679,17 +846,14 @@
         el.editorActions.classList.remove('hidden');
         el.btnToggleProps.classList.remove('hidden');
 
-        // 渲染 Obsidian 风格【笔记属性】面板
         renderNoteProperties(data);
-
         updatePreview();
-        loadFileTree(); // 刷新高亮
+        loadFileTree();
       } catch (err) {
         alert(`打开文件失败: ${err.message}`);
       }
     }
 
-    // 渲染【笔记属性 (Properties)】面板 (P1-NEW-1: 严密 XSS 转义; Sol P2: 无状态与自定义状态精准回显)
     function renderNoteProperties(data) {
       el.propsGrid.innerHTML = '';
       el.propsPanel.classList.remove('hidden');
@@ -705,7 +869,6 @@
       }
       state.currentStatus = st;
 
-      // 1. 状态 (带快速下拉)
       const stCard = document.createElement('div');
       stCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between';
       
@@ -749,7 +912,6 @@
         }
       });
 
-      // 2. 标签 (tags) 胶囊列表 (严格 escapeHtml)
       if (data.tags && data.tags.length > 0) {
         const tagCard = document.createElement('div');
         tagCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between col-span-1 sm:col-span-2';
@@ -763,7 +925,6 @@
         el.propsGrid.appendChild(tagCard);
       }
 
-      // 3. 其它属性 (严格 escapeHtml)
       Object.entries(meta).forEach(([k, v]) => {
         if (k === '状态' || k === 'status' || k === 'tags') return;
         const card = document.createElement('div');
@@ -788,14 +949,9 @@
       lucide.createIcons();
     }
 
-    el.btnToggleProps.addEventListener('click', () => {
-      el.propsPanel.classList.toggle('hidden');
-    });
-    el.btnCloseProps.addEventListener('click', () => {
-      el.propsPanel.classList.add('hidden');
-    });
+    el.btnToggleProps.addEventListener('click', () => el.propsPanel.classList.toggle('hidden'));
+    el.btnCloseProps.addEventListener('click', () => el.propsPanel.classList.add('hidden'));
 
-    // 通过 WikiLink 标题打开对应文件
     function openByTitle(title) {
       if (!state.treeData) return;
       let target = null;
@@ -813,11 +969,10 @@
       if (target) {
         openFile(target.path);
       } else {
-        alert(`知识库中未找到名为 [[${title}]] 的已索引笔记`);
+        alert(`知识库中未找到名为 [[${title}]] 的笔记`);
       }
     }
 
-    // 4. 更新预览区 (包含 LaTeX 公式、图片、维基链接、Dataview)
     function updatePreview() {
       const raw = el.editor.value;
       let content = raw;
@@ -828,18 +983,12 @@
         }
       }
       
-      // 先进行 LaTeX 公式转换 (KaTeX)
       let processed = renderLatex(content);
-      
-      // 再通过 Marked 解析 Markdown
       let html = marked.parse(processed);
-
-      // 进行静态资源/图片、维基链接与 .base 嵌入替换
       html = renderSpecialEmbeds(html);
 
-      // P1-NEW-1: 终极 DOMPurify 工业级清洗，组件缺失时严格 Fail-Closed
       if (!window.DOMPurify) {
-        el.preview.textContent = "安全警告：DOMPurify 清洗组件加载失败，为防止 XSS 风险已暂停渲染富文本。请检查网络。";
+        el.preview.textContent = "安全警告：DOMPurify 缺失，暂停渲染富文本。";
         return;
       }
 
@@ -855,7 +1004,6 @@
       el.preview.innerHTML = html;
     }
 
-    // P1-NEW-1: 预览区事件委托（消除所有 inline onclick 与 inline onerror）
     el.previewPane.addEventListener('click', (e) => {
       const link = e.target.closest('[data-wikilink]');
       if (link) {
@@ -877,12 +1025,9 @@
     }, true);
 
     el.editor.addEventListener('input', () => {
-      if (state.viewMode !== 'edit') {
-        updatePreview();
-      }
+      if (state.viewMode !== 'edit') updatePreview();
     });
 
-    // 5. 保存文件 (支持 409 乐观锁处理)
     async function saveFile() {
       if (!state.currentPath) return;
       try {
@@ -911,7 +1056,6 @@
           el.btnSave.innerHTML = `<i data-lucide="save" class="w-3.5 h-3.5 mr-1"></i>保存 (⌘S)`;
           lucide.createIcons();
         }, 1200);
-
       } catch (err) {
         if (err.status === 409) {
           el.conflictAlert.classList.remove('hidden');
@@ -934,7 +1078,6 @@
       }
     });
 
-    // 6. 右侧栏 Tab 切换: 状态中心 vs 标签中心
     el.tabStatusCenter.addEventListener('click', () => {
       state.rightTab = 'status';
       el.tabStatusCenter.className = 'px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]';
@@ -951,7 +1094,6 @@
       el.viewStatusCenter.classList.add('hidden');
     });
 
-    // 右侧栏折叠/展开
     const toggleRightSidebar = () => {
       state.rightCollapsed = !state.rightCollapsed;
       if (state.rightCollapsed) {
@@ -965,16 +1107,12 @@
     el.btnToggleRight.addEventListener('click', toggleRightSidebar);
     el.btnCollapseRight.addEventListener('click', toggleRightSidebar);
 
-    // 7. 加载【状态中心】数据
     async function loadStatusesCenter() {
       try {
         const data = await api('/statuses');
         el.statusesCards.innerHTML = '';
-        let total = 0;
         data.statuses.forEach(st => {
-          total += st.count;
           const card = document.createElement('div');
-          
           let badgeColor = 'bg-slate-700 text-slate-200';
           if (st.status === '进行中') badgeColor = 'bg-amber-950 text-amber-300 border-amber-800/50';
           else if (st.status === '已完成') badgeColor = 'bg-emerald-950 text-emerald-300 border-emerald-800/50';
@@ -989,20 +1127,17 @@
               <span class="font-bold text-xs truncate">${escapeHtml(st.status)}</span>
               <span class="font-mono text-xs font-semibold px-1 rounded bg-black/30">${st.count}</span>
             </div>
-            <div class="text-[10px] text-slate-400 mt-1 truncate">
-              ${topTagsHtml}
-            </div>
+            <div class="text-[10px] text-slate-400 mt-1 truncate">${topTagsHtml}</div>
           `;
           card.addEventListener('click', () => selectStatus(st.status));
           el.statusesCards.appendChild(card);
         });
         el.statusTotalBadge.textContent = `共 ${data.statuses.length} 种状态`;
       } catch (err) {
-        el.statusesCards.innerHTML = `<div class="text-rose-400 text-xs p-2">加载状态中心失败: ${err.message}</div>`;
+        el.statusesCards.innerHTML = `<div class="text-rose-400 text-xs p-2">加载状态中心失败: ${escapeHtml(err.message)}</div>`;
       }
     }
 
-    // 选中某个工作流状态，展示属于该状态的笔记列表 (P1-NEW-1: 严密 escapeHtml)
     async function selectStatus(statusName) {
       state.activeStatus = statusName;
       el.activeStatusTitle.textContent = `[${statusName}] 笔记列表`;
@@ -1040,7 +1175,6 @@
       }
     }
 
-    // 8. 加载【标签中心】数据
     async function loadTags() {
       try {
         const data = await api('/tags');
@@ -1060,7 +1194,6 @@
       }
     }
 
-    // 选中标签，查看状态分布与文件列表
     async function selectTag(tagName) {
       state.activeTag = tagName;
       el.tagFilterView.classList.remove('hidden');
@@ -1101,7 +1234,6 @@
       el.tagFilterView.classList.add('hidden');
     });
 
-    // 9. 视图切换（Edit / Preview / Split）
     function setView(mode) {
       state.viewMode = mode;
       [el.viewEdit, el.viewPreview, el.viewSplit].forEach(btn => {
@@ -1130,7 +1262,7 @@
     el.viewPreview.addEventListener('click', () => setView('preview'));
     el.viewSplit.addEventListener('click', () => setView('split'));
 
-    // 10. 新建笔记 Modal（模板创建 + 空白创建）
+    // 模板新建笔记
     let activeCreateTab = 'tpl';
     let loadedTemplates = [];
 
@@ -1262,13 +1394,311 @@
       }
     });
 
-    // 页面初始化入口
+    // ======================== AgentsView AI 会话中心逻辑 ========================
+    async function loadAgentsViewData() {
+      try {
+        // 1. 状态与概览
+        const [status, overview] = await Promise.all([
+          api('/agentsview/status'),
+          api('/agentsview/overview')
+        ]);
+        state.avStatus = status;
+        state.avOverview = overview;
+
+        el.avVersionBadge.textContent = `${status.version} · ${status.transport}`;
+        el.badgeAgentTotal.textContent = `${overview.total_sessions} 场`;
+        el.avStatTotal.textContent = overview.total_sessions.toLocaleString();
+        el.avStat7d.textContent = overview.recent_7d_count.toLocaleString();
+        el.avStat24h.textContent = overview.recent_24h_count.toLocaleString();
+        el.avStatMsgs.textContent = overview.total_messages.toLocaleString();
+
+        // Top Agents 快速标签
+        el.avStatTopAgents.innerHTML = '';
+        overview.agent_matrix.slice(0, 4).forEach(a => {
+          const span = document.createElement('span');
+          span.className = 'px-1.5 py-0.5 rounded bg-[#2c2c38] text-slate-300 font-mono text-[11px] border border-[#3e3e50]';
+          span.textContent = `${a.agent}: ${a.session_count}`;
+          el.avStatTopAgents.appendChild(span);
+        });
+
+        // 渲染 Agent 矩阵单选胶囊
+        renderAgentPills(overview.agent_matrix);
+
+        // 填充项目下拉选项
+        el.avSelectProject.innerHTML = '<option value="all">全部项目 (All Projects)</option>';
+        overview.project_ranking.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.project;
+          opt.textContent = `${p.project} (${p.count})`;
+          el.avSelectProject.appendChild(opt);
+        });
+
+        // 拉取会话列表
+        await fetchSessionsList();
+      } catch (err) {
+        console.error('加载 AgentsView 失败:', err);
+      }
+    }
+
+    function renderAgentPills(matrix) {
+      el.avAgentPills.innerHTML = '';
+      
+      const allBtn = document.createElement('button');
+      allBtn.className = `px-3 py-1 rounded-full text-xs font-medium transition ${
+        state.avSelectedAgent === 'all' ? 'bg-purple-600 text-white shadow-sm' : 'bg-[#292934] text-slate-300 hover:bg-[#343442]'
+      }`;
+      allBtn.textContent = `全部 (${state.avOverview ? state.avOverview.total_sessions : 'All'})`;
+      allBtn.addEventListener('click', () => {
+        state.avSelectedAgent = 'all';
+        renderAgentPills(matrix);
+        fetchSessionsList();
+      });
+      el.avAgentPills.appendChild(allBtn);
+
+      matrix.forEach(a => {
+        const btn = document.createElement('button');
+        const isActive = state.avSelectedAgent === a.agent;
+        let colorTheme = 'bg-[#292934] text-slate-300 hover:bg-[#343442]';
+        if (isActive) {
+          if (a.agent === 'pi') colorTheme = 'bg-purple-600 text-white';
+          else if (a.agent === 'claude') colorTheme = 'bg-amber-600 text-white';
+          else if (a.agent === 'codex') colorTheme = 'bg-emerald-600 text-white';
+          else colorTheme = 'bg-blue-600 text-white';
+        }
+
+        btn.className = `px-2.5 py-1 rounded-full text-xs font-medium transition flex items-center ${colorTheme}`;
+        btn.innerHTML = `<span>${escapeHtml(a.agent)}</span><span class="ml-1 opacity-70 font-mono text-[10px]">(${a.session_count})</span>`;
+        btn.addEventListener('click', () => {
+          state.avSelectedAgent = a.agent;
+          renderAgentPills(matrix);
+          fetchSessionsList();
+        });
+        el.avAgentPills.appendChild(btn);
+      });
+    }
+
+    async function fetchSessionsList() {
+      el.avSessionsList.innerHTML = '<div class="text-slate-500 text-center py-10">正在查询会话列表...</div>';
+      try {
+        let url = `/agentsview/sessions?limit=60`;
+        if (state.avSelectedAgent !== 'all') url += `&agent=${encodeURIComponent(state.avSelectedAgent)}`;
+        if (state.avSelectedProject !== 'all') url += `&project=${encodeURIComponent(state.avSelectedProject)}`;
+        if (state.avSearchQuery) url += `&q=${encodeURIComponent(state.avSearchQuery)}`;
+
+        const data = await api(url);
+        el.avMatchedCount.textContent = data.total;
+        el.avSessionsList.innerHTML = '';
+
+        if (data.sessions.length === 0) {
+          el.avSessionsList.innerHTML = '<div class="text-slate-500 text-center py-12">未找到匹配的会话</div>';
+          return;
+        }
+
+        data.sessions.forEach(s => {
+          const card = document.createElement('div');
+          const isCurrent = state.avCurrentSessionId === s.id;
+          
+          let agentBadge = 'bg-slate-800 text-slate-300 border-slate-700';
+          if (s.agent === 'pi') agentBadge = 'bg-purple-950 text-purple-300 border-purple-800/60';
+          else if (s.agent === 'claude') agentBadge = 'bg-amber-950 text-amber-300 border-amber-800/60';
+          else if (s.agent === 'codex') agentBadge = 'bg-emerald-950 text-emerald-300 border-emerald-800/60';
+          else if (s.agent === 'hermes') agentBadge = 'bg-blue-950 text-blue-300 border-blue-800/60';
+
+          card.className = `p-2.5 rounded-lg border cursor-pointer transition flex flex-col justify-between ${
+            isCurrent ? 'bg-[#2a273c] border-purple-600' : 'bg-[#22222a] border-[#31313e] hover:border-slate-500'
+          }`;
+
+          const formattedTime = s.started_at ? s.started_at.substring(0, 16).replace('T', ' ') : '-';
+
+          card.innerHTML = `
+            <div class="flex items-center justify-between mb-1">
+              <span class="px-1.5 py-0.2 rounded text-[10px] font-bold font-mono border ${agentBadge}">${escapeHtml(s.agent)}</span>
+              <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(formattedTime)}</span>
+            </div>
+            <div class="font-medium text-slate-100 text-xs truncate my-0.5">${escapeHtml(s.title)}</div>
+            <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1">
+              <span class="text-slate-400 bg-black/30 px-1.5 py-0.5 rounded truncate max-w-[160px]">${escapeHtml(s.project)}</span>
+              <span><b class="text-slate-300 font-mono">${s.message_count}</b> 轮</span>
+            </div>
+          `;
+          card.addEventListener('click', () => selectSession(s.id));
+          el.avSessionsList.appendChild(card);
+        });
+
+        // 默认选中第一条
+        if (!state.avCurrentSessionId && data.sessions.length > 0) {
+          selectSession(data.sessions[0].id);
+        }
+      } catch (err) {
+        el.avSessionsList.innerHTML = `<div class="text-rose-400 p-4 text-xs">加载列表失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    el.avSelectProject.addEventListener('change', (e) => {
+      state.avSelectedProject = e.target.value;
+      fetchSessionsList();
+    });
+
+    el.avInputSearch.addEventListener('input', (e) => {
+      state.avSearchQuery = e.target.value.trim();
+      fetchSessionsList();
+    });
+
+    el.btnRefreshAv.addEventListener('click', () => loadAgentsViewData());
+
+    async function selectSession(sessionId) {
+      state.avCurrentSessionId = sessionId;
+      el.avDetailTabs.classList.remove('hidden');
+      el.avDetailMetaBar.classList.remove('hidden');
+
+      // 高亮左侧选中卡片
+      Array.from(el.avSessionsList.children).forEach(card => {
+        card.classList.remove('bg-[#2a273c]', 'border-purple-600');
+        card.classList.add('bg-[#22222a]', 'border-[#31313e]');
+      });
+
+      try {
+        // 并行拉取会话详情、消息流与工具调用
+        const [detail, msgsData, toolsData] = await Promise.all([
+          api(`/agentsview/session/${encodeURIComponent(sessionId)}`),
+          api(`/agentsview/session/${encodeURIComponent(sessionId)}/messages?limit=60`),
+          api(`/agentsview/session/${encodeURIComponent(sessionId)}/tool-calls`)
+        ]);
+
+        el.avDetailTitle.textContent = detail.title;
+        el.avDetailAgentBadge.textContent = detail.agent;
+        el.avCountMsgs.textContent = msgsData.total;
+        el.avCountTools.textContent = toolsData.count;
+
+        el.avMetaProject.textContent = detail.project;
+        el.avMetaCwd.textContent = detail.cwd || '未记录';
+        el.avMetaBranch.textContent = detail.git_branch || 'main';
+        el.avMetaTime.textContent = detail.started_at ? detail.started_at.substring(0, 19).replace('T', ' ') : '-';
+
+        // 渲染消息流与工具调用
+        renderMessagesStream(msgsData.messages);
+        renderToolsStream(toolsData.tool_calls);
+
+        setAvDetailTab('messages');
+      } catch (err) {
+        alert('拉取会话详情失败: ' + err.message);
+      }
+    }
+
+    function renderMessagesStream(messages) {
+      el.avPaneMessages.innerHTML = '';
+      if (messages.length === 0) {
+        el.avPaneMessages.innerHTML = '<div class="text-slate-500 text-center py-20">该会话暂无消息</div>';
+        return;
+      }
+
+      messages.forEach(m => {
+        const row = document.createElement('div');
+        const isUser = m.role === 'user';
+        
+        let roleBadge = isUser ? 'bg-purple-950 text-purple-300 border-purple-800' : 'bg-emerald-950 text-emerald-300 border-emerald-800';
+        let bubbleBg = isUser ? 'bg-[#272338] border-purple-900/50 text-purple-50' : 'bg-[#1f1f27] border-[#2e2e3c] text-slate-200';
+
+        row.className = `flex flex-col space-y-1 ${isUser ? 'items-end' : 'items-start'}`;
+
+        // 使用 Marked + KaTeX 格式化对话正文
+        let processed = renderLatex(m.content);
+        let parsedHtml = marked.parse(processed);
+        let safeHtml = DOMPurify.sanitize(parsedHtml, {
+          ADD_TAGS: ['math', 'annotation', 'semantics', 'mrow', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac', 'msqrt'],
+          ADD_ATTR: ['aria-hidden', 'encoding']
+        });
+
+        // 思考过程展示 (如果有)
+        let thinkingHtml = '';
+        if (m.thinking_text) {
+          thinkingHtml = `
+            <details class="mb-2 text-[11px] bg-black/40 p-2 rounded border border-purple-900/40 text-purple-200/80">
+              <summary class="cursor-pointer font-mono font-semibold">思考过程 (Thinking)</summary>
+              <div class="mt-1.5 whitespace-pre-wrap mono-font opacity-90">${escapeHtml(m.thinking_text)}</div>
+            </details>
+          `;
+        }
+
+        row.innerHTML = `
+          <div class="flex items-center space-x-1.5 text-[10px] text-slate-400 px-1">
+            <span class="px-1.5 py-0.2 rounded font-bold uppercase border ${roleBadge}">${escapeHtml(m.role)}</span>
+            <span class="font-mono">${escapeHtml(m.timestamp ? m.timestamp.substring(11, 19) : '')}</span>
+          </div>
+          <div class="max-w-3xl rounded-xl p-4 border text-xs markdown-body ${bubbleBg} shadow-sm">
+            ${thinkingHtml}
+            <div>${safeHtml}</div>
+          </div>
+        `;
+        el.avPaneMessages.appendChild(row);
+      });
+    }
+
+    function renderToolsStream(tools) {
+      el.avPaneTools.innerHTML = '';
+      if (tools.length === 0) {
+        el.avPaneTools.innerHTML = '<div class="text-slate-500 text-center py-20">此会话未产生独立的工具调用</div>';
+        return;
+      }
+
+      tools.forEach((tc, idx) => {
+        const item = document.createElement('div');
+        item.className = 'bg-[#1e1e26] border border-[#2e2e3c] rounded-lg p-3 text-xs space-y-2';
+        
+        let argsPretty = tc.input_json || '';
+        try {
+          const parsed = JSON.parse(tc.input_json);
+          argsPretty = JSON.stringify(parsed, null, 2);
+        } catch(e) {}
+
+        item.innerHTML = `
+          <div class="flex items-center justify-between border-b border-[#2a2a38] pb-1.5">
+            <div class="flex items-center space-x-2">
+              <span class="font-mono text-purple-400 font-bold">#${idx + 1}</span>
+              <span class="px-2 py-0.5 rounded bg-purple-950 text-purple-300 font-mono font-semibold text-[11px] border border-purple-800/40">${escapeHtml(tc.tool_name)}</span>
+              <span class="text-[10px] text-slate-500 bg-black/30 px-1.5 py-0.5 rounded">${escapeHtml(tc.category || 'tool')}</span>
+            </div>
+            <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(tc.id)}</span>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400 font-semibold mb-1">输入参数 (Arguments):</div>
+            <pre class="bg-black/50 p-2 rounded text-[11px] mono-font text-emerald-300 overflow-x-auto max-h-36">${escapeHtml(argsPretty)}</pre>
+          </div>
+          ${tc.result_content ? `
+          <div>
+            <div class="text-[10px] text-slate-400 font-semibold mb-1">执行结果摘要 (Output):</div>
+            <pre class="bg-black/50 p-2 rounded text-[11px] mono-font text-slate-300 overflow-x-auto max-h-36">${escapeHtml(tc.result_content)}</pre>
+          </div>` : ''}
+        `;
+        el.avPaneTools.appendChild(item);
+      });
+    }
+
+    function setAvDetailTab(tab) {
+      state.avCurrentTab = tab;
+      if (tab === 'messages') {
+        el.tabAvMsgs.className = 'px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]';
+        el.tabAvTools.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]';
+        el.avPaneMessages.classList.remove('hidden');
+        el.avPaneTools.classList.add('hidden');
+      } else {
+        el.tabAvTools.className = 'px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]';
+        el.tabAvMsgs.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]';
+        el.avPaneTools.classList.remove('hidden');
+        el.avPaneMessages.classList.add('hidden');
+      }
+    }
+
+    el.tabAvMsgs.addEventListener('click', () => setAvDetailTab('messages'));
+    el.tabAvTools.addEventListener('click', () => setAvDetailTab('tools'));
+
+    // ======================== 初始化入口 ========================
     async function init() {
       await loadConfig();
       await loadFileTree();
-      await loadStatusesCenter(); // 默认加载状态中心
-      await loadTags();           // 后台预加载标签中心
-      loadTemplatesList();        // 预拉取模板
+      await loadStatusesCenter();
+      await loadTags();
+      loadTemplatesList();
       setView('split');
       lucide.createIcons();
     }

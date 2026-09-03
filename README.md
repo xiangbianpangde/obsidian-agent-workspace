@@ -35,7 +35,13 @@
    - **全局禁止删除**：代码层与路由中完全不存在任何 Delete 操作，杜绝知识资产误损；
    - **SHA256 乐观锁并发防覆盖**：保存时严格比对单快照 `expected_hash`，若检测到在 Obsidian 外部被修改，立即返回 `409 Conflict` 并阻断保存；
    - **原子文件写入与创建**：基于 `open(..., "x")`（O_EXCL）防止创建同名笔记覆盖；基于同目录临时文件 + `os.replace` 保证原子更新；
-   - **敏感密钥隔离**：扫描器与读取 API 双重运行全量正则密钥拦截器，`.obsidian` 配置区与含 Secret 笔记绝不泄露到界面中。
+   - **敏感密钥隔离**：扫描器与读取 API 双重运行全量正则密钥拦截器，`.obsidian` 配置区与含 Secret 笔记绝不泄露到界面中；
+6. **双核工作台与 AgentsView AI 会话中心 (第二个 P0 落地)**：
+   - **无缝切换**：顶栏一键切换【知识中心 (Obsidian)】与【AI 会话中心 (AgentsView)】；
+   - **多 Agent 全景感知**：只读直连 `~/.agentsview/sessions.db`（1.1GB），毫秒级聚合 12 种 Agent 引擎（Pi 542 场、Claude 486 场、Codex 395 场、Hermes 91 场、Grok 80 场等共 **1,821 场会话**与 **208,000+ 条消息**）；
+   - **工作流活跃度大盘**：统计近 24 小时、近 7 天高频活跃指标与活跃项目排行榜；
+   - **会话与工具调用回溯**：有界分页拉取问答流，气泡排版支持代码高亮与 KaTeX 数学公式，支持回溯每一个历史 Tool Call（如 `bash`、`read`、`edit`）的参数与执行输出；
+   - **隐私保护**：严格只读连接（`mode=ro`，绝无 `immutable=1`），响应强制注入 `Cache-Control: no-store`，会话内容不在工作台数据库中沉淀，绝不泄露。
 
 ---
 
@@ -45,28 +51,27 @@
                      浏览器客户端 (Web Browser)
                                 │
                ┌────────────────┴────────────────┐
-               │    Obsidian Agent Workspace     │
-               │   (三栏现代化 SPA / CodeMirror)   │
+               │    Personal AI Workspace        │
+               │   (知识中心 ↔ AI 会话中心 双核)   │
                └────────────────┬────────────────┘
                                 │ REST (127.0.0.1:8787)
             ┌───────────────────┴───────────────────┐
-            │          FastAPI 后端服务             │
-            ├───────────────────────────────────────┤
-            │  /api/files  ·  /api/tags  ·  /api/...│
+            │          FastAPI 后端核心服务         │
             ├───────────────────┬───────────────────┤
-            │  Path Guard       │ Template Engine   │
-            │  (Operation-Aware)│ (Templater 子集)  │
-            ├───────────────────┴───────────────────┤
-            │      Vault Scanner & Watcher          │
-            │      (Secret Detector 首层拦截)       │
-            └───────────┬───────────────────┬───────┘
-                        │                   │
-                        ▼                   ▼
-            ┌──────────────────────┐  ┌─────────────┐
-            │   SQLite 知识索引库  │  │ 本地用户    │
-            │ (files/tags/metadata)│  │ Obsidian    │
-            │   data/vault.db      │  │ Vault 知识库│
-            └──────────────────────┘  └─────────────┘
+            │  Obsidian 知识域  │  AgentsView 会话域│
+            │  /api/files, tags │  /api/agentsview/*│
+            ├───────────────────┼───────────────────┤
+            │  Path Guard       │  AgentsView       │
+            │  (Operation-Aware)│  Adapter          │
+            ├───────────────────┼───────────────────┤
+            │  Vault Scanner &  │  mode=ro 只读连接 │
+            │  Watchdog 监听器  │  (no-store 缓存)  │
+            └─────────┬─────────┴─────────┬─────────┘
+                      ▼                   ▼
+            ┌──────────────────┐ ┌──────────────────┐
+            │ 本地用户 Obsidian│ │ 本地 AgentsView  │
+            │ Vault 笔记资产   │ │ sessions.db 库   │
+            └──────────────────┘ └──────────────────┘
 ```
 
 ---
@@ -124,7 +129,7 @@ python -m backend.scripts.serve
 
 ## 🧪 自动化验收测试
 
-本项目包含完备的 25 项自动化测试套件，全面覆盖 P0 验收标准：
+本项目包含完备的 30 项自动化测试套件，全面覆盖 P0-1 与 P0-2 验收标准：
 
 ```bash
 # 运行全部测试套件 (耗时 < 1s)
@@ -132,18 +137,15 @@ python -m unittest discover -s backend/tests -v
 ```
 
 测试矩阵：
+- `test_agentsview.py`：第二个 P0 核心测试 (5/5 PASS)：
+  * ✅ 1. 自动探测并接入 `~/.agentsview/sessions.db` 与 CLI，返回版本与连通性
+  * ✅ 2. 工作流全景看板（12 种 Agent 矩阵、项目排行榜、近 7 天活跃度）
+  * ✅ 3. 会话列表按 Agent（如 Pi/Codex）及项目筛选与有界分页
+  * ✅ 4. 单会话消息流有界分页拉取与 `Cache-Control: no-store` 隐私保护
+  * ✅ 5. 会话工具调用（Tool Calls）记录回溯与 no-store 保护
 - `test_secret_detector.py`：密钥模式识别、单反斜杠转义与 >256k 全量扫描防绕过回归测试 (5/5 PASS)
 - `test_template_engine.py`：两阶段渲染、日期字面量与偏移计算、JS 块降级、动态参数 Fail-Closed (9/9 PASS)
-- `test_acceptance_sample_vault.py`：基于独立 Sample-Vault 副本的端到端 P0 完整验收套件 (9/9 PASS)：
-  * ✅ 1. 真实全量扫描耗时计时 (<30s) 与索引准确性
-  * ✅ 2. 嵌套文件树与单快照读取
-  * ✅ 3. 标签热度排行与状态分布分组
-  * ✅ 4. 真实的编辑成功保存、索引刷新与 `.bak` 备份生成
-  * ✅ 5. 真实的 409 乐观锁冲突阻断
-  * ✅ 6. 真实的模板创建、建议落位与索引立即可见
-  * ✅ 7. 真实的日记模板创建与 JS 块降级标记保留
-  * ✅ 8. 路径穿越、排除区读取、模板写保护、Secret 读取拦截与无 DELETE (404/405)
-  * ✅ 9. Sample-Vault 零摩擦开源复现能力验证
+- `test_acceptance_sample_vault.py`：基于独立 Sample-Vault 副本的端到端 P0 完整验收套件 (9/9 PASS)
 - `test_acceptance_real_vault.py`：本地真实大库 (2400+ md) 规模与核心契约读取验证 (2/2 PASS，外部环境自动跳过)
 
 ---

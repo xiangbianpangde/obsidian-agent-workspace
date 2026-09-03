@@ -48,3 +48,7 @@ watchdog:
 
 server:
   port: 8787
+
+agentsview:
+  database: ~/.agentsview/sessions.db
+  cli_path: /Users/xbpd/.local/bin/agentsview

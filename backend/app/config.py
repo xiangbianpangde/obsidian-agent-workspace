@@ -22,6 +22,8 @@ class AppConfig:
     reject_symlink_escape: bool = True
     watchdog_enabled: bool = True
     debounce_ms: int = 500
+    agentsview_db_path: Path | None = None
+    agentsview_cli_path: Path | None = None
     raw: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -29,6 +31,10 @@ class AppConfig:
         self.vault_path = self.vault_path.resolve()
         self.templates_dir = self.templates_dir.resolve()
         self.database_path = self.database_path.resolve()
+        if self.agentsview_db_path:
+            self.agentsview_db_path = self.agentsview_db_path.expanduser().resolve()
+        if self.agentsview_cli_path:
+            self.agentsview_cli_path = self.agentsview_cli_path.expanduser().resolve()
 
     @property
     def vault_root(self) -> Path:
@@ -62,6 +68,10 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     sec = raw.get("security", {}) or {}
     srv = raw.get("server", {}) or {}
     wd = raw.get("watchdog", {}) or {}
+    av = raw.get("agentsview", {}) or {}
+
+    av_db = Path(av.get("database")).expanduser() if av.get("database") else None
+    av_cli = Path(av.get("cli_path")).expanduser() if av.get("cli_path") else None
 
     return AppConfig(
         vault_path=vault_path,
@@ -74,6 +84,8 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         reject_symlink_escape=bool(sec.get("reject_symlink_escape", True)),
         watchdog_enabled=bool(wd.get("enabled", True)),
         debounce_ms=int(wd.get("debounce_ms", 500)),
+        agentsview_db_path=av_db,
+        agentsview_cli_path=av_cli,
         raw=raw,
     )
 
