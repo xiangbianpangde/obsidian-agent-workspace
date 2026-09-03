@@ -66,8 +66,8 @@ class VaultEventHandler(FileSystemEventHandler):
             return
         if matches_exclude(self.cfg, rel):
             return
-        # MUST-1: 终态事件（deleted/moved_out）不参与 debounce —— 宁可多处理，不可丢事件
-        if kind not in ("deleted", "moved_out") and self._debounce(rel):
+        # MUST-1: 仅 modified 参与 debounce；created/moved_in/deleted/moved_out 均始终处理，防止正向 identity event 被旧 modify 吞掉
+        if kind == "modified" and self._debounce(rel):
             return
         if self.coordinator is not None:
             if not self.coordinator.dispatch((kind, rel)):
