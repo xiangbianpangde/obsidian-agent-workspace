@@ -1558,11 +1558,11 @@
       });
 
       try {
-        // 并行拉取会话详情、消息流与工具调用
+        // 并行拉取会话详情、第一页消息流与工具调用 (P1-AV-3)
         const [detail, msgsData, toolsData] = await Promise.all([
           api(`/agentsview/session/${encodeURIComponent(sessionId)}`),
-          api(`/agentsview/session/${encodeURIComponent(sessionId)}/messages?limit=60`),
-          api(`/agentsview/session/${encodeURIComponent(sessionId)}/tool-calls`)
+          api(`/agentsview/session/${encodeURIComponent(sessionId)}/messages?from=0&limit=60`),
+          api(`/agentsview/session/${encodeURIComponent(sessionId)}/tool-calls?limit=100`)
         ]);
 
         el.avDetailTitle.textContent = detail.title;
@@ -1575,23 +1575,30 @@
         el.avMetaBranch.textContent = detail.git_branch || 'main';
         el.avMetaTime.textContent = detail.started_at ? detail.started_at.substring(0, 19).replace('T', ' ') : '-';
 
-        // 渲染消息流与工具调用
-        renderMessagesStream(msgsData.messages);
-        renderToolsStream(toolsData.tool_calls);
+        // 初始化分页游标状态 (P1-AV-3)
+        state.avTotalMessages = msgsData.total;
+        state.avNextOrdinal = msgsData.next_ordinal;
+        state.avHasMore = msgsData.has_more;
+        state.avLoadedMessagesCount = msgsData.messages.length;
 
+        // 清空并渲染首批消息流与工具调用
+        el.avPaneMessages.innerHTML = '';
+        if (msgsData.messages.length === 0) {
+          el.avPaneMessages.innerHTML = '<div class="text-slate-500 text-center py-20">该会话暂无消息</div>';
+        } else {
+          appendMessagesToStream(msgsData.messages);
+          renderLoadMoreControl();
+        }
+
+        renderToolsStream(toolsData.tool_calls);
         setAvDetailTab('messages');
       } catch (err) {
         alert('拉取会话详情失败: ' + err.message);
       }
     }
 
-    function renderMessagesStream(messages) {
-      el.avPaneMessages.innerHTML = '';
-      if (messages.length === 0) {
-        el.avPaneMessages.innerHTML = '<div class="text-slate-500 text-center py-20">该会话暂无消息</div>';
-        return;
-      }
-
+    // 追加消息到流面板中 (P1-AV-3 增量追加)
+    function appendMessagesToStream(messages) {
       messages.forEach(m => {
         const row = document.createElement('div');
         const isUser = m.role === 'user';
@@ -1601,7 +1608,6 @@
 
         row.className = `flex flex-col space-y-1 ${isUser ? 'items-end' : 'items-start'}`;
 
-        // 使用 Marked + KaTeX 格式化对话正文
         let processed = renderLatex(m.content);
         let parsedHtml = marked.parse(processed);
         let safeHtml = DOMPurify.sanitize(parsedHtml, {
@@ -1609,7 +1615,6 @@
           ADD_ATTR: ['aria-hidden', 'encoding']
         });
 
-        // 思考过程展示 (如果有)
         let thinkingHtml = '';
         if (m.thinking_text) {
           thinkingHtml = `
@@ -1623,7 +1628,7 @@
         row.innerHTML = `
           <div class="flex items-center space-x-1.5 text-[10px] text-slate-400 px-1">
             <span class="px-1.5 py-0.2 rounded font-bold uppercase border ${roleBadge}">${escapeHtml(m.role)}</span>
-            <span class="font-mono">${escapeHtml(m.timestamp ? m.timestamp.substring(11, 19) : '')}</span>
+            <span class="font-mono">#${m.ordinal} · ${escapeHtml(m.timestamp ? m.timestamp.substring(11, 19) : '')}</span>
           </div>
           <div class="max-w-3xl rounded-xl p-4 border text-xs markdown-body ${bubbleBg} shadow-sm">
             ${thinkingHtml}
@@ -1632,6 +1637,45 @@
         `;
         el.avPaneMessages.appendChild(row);
       });
+    }
+
+    // 渲染“加载更多消息”控制按钮 (P1-AV-3 闭合)
+    function renderLoadMoreControl() {
+      const existingBtn = document.getElementById('av-load-more-container');
+      if (existingBtn) existingBtn.remove();
+
+      const container = document.createElement('div');
+      container.id = 'av-load-more-container';
+      container.className = 'pt-2 pb-4 text-center';
+
+      if (state.avHasMore) {
+        const btn = document.createElement('button');
+        btn.className = 'w-full py-2.5 bg-[#252532] hover:bg-[#323244] border border-[#3c3c4e] rounded-lg text-xs text-purple-300 font-medium transition flex items-center justify-center space-x-1.5 shadow-sm';
+        btn.innerHTML = `<i data-lucide="chevron-down" class="w-3.5 h-3.5"></i><span>加载后续消息 (已展示 ${state.avLoadedMessagesCount} / 共 ${state.avTotalMessages} 条)...</span>`;
+        btn.addEventListener('click', async () => {
+          btn.innerHTML = '<span>正在加载后续消息...</span>';
+          btn.disabled = true;
+          try {
+            const data = await api(`/agentsview/session/${encodeURIComponent(state.avCurrentSessionId)}/messages?from=${state.avNextOrdinal}&limit=60`);
+            state.avNextOrdinal = data.next_ordinal;
+            state.avHasMore = data.has_more;
+            state.avLoadedMessagesCount += data.messages.length;
+            
+            container.remove();
+            appendMessagesToStream(data.messages);
+            renderLoadMoreControl();
+            lucide.createIcons();
+          } catch(err) {
+            btn.innerHTML = `<span>加载失败: ${escapeHtml(err.message)}，点击重试</span>`;
+            btn.disabled = false;
+          }
+        });
+        container.appendChild(btn);
+      } else {
+        container.innerHTML = `<div class="text-[11px] text-slate-500 font-mono tracking-wide">— 已加载全部 ${state.avTotalMessages} 条消息 —</div>`;
+      }
+      el.avPaneMessages.appendChild(container);
+      lucide.createIcons();
     }
 
     function renderToolsStream(tools) {

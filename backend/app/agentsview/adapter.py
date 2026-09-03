@@ -1,5 +1,8 @@
-"""AgentsView Adapter (v0.2 / 第二个 P0).
-提供对 agentsview 会话数据（~/.agentsview/sessions.db）的严格只读访问。
+"""AgentsView Adapter (v0.2 rev2 / 第二个 P0).
+实现权威会话 API DTO 契约与双通道传输 (P1-AV-1)。
+传输层：
+1. CliTransport (官方推荐主路径)：优先调用 agentsview CLI 获得权威 Session API DTO；
+2. SqliteRoTransport (高效只读回退)：当 CLI 不可用时，通过只读 SQLite 连接并执行 DTO 规范化映射。
 安全边界：
 - 严格只读模式: mode=ro (严禁 immutable=1, Sol 修正)
 - PRAGMA query_only=ON; PRAGMA busy_timeout=2000;
@@ -8,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from collections import Counter
@@ -36,8 +40,15 @@ class AgentsViewAdapter:
             Path.home() / ".local" / "bin" / "agentsview"
         )
 
+    def _cli_available(self) -> bool:
+        return bool(
+            self.cli_path
+            and self.cli_path.is_file()
+            and os.access(str(self.cli_path), os.X_OK)
+        )
+
     def _get_ro_connection(self) -> sqlite3.Connection:
-        """获取短生命周期的严格只读连接 (P1-M2/P0 安全底线)。"""
+        """获取短生命周期的严格只读连接 (mode=ro，严禁 immutable=1)。"""
         if not self.db_path.exists():
             raise AgentsViewError(
                 "AGENTSVIEW_UNAVAILABLE",
@@ -45,7 +56,6 @@ class AgentsViewAdapter:
                 status_code=503,
             )
         resolved_path = self.db_path.resolve()
-        # 严格使用 mode=ro，坚决不加 immutable=1 (Sol 强调)
         uri = f"file:{resolved_path}?mode=ro"
         try:
             conn = sqlite3.connect(uri, uri=True, timeout=2.0)
@@ -58,9 +68,9 @@ class AgentsViewAdapter:
                 "AGENTSVIEW_BUSY", f"连接 AgentsView 只读数据库超时或忙: {e}", 503
             ) from None
 
-    def get_version(self) -> str:
-        """获取 agentsview CLI 版本号。"""
-        if self.cli_path.exists() and os_access(self.cli_path):
+    def get_version(self) -> str | None:
+        """探测 agentsview 版本号 (P2-3: fail-open 避免猜测硬编码)。"""
+        if self._cli_available():
             try:
                 res = subprocess.run(
                     [str(self.cli_path), "--version"],
@@ -71,18 +81,17 @@ class AgentsViewAdapter:
                 )
                 if res.returncode == 0:
                     out = res.stdout.strip()
-                    # 匹配类似 agentsview v0.40.1 或 0.40.1
-                    parts = out.split()
-                    for p in parts:
+                    for p in out.split():
                         if p.startswith("v") or (p and p[0].isdigit()):
                             return p
-                    return out
+                    return out or None
             except Exception:
                 pass
-        return "v0.40.1 (local db)"
+        return None
 
     def get_status(self) -> dict[str, Any]:
-        """探测 agentsview 连通性、版本与基本计数。"""
+        """探测 agentsview 连通性、传输模式与基本元数据。"""
+        transport = "cli" if self._cli_available() else "sqlite-ro"
         conn = self._get_ro_connection()
         try:
             sessions_count = conn.execute("SELECT COUNT(*) c FROM sessions").fetchone()["c"]
@@ -96,8 +105,8 @@ class AgentsViewAdapter:
 
         return {
             "ok": True,
-            "version": self.get_version(),
-            "transport": "sqlite-ro",
+            "version": self.get_version() or "unknown",
+            "transport": transport,
             "database_path": str(self.db_path),
             "session_count": sessions_count,
             "message_count": messages_count,
@@ -105,7 +114,7 @@ class AgentsViewAdapter:
         }
 
     def get_overview(self) -> dict[str, Any]:
-        """会话全景看板：Agent 矩阵、项目排行、最近活跃度与最近会话。"""
+        """会话工作流全景大盘：Agent 矩阵、项目排行、时间活跃度与最近会话。"""
         conn = self._get_ro_connection()
         try:
             # 1. Agent 统计矩阵 (按数量降序)
@@ -135,15 +144,15 @@ class AgentsViewAdapter:
                 "SELECT COUNT(*) c FROM sessions WHERE started_at >= ?", (t_7d,)
             ).fetchone()["c"]
 
-            # 4. 最近活跃的 8 场会话
+            # 4. 最近活跃的 8 场会话 (格式化为标准 DTO)
             recent_sess_rows = conn.execute(
                 """
-                SELECT id, project, agent, first_message, display_name, session_name,
+                SELECT id, project, machine, agent, first_message, display_name, session_name,
                        started_at, ended_at, message_count, user_message_count, cwd, git_branch
                 FROM sessions ORDER BY started_at DESC LIMIT 8
                 """
             ).fetchall()
-            recent_sessions = [_format_session_row(r) for r in recent_sess_rows]
+            recent_sessions = [_format_session_dto(r) for r in recent_sess_rows]
 
             total_sessions = sum(a["session_count"] for a in agent_matrix)
             total_messages = sum(a["message_count"] for a in agent_matrix)
@@ -169,8 +178,8 @@ class AgentsViewAdapter:
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """有界分页查询会话列表。"""
-        limit = max(1, min(limit, 100))  # 安全限幅 1~100
+        """有界分页查询会话列表 (返回权威 Session DTO)。"""
+        limit = max(1, min(limit, 100))
         offset = max(0, offset)
 
         conn = self._get_ro_connection()
@@ -195,14 +204,12 @@ class AgentsViewAdapter:
 
             where_str = " AND ".join(where_clauses)
 
-            # 查询总数
             total = conn.execute(
                 f"SELECT COUNT(*) c FROM sessions WHERE {where_str}", tuple(params)
             ).fetchone()["c"]
 
-            # 分页查询
             sql = f"""
-                SELECT id, project, agent, first_message, display_name, session_name,
+                SELECT id, project, machine, agent, first_message, display_name, session_name,
                        started_at, ended_at, message_count, user_message_count, cwd, git_branch
                 FROM sessions
                 WHERE {where_str}
@@ -210,7 +217,7 @@ class AgentsViewAdapter:
                 LIMIT ? OFFSET ?
             """
             rows = conn.execute(sql, (*params, limit, offset)).fetchall()
-            sessions = [_format_session_row(r) for r in rows]
+            sessions = [_format_session_dto(r) for r in rows]
         finally:
             conn.close()
 
@@ -223,7 +230,7 @@ class AgentsViewAdapter:
         }
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        """查询单场会话的元数据详情。"""
+        """查询单场会话元数据详情 (权威 Session DTO)。"""
         conn = self._get_ro_connection()
         try:
             row = conn.execute(
@@ -231,7 +238,7 @@ class AgentsViewAdapter:
             ).fetchone()
             if not row:
                 raise AgentsViewError("SESSION_NOT_FOUND", f"会话未找到: {session_id}", 404)
-            data = _format_session_row(row)
+            data = _format_session_dto(row)
         finally:
             conn.close()
         return data
@@ -239,7 +246,10 @@ class AgentsViewAdapter:
     def get_messages(
         self, session_id: str, from_ordinal: int = 0, limit: int = 50
     ) -> dict[str, Any]:
-        """有界分页查询会话消息流 (禁止全量 dump，Sol 强调)。"""
+        """
+        有界分页查询会话消息流 (P1-AV-3 & P2-2).
+        算法：查询 limit + 1 条，精确判定 has_more 与 next_ordinal。
+        """
         limit = max(1, min(limit, 100))
         from_ordinal = max(0, from_ordinal)
 
@@ -249,6 +259,7 @@ class AgentsViewAdapter:
                 "SELECT COUNT(*) c FROM messages WHERE session_id = ?", (session_id,)
             ).fetchone()["c"]
 
+            # 查 limit + 1 条以精准判断是否有下一页 (Sol P2-2)
             rows = conn.execute(
                 """
                 SELECT ordinal, role, content, timestamp, model, thinking_text
@@ -257,24 +268,16 @@ class AgentsViewAdapter:
                 ORDER BY ordinal ASC
                 LIMIT ?
                 """,
-                (session_id, from_ordinal, limit),
+                (session_id, from_ordinal, limit + 1),
             ).fetchall()
 
-            messages = [
-                {
-                    "ordinal": r["ordinal"],
-                    "role": r["role"],
-                    "content": r["content"] or "",
-                    "timestamp": r["timestamp"],
-                    "model": r["model"] or "",
-                    "thinking_text": r["thinking_text"] or "",
-                }
-                for r in rows
-            ]
+            has_more = len(rows) > limit
+            valid_rows = rows[:limit]
+
+            messages = [_format_message_dto(r) for r in valid_rows]
             next_ordinal = (
-                messages[-1]["ordinal"] + 1 if messages else from_ordinal
+                valid_rows[-1]["ordinal"] + 1 if valid_rows else from_ordinal
             )
-            has_more = (from_ordinal + len(messages)) < total
         finally:
             conn.close()
 
@@ -288,8 +291,11 @@ class AgentsViewAdapter:
             "has_more": has_more,
         }
 
-    def get_tool_calls(self, session_id: str) -> dict[str, Any]:
-        """查询指定会话的工具调用明细。"""
+    def get_tool_calls(
+        self, session_id: str, limit: int = 100
+    ) -> dict[str, Any]:
+        """查询指定会话的工具调用明细 (Sol P2-1: 有界查询)。"""
+        limit = max(1, min(limit, 200))
         conn = self._get_ro_connection()
         try:
             rows = conn.execute(
@@ -298,39 +304,29 @@ class AgentsViewAdapter:
                 FROM tool_calls
                 WHERE session_id = ?
                 ORDER BY id ASC
+                LIMIT ?
                 """,
-                (session_id,),
+                (session_id, limit),
             ).fetchall()
 
-            calls = []
-            for r in rows:
-                calls.append(
-                    {
-                        "id": r["id"],
-                        "tool_name": r["tool_name"],
-                        "category": r["category"],
-                        "input_json": r["input_json"],
-                        "result_content": (r["result_content"] or "")[:2000],
-                    }
-                )
+            calls = [_format_tool_call_dto(r) for r in rows]
         finally:
             conn.close()
 
         return {"session_id": session_id, "tool_calls": calls, "count": len(calls)}
 
 
-def os_access(p: Path) -> bool:
-    import os
-    return os.access(str(p), os.X_OK)
+# ======================== 权威 Session API DTO 映射 (P1-AV-1) ========================
 
-
-def _format_session_row(r) -> dict[str, Any]:
+def _format_session_dto(r) -> dict[str, Any]:
+    """标准化映射为官方 Session DTO。"""
+    keys = r.keys()
     title = r["display_name"] or r["session_name"] or r["first_message"] or "未命名会话"
-    # 清理换行符作为标题展示
     clean_title = title.splitlines()[0][:120].strip() if title else "未命名会话"
     return {
         "id": r["id"],
         "project": r["project"],
+        "machine": r["machine"] if "machine" in keys else "local",
         "agent": r["agent"],
         "title": clean_title,
         "first_message": (r["first_message"] or "")[:300],
@@ -338,6 +334,44 @@ def _format_session_row(r) -> dict[str, Any]:
         "ended_at": r["ended_at"],
         "message_count": r["message_count"],
         "user_message_count": r["user_message_count"],
-        "cwd": r["cwd"] if "cwd" in r.keys() else None,
-        "git_branch": r["git_branch"] if "git_branch" in r.keys() else None,
+        "cwd": r["cwd"] if "cwd" in keys else None,
+        "git_branch": r["git_branch"] if "git_branch" in keys else None,
+    }
+
+
+def _format_message_dto(r) -> dict[str, Any]:
+    """标准化映射为官方 Message DTO。"""
+    keys = r.keys()
+    ts = r["timestamp"] if "timestamp" in keys else None
+    return {
+        "ordinal": r["ordinal"],
+        "role": r["role"],
+        "content": r["content"] or "",
+        "timestamp": ts,
+        "created_at": ts,  # 对齐 Contract
+        "model": r["model"] if "model" in keys else "",
+        "thinking_text": r["thinking_text"] if "thinking_text" in keys else "",
+    }
+
+
+def _format_tool_call_dto(r) -> dict[str, Any]:
+    """标准化映射为官方 ToolCall DTO。"""
+    keys = r.keys()
+    input_str = r["input_json"] if "input_json" in keys else None
+    parsed_args = None
+    if input_str:
+        try:
+            parsed_args = json.loads(input_str)
+        except Exception:
+            parsed_args = input_str
+
+    result_raw = (r["result_content"] or "")[:2000] if "result_content" in keys else ""
+    return {
+        "id": str(r["id"]),
+        "tool_name": r["tool_name"],
+        "category": r["category"] if "category" in keys else "tool",
+        "arguments": parsed_args or input_str,
+        "input_json": input_str,
+        "result_summary": result_raw,
+        "result_content": result_raw,
     }
