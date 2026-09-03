@@ -5,10 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api import files as files_api
 from .api import tags as tags_api
-from .config import load_config
+from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import init_state
 
@@ -51,3 +53,16 @@ def health():
     finally:
         conn.close()
     return {"ok": True, "files": s["files"], "tags": s["tags"], "watchdog": observer is not None}
+
+
+dist_dir = PROJECT_ROOT / "frontend" / "dist"
+if dist_dir.exists():
+    app.mount("/static", StaticFiles(directory=dist_dir), name="static")
+
+
+@app.get("/")
+def serve_index():
+    index_file = dist_dir / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    return {"message": "Obsidian Agent Workspace API Running"}
