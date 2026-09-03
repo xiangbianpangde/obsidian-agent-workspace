@@ -8,9 +8,12 @@ import json
 import os
 import threading
 import uuid
+import mimetypes
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..database import sqlite
@@ -19,6 +22,7 @@ from ..scanner.parser import parse_markdown
 from ..scanner.vault_scanner import upsert_one
 from ..security.path_guard import (
     PathError,
+    resolve_for_asset_read,
     resolve_for_create,
     resolve_for_read_snapshot,
     resolve_for_write,
@@ -255,3 +259,17 @@ def file_status(req: StatusRequest, conn=Depends(get_conn)):
         _atomic_write(full, fm_lib.dumps(post))
         upsert_one(get_cfg(), conn, req.path, kind="modified")
     return {"ok": True, "path": req.path, "status": req.status}
+
+
+@router.get("/asset")
+def get_asset(
+    path: str = Query(..., description="图片或附件路径"),
+    note_path: str | None = Query(None, description="引用该资源的笔记相对路径"),
+):
+    """安全提供 Vault 内图片与附件二进制流，支持根据当前笔记上下文相对解析。"""
+    try:
+        full = resolve_for_asset_read(get_cfg(), path, note_path)
+    except PathError as e:
+        raise HTTPException(400, str(e))
+    media_type, _ = mimetypes.guess_type(str(full))
+    return FileResponse(full, media_type=media_type or "application/octet-stream")

@@ -12,6 +12,9 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- KaTeX LaTeX 数学公式渲染库 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -32,26 +35,30 @@
     }
   </script>
   <style>
-    /* 自定义滚动条与编辑器字体 */
+    /* 自定义滚动条与排版 */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #1e1e24; }
     ::-webkit-scrollbar-thumb { background: #3f3f4e; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #5a5a70; }
     .mono-font { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    
     .markdown-body h1 { font-size: 1.8rem; font-weight: 700; margin: 1.2rem 0 0.6rem; color: #f1f5f9; border-bottom: 1px solid #33333f; padding-bottom: 0.3rem; }
     .markdown-body h2 { font-size: 1.4rem; font-weight: 600; margin: 1rem 0 0.5rem; color: #e2e8f0; border-bottom: 1px solid #2a2a38; padding-bottom: 0.2rem; }
     .markdown-body h3 { font-size: 1.2rem; font-weight: 600; margin: 0.8rem 0 0.4rem; color: #cbd5e1; }
-    .markdown-body p { margin-bottom: 0.8rem; line-height: 1.7; color: #cbd5e1; }
+    .markdown-body p { margin-bottom: 0.8rem; line-height: 1.75; color: #cbd5e1; }
     .markdown-body ul { list-style-type: disc; margin-left: 1.5rem; margin-bottom: 0.8rem; }
     .markdown-body ol { list-style-type: decimal; margin-left: 1.5rem; margin-bottom: 0.8rem; }
-    .markdown-body blockquote { border-left: 3px solid #7c3aed; padding-left: 1rem; color: #94a3b8; font-style: italic; margin: 0.8rem 0; }
+    .markdown-body blockquote { border-left: 3px solid #7c3aed; padding-left: 1rem; color: #94a3b8; font-style: italic; margin: 0.8rem 0; background: #202028; border-radius: 0 4px 4px 0; padding-top: 4px; padding-bottom: 4px; }
     .markdown-body code { background: #2a2a36; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #f472b6; font-family: monospace; }
     .markdown-body pre code { background: transparent; padding: 0; color: inherit; }
-    .markdown-body table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    .markdown-body table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9em; }
     .markdown-body th, .markdown-body td { border: 1px solid #3f3f4e; padding: 6px 12px; }
-    .markdown-body th { background: #262630; }
-    .wikilink { color: #a78bfa; background: #3b2d54; padding: 1px 6px; border-radius: 4px; text-decoration: none; border-bottom: 1px dashed #7c3aed; }
+    .markdown-body th { background: #262630; color: #f1f5f9; font-weight: 600; }
+    .markdown-body img { max-width: 100%; border-radius: 6px; margin: 0.8rem 0; border: 1px solid #383848; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
+    .wikilink { color: #a78bfa; background: #3b2d54; padding: 1px 6px; border-radius: 4px; text-decoration: none; border-bottom: 1px dashed #7c3aed; transition: all 0.15s; }
     .wikilink:hover { color: #c4b5fd; background: #4c3870; }
+    .katex-display { margin: 1rem 0; overflow-x: auto; overflow-y: hidden; padding: 6px 0; }
+    .katex { font-size: 1.1em; color: #f3e8ff; }
   </style>
 </head>
 <body class="bg-[#18181b] text-slate-200 h-screen flex flex-col select-none overflow-hidden font-sans">
@@ -63,7 +70,7 @@
         <i data-lucide="brain" class="w-5 h-5 mr-2"></i>
         <span>Obsidian Agent Workspace</span>
       </div>
-      <span class="text-xs bg-[#2e2e3a] text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">P0 Demo</span>
+      <span class="text-xs bg-[#2e2e3a] text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">Personal Knowledge Layer</span>
       <span id="vault-path-badge" class="text-xs text-slate-400 hidden sm:inline-block max-w-xs truncate border-l border-slate-700 pl-3">连接中...</span>
     </div>
 
@@ -78,11 +85,15 @@
       <button id="btn-new-file" class="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded flex items-center transition shadow-sm">
         <i data-lucide="plus" class="w-3.5 h-3.5 mr-1"></i>新建笔记
       </button>
+      <!-- 右侧栏折叠触发按钮 -->
+      <button id="btn-toggle-right" title="折叠/展开右侧面板" class="p-1 rounded bg-[#2c2c36] hover:bg-[#383848] text-slate-300">
+        <i data-lucide="panel-right" class="w-4 h-4"></i>
+      </button>
     </div>
   </header>
 
   <!-- 主体三栏布局 -->
-  <div class="flex-1 flex overflow-hidden">
+  <div class="flex-1 flex overflow-hidden relative">
     
     <!-- 左栏：文件树 -->
     <aside class="w-72 bg-[#1c1c20] border-r border-[#2e2e38] flex flex-col shrink-0">
@@ -100,24 +111,17 @@
       </div>
     </aside>
 
-    <!-- 中间栏：Markdown 编辑器与渲染区 -->
-    <main class="flex-1 flex flex-col bg-[#18181b] overflow-hidden">
+    <!-- 中间栏：Markdown 编辑器、属性面板与渲染区 -->
+    <main class="flex-1 flex flex-col bg-[#18181b] overflow-hidden min-w-0">
       <!-- 文件操作顶栏 -->
       <div id="editor-header" class="h-10 bg-[#222228] border-b border-[#2e2e38] flex items-center justify-between px-4 shrink-0">
         <div class="flex items-center space-x-3 overflow-hidden">
           <i data-lucide="file-text" class="w-4 h-4 text-purple-400 shrink-0"></i>
           <span id="current-file-path" class="text-xs text-slate-300 font-mono truncate">未选择文件</span>
-          <!-- 状态胶囊 -->
-          <div id="status-badge-container" class="hidden items-center space-x-1">
-            <span class="text-[10px] text-slate-500">状态:</span>
-            <select id="select-status" class="bg-[#2d2d38] text-xs text-purple-200 border border-purple-900/50 rounded px-1.5 py-0.5 focus:outline-none">
-              <option value="未整理">未整理</option>
-              <option value="进行中">进行中</option>
-              <option value="已完成">已完成</option>
-              <option value="已整理">已整理</option>
-              <option value="未开始">未开始</option>
-            </select>
-          </div>
+          <!-- 属性面板展开/折叠快捷开关 -->
+          <button id="btn-toggle-props" class="hidden text-[10px] text-purple-300 bg-purple-950/60 border border-purple-800/50 px-2 py-0.5 rounded hover:bg-purple-900/60">
+            <i data-lucide="sliders-horizontal" class="w-2.5 h-2.5 inline mr-1"></i>笔记属性
+          </button>
         </div>
 
         <!-- 视图切换与保存 -->
@@ -143,11 +147,25 @@
       <div id="conflict-alert" class="hidden bg-amber-900/80 border-b border-amber-600 px-4 py-2 text-xs flex items-center justify-between text-amber-200">
         <div class="flex items-center space-x-2">
           <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400 shrink-0"></i>
-          <span><b>并发冲突：</b>该文件已被外部（Obsidian 或其它工具）修改！为保护资产，已阻止保存覆盖。</span>
+          <span><b>并发冲突：</b>该文件已被外部修改！为保护资产，已阻止保存覆盖。</span>
         </div>
         <button id="btn-reload-conflict" class="bg-amber-700 hover:bg-amber-600 text-white px-2.5 py-0.5 rounded text-xs">
           重新载入最新版本
         </button>
+      </div>
+
+      <!-- Obsidian 风格【笔记属性 (Properties)】面板区 (可折叠) -->
+      <div id="note-properties-panel" class="hidden bg-[#202026] border-b border-[#2e2e38] p-3 text-xs">
+        <div class="flex items-center justify-between text-slate-400 font-semibold mb-2.5">
+          <div class="flex items-center space-x-1.5 text-slate-300">
+            <i data-lucide="sliders" class="w-3.5 h-3.5 text-purple-400"></i>
+            <span>笔记属性 (Properties)</span>
+          </div>
+          <button id="btn-close-props" class="text-[10px] text-slate-500 hover:text-slate-300">收起</button>
+        </div>
+        <div id="props-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+          <!-- 动态渲染属性项 -->
+        </div>
       </div>
 
       <!-- 编辑/预览主体区 -->
@@ -158,44 +176,82 @@
                     placeholder="选择左侧文件开始浏览或编辑..."
                     class="w-full h-full bg-[#18181b] text-slate-200 p-6 mono-font text-sm leading-relaxed resize-none focus:outline-none border-none overflow-y-auto selection:bg-purple-900 selection:text-purple-100"></textarea>
         </div>
-        <!-- 预览面板 -->
+        <!-- 预览面板 (支持 LaTeX 公式、图片、维基链接) -->
         <div id="preview-pane" class="flex-1 h-full bg-[#1c1c22] border-l border-[#2e2e38] overflow-y-auto p-8 markdown-body hidden">
           <div id="markdown-preview" class="max-w-3xl mx-auto"></div>
         </div>
       </div>
     </main>
 
-    <!-- 右栏：标签与知识结构分析 -->
-    <aside class="w-80 bg-[#1e1e24] border-l border-[#2e2e38] flex flex-col shrink-0">
-      <div class="h-10 border-b border-[#2e2e38] px-4 flex items-center justify-between text-xs text-slate-300 font-semibold bg-[#222228]">
-        <div class="flex items-center space-x-1.5">
-          <i data-lucide="tags" class="w-4 h-4 text-purple-400"></i>
-          <span>标签中心 (Tags)</span>
+    <!-- 右栏：【状态中心】与【标签中心】自由转换工作面板 (可折叠) -->
+    <aside id="right-sidebar" class="w-80 bg-[#1e1e24] border-l border-[#2e2e38] flex flex-col shrink-0 transition-all duration-200">
+      
+      <!-- 顶栏 Tab 切换: 状态中心 vs 标签中心 -->
+      <div class="h-10 border-b border-[#2e2e38] px-2 flex items-center justify-between text-xs bg-[#222228]">
+        <div class="flex space-x-1 bg-[#18181b] p-0.5 rounded border border-[#333342]">
+          <button id="tab-status-center" class="px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]">
+            <i data-lucide="workflow" class="w-3 h-3 mr-1"></i>状态中心
+          </button>
+          <button id="tab-tag-center" class="px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]">
+            <i data-lucide="tags" class="w-3 h-3 mr-1"></i>标签中心
+          </button>
         </div>
-        <span id="active-tag-badge" class="text-[10px] text-purple-300 bg-purple-950/80 px-2 py-0.5 rounded border border-purple-800/50 hidden">全部</span>
+        <button id="btn-collapse-right" title="收起面板" class="text-slate-400 hover:text-slate-200 p-1">
+          <i data-lucide="chevron-right" class="w-4 h-4"></i>
+        </button>
       </div>
 
-      <!-- 标签筛选结果展示 -->
-      <div id="tag-filter-view" class="p-3 border-b border-[#2c2c38] bg-[#24242c] hidden">
-        <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-bold text-purple-300 flex items-center">
-            <i data-lucide="filter" class="w-3 h-3 mr-1"></i><span id="current-tag-name"></span>
-          </span>
-          <button id="btn-clear-tag" class="text-[10px] text-slate-400 hover:text-slate-200">清除筛选</button>
+      <!-- 视图 1: 状态中心 (Status Center) 默认展示 -->
+      <div id="view-status-center" class="flex-1 flex flex-col overflow-hidden">
+        <div class="p-3 border-b border-[#2c2c38] bg-[#22222a]">
+          <div class="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider flex items-center justify-between">
+            <span>工作流状态看板</span>
+            <span id="status-total-badge" class="text-[10px] text-purple-300 font-mono">统计中...</span>
+          </div>
+          <!-- 状态大卡片列表 -->
+          <div id="statuses-cards" class="grid grid-cols-2 gap-1.5">
+            <div class="text-slate-500 text-xs py-4 col-span-2 text-center">正在汇总工作流状态...</div>
+          </div>
         </div>
-        <!-- 状态分布微缩栏 -->
-        <div id="tag-status-pills" class="flex flex-wrap gap-1 mb-2"></div>
-        <!-- 该标签下的笔记列表 -->
-        <div id="tag-files-list" class="max-h-56 overflow-y-auto space-y-1 text-xs pr-1"></div>
+
+        <!-- 选中状态下的笔记列表 -->
+        <div class="flex-1 flex flex-col overflow-hidden p-3 bg-[#1e1e24]">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold text-purple-300 flex items-center">
+              <i data-lucide="list-filter" class="w-3 h-3 mr-1"></i>
+              <span id="active-status-title">点击上方状态查看笔记</span>
+            </span>
+            <span id="active-status-count" class="text-[10px] text-slate-400"></span>
+          </div>
+          <div id="status-files-list" class="flex-1 overflow-y-auto space-y-1 text-xs pr-1">
+            <div class="text-slate-500 text-xs text-center py-8">请点击上方状态卡片下钻浏览</div>
+          </div>
+        </div>
       </div>
 
-      <!-- 全局标签库（按热度排列） -->
-      <div class="flex-1 overflow-y-auto p-3">
-        <div class="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider">高频知识标签</div>
-        <div id="tags-cloud" class="flex flex-wrap gap-1.5">
-          <div class="text-slate-500 text-xs py-4">正在统计知识标签...</div>
+      <!-- 视图 2: 标签中心 (Tag Center) -->
+      <div id="view-tag-center" class="flex-1 flex flex-col overflow-hidden hidden">
+        <!-- 标签筛选结果展示 -->
+        <div id="tag-filter-view" class="p-3 border-b border-[#2c2c38] bg-[#24242c] hidden">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold text-purple-300 flex items-center">
+              <i data-lucide="filter" class="w-3 h-3 mr-1"></i><span id="current-tag-name"></span>
+            </span>
+            <button id="btn-clear-tag" class="text-[10px] text-slate-400 hover:text-slate-200">清除</button>
+          </div>
+          <div id="tag-status-pills" class="flex flex-wrap gap-1 mb-2"></div>
+          <div id="tag-files-list" class="max-h-56 overflow-y-auto space-y-1 text-xs pr-1"></div>
+        </div>
+
+        <!-- 全局高频标签库 -->
+        <div class="flex-1 overflow-y-auto p-3">
+          <div class="text-[11px] text-slate-400 font-semibold mb-2 uppercase tracking-wider">高频知识标签</div>
+          <div id="tags-cloud" class="flex flex-wrap gap-1.5">
+            <div class="text-slate-500 text-xs py-4">正在统计知识标签...</div>
+          </div>
         </div>
       </div>
+
     </aside>
 
   </div>
@@ -280,9 +336,13 @@
       currentPath: null,
       currentHash: null,
       currentRaw: '',
+      currentMetadata: {},
       currentStatus: null,
       activeTag: null,
-      viewMode: 'split' // 'edit', 'preview', 'split'
+      activeStatus: null,
+      viewMode: 'split', // 'edit', 'preview', 'split'
+      rightTab: 'status', // 'status' | 'tags'
+      rightCollapsed: false
     };
 
     // DOM 元素引用
@@ -293,8 +353,10 @@
       treeContainer: document.getElementById('file-tree-container'),
       fileSearch: document.getElementById('file-search'),
       currentFilePath: document.getElementById('current-file-path'),
-      statusContainer: document.getElementById('status-badge-container'),
-      selectStatus: document.getElementById('select-status'),
+      btnToggleProps: document.getElementById('btn-toggle-props'),
+      propsPanel: document.getElementById('note-properties-panel'),
+      propsGrid: document.getElementById('props-grid'),
+      btnCloseProps: document.getElementById('btn-close-props'),
       editorActions: document.getElementById('editor-actions'),
       conflictAlert: document.getElementById('conflict-alert'),
       btnReloadConflict: document.getElementById('btn-reload-conflict'),
@@ -303,6 +365,18 @@
       editor: document.getElementById('markdown-editor'),
       preview: document.getElementById('markdown-preview'),
       btnSave: document.getElementById('btn-save'),
+      rightSidebar: document.getElementById('right-sidebar'),
+      btnToggleRight: document.getElementById('btn-toggle-right'),
+      btnCollapseRight: document.getElementById('btn-collapse-right'),
+      tabStatusCenter: document.getElementById('tab-status-center'),
+      tabTagCenter: document.getElementById('tab-tag-center'),
+      viewStatusCenter: document.getElementById('view-status-center'),
+      viewTagCenter: document.getElementById('view-tag-center'),
+      statusTotalBadge: document.getElementById('status-total-badge'),
+      statusesCards: document.getElementById('statuses-cards'),
+      activeStatusTitle: document.getElementById('active-status-title'),
+      activeStatusCount: document.getElementById('active-status-count'),
+      statusFilesList: document.getElementById('status-files-list'),
       tagsCloud: document.getElementById('tags-cloud'),
       tagFilterView: document.getElementById('tag-filter-view'),
       currentTagName: document.getElementById('current-tag-name'),
@@ -321,7 +395,7 @@
       viewSplit: document.getElementById('view-split')
     };
 
-    // 初始化 Marked 渲染器
+    // 初始化 Marked Markdown 渲染器
     marked.setOptions({
       highlight: function(code, lang) {
         if (lang && hljs.getLanguage(lang)) {
@@ -332,7 +406,7 @@
       breaks: true
     });
 
-    // 自定义渲染：维基链接 [[Note]] 和 Dataview 代码块降级
+    // 自定义渲染器：处理 Dataview 块
     const renderer = new marked.Renderer();
     const origCode = renderer.code.bind(renderer);
     renderer.code = function(code, language) {
@@ -362,8 +436,32 @@
       return await res.json();
     }
 
-    // 格式化维基链接与 .base 嵌入降级 (v0.2 §5)
-    function renderWikiLinks(html) {
+    // 格式化 LaTeX 数学公式（KaTeX 渲染）
+    function renderLatex(text) {
+      if (!window.katex) return text;
+      // 1. 块级公式 $$...$$
+      text = text.replace(/\$\$([\s\S]+?)\$\$/g, (match, expr) => {
+        try {
+          return katex.renderToString(expr.trim(), { displayMode: true, throwOnError: false });
+        } catch(e) {
+          return `<div class="text-rose-400 font-mono text-xs my-2">${match}</div>`;
+        }
+      });
+      // 2. 行内公式 $...$ (排除转义和紧邻空白字符)
+      text = text.replace(/(^|[^\\])\$([^\$\n]+?)\$/g, (match, prefix, expr) => {
+        try {
+          return prefix + katex.renderToString(expr.trim(), { displayMode: false, throwOnError: false });
+        } catch(e) {
+          return match;
+        }
+      });
+      return text;
+    }
+
+    // 格式化图片与维基链接与 .base 嵌入降级
+    function renderSpecialEmbeds(html) {
+      const currentNote = state.currentPath || '';
+
       // 1. .base 嵌入降级: ![[...base#锚点]]
       html = html.replace(/!\[\[([^\]]+\.base(?:#[^\]|]+)?)(?:\|([^\]]+))?\]\]/g, (match, baseTarget) => {
         return `<div class="bg-[#252233] border border-purple-900/60 p-2.5 rounded my-2 text-xs flex items-center justify-between text-purple-200 shadow-sm">
@@ -375,11 +473,33 @@
                 </div>`;
       });
 
-      // 2. 普通维基链接: [[Note]] 或 [[Note|Alias]]
-      return html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, note, alias) => {
+      // 2. Obsidian 维基格式图片: ![[image.png]] 或 ![[image.png|300]]
+      html = html.replace(/!\[\[([^\]|]+\.(?:png|jpg|jpeg|webp|gif|svg|bmp))(?:\s*\|\s*(\d+))?\]\]/gi, (match, imgPath, width) => {
+        let cleanImg = imgPath.trim();
+        try { cleanImg = decodeURIComponent(cleanImg); } catch(e) {}
+        const url = `/api/asset?path=${encodeURIComponent(cleanImg)}&note_path=${encodeURIComponent(currentNote)}`;
+        const wStyle = width ? `style="width:${width}px; max-width:100%;"` : '';
+        return `<img src="${url}" alt="${cleanImg}" loading="lazy" ${wStyle} class="block my-2 rounded max-h-96 shadow" onerror="this.alt='[无法加载图片: '+this.alt+']'; this.className='text-xs text-rose-400 border border-dashed border-rose-800 p-2 my-1 rounded block';" />`;
+      });
+
+      // 3. 标准 Markdown 图片: 将相对路径重写为 /api/asset (防止 Marked 双重 URL 转义)
+      html = html.replace(/<img\s+([^>]*?)src=["']([^"']+)["']([^>]*?)>/gi, (match, before, src, after) => {
+        if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:') || src.startsWith('/api/asset')) {
+          return match;
+        }
+        let cleanSrc = src;
+        try { cleanSrc = decodeURIComponent(src); } catch(e) {}
+        const safeSrc = `/api/asset?path=${encodeURIComponent(cleanSrc)}&note_path=${encodeURIComponent(currentNote)}`;
+        return `<img ${before}src="${safeSrc}"${after} loading="lazy" class="rounded max-h-96 my-2 shadow block" onerror="this.alt='[图片加载失败: '+this.src+']';" />`;
+      });
+
+      // 4. 普通维基链接: [[Note]] 或 [[Note|Alias]]
+      html = html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, note, alias) => {
         const text = alias || note;
         return `<a href="javascript:void(0)" onclick="openByTitle('${note.trim()}')" class="wikilink">[[${text}]]</a>`;
       });
+
+      return html;
     }
 
     // 1. 加载配置与状态
@@ -414,7 +534,6 @@
 
       function appendNode(item, parentEl, depth = 0) {
         if (item.type === 'dir') {
-          // 文件夹
           const hasChildren = item.children && item.children.length > 0;
           if (!hasChildren) return;
 
@@ -449,7 +568,6 @@
 
           item.children.forEach(child => appendNode(child, childrenContainer, depth + 1));
         } else {
-          // Markdown 文件
           if (filter && !item.filename.toLowerCase().includes(filter.toLowerCase())) {
             return;
           }
@@ -460,7 +578,6 @@
           }`;
           fileEl.style.paddingLeft = `${depth * 14 + 18}px`;
 
-          // 状态小圆点
           let statusBadge = '';
           const st = Array.isArray(item.statuses) ? item.statuses[0] : item.statuses;
           if (st === '进行中') statusBadge = '<span class="w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5"></span>';
@@ -491,7 +608,6 @@
       if (!q) {
         renderTree(state.treeData, el.treeContainer);
       } else {
-        // 展开平铺搜索
         const matches = [];
         function searchNode(n) {
           if (n.type === 'file') {
@@ -529,16 +645,15 @@
         state.currentPath = data.path;
         state.currentHash = data.hash;
         state.currentRaw = data.raw;
+        state.currentMetadata = data.metadata || {};
         
         el.currentFilePath.textContent = data.path;
         el.editor.value = data.raw;
         el.editorActions.classList.remove('hidden');
-        el.statusContainer.classList.remove('hidden');
+        el.btnToggleProps.classList.remove('hidden');
 
-        // 设置当前状态
-        const st = Array.isArray(data.statuses) && data.statuses.length ? data.statuses[0] : (data.statuses || '未整理');
-        state.currentStatus = st;
-        el.selectStatus.value = st;
+        // 渲染 Obsidian 风格【笔记属性】面板
+        renderNoteProperties(data);
 
         updatePreview();
         loadFileTree(); // 刷新高亮
@@ -546,6 +661,103 @@
         alert(`打开文件失败: ${err.message}`);
       }
     }
+
+    // 渲染【笔记属性 (Properties)】面板（参照用户截图）
+    function renderNoteProperties(data) {
+      el.propsGrid.innerHTML = '';
+      el.propsPanel.classList.remove('hidden');
+
+      const meta = data.metadata || {};
+      const st = Array.isArray(data.statuses) && data.statuses.length ? data.statuses[0] : (data.statuses || '未整理');
+      state.currentStatus = st;
+
+      // 1. 状态 (带快速下拉)
+      const stCard = document.createElement('div');
+      stCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between';
+      stCard.innerHTML = `
+        <div class="flex items-center text-[11px] text-slate-400 mb-1">
+          <i data-lucide="list-checks" class="w-3 h-3 mr-1 text-purple-400"></i>状态
+        </div>
+        <div class="flex items-center space-x-1">
+          <select id="props-select-status" class="w-full bg-[#1e1e24] text-xs text-purple-200 border border-purple-800/60 rounded px-1.5 py-0.5 focus:outline-none">
+            <option value="未整理" ${st==='未整理'?'selected':''}>未整理</option>
+            <option value="进行中" ${st==='进行中'?'selected':''}>进行中</option>
+            <option value="已完成" ${st==='已完成'?'selected':''}>已完成</option>
+            <option value="已整理" ${st==='已整理'?'selected':''}>已整理</option>
+            <option value="未开始" ${st==='未开始'?'selected':''}>未开始</option>
+          </select>
+        </div>
+      `;
+      el.propsGrid.appendChild(stCard);
+
+      // 状态下拉切换事件绑定
+      const selectEl = stCard.querySelector('#props-select-status');
+      selectEl.addEventListener('change', async (e) => {
+        const newStatus = e.target.value;
+        try {
+          await api('/file/status', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              path: state.currentPath,
+              status: newStatus,
+              expected_hash: state.currentHash
+            })
+          });
+          await openFile(state.currentPath);
+          loadStatusesCenter(); // 刷新状态中心
+          loadTags();
+        } catch(err) {
+          alert('修改状态失败: ' + err.message);
+          selectEl.value = state.currentStatus;
+        }
+      });
+
+      // 2. 标签 (tags) 胶囊列表
+      if (data.tags && data.tags.length > 0) {
+        const tagCard = document.createElement('div');
+        tagCard.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between col-span-1 sm:col-span-2';
+        const pills = data.tags.map(t => `<span class="bg-[#363446] text-purple-200 px-1.5 py-0.5 rounded text-[11px] border border-purple-800/40">#${t}</span>`).join(' ');
+        tagCard.innerHTML = `
+          <div class="flex items-center text-[11px] text-slate-400 mb-1">
+            <i data-lucide="tag" class="w-3 h-3 mr-1 text-purple-400"></i>tags
+          </div>
+          <div class="flex flex-wrap gap-1">${pills}</div>
+        `;
+        el.propsGrid.appendChild(tagCard);
+      }
+
+      // 3. 其它属性（时间、上课内容等）
+      Object.entries(meta).forEach(([k, v]) => {
+        if (k === '状态' || k === 'status' || k === 'tags') return;
+        const card = document.createElement('div');
+        card.className = 'bg-[#272730] p-2 rounded border border-[#373746] flex flex-col justify-between';
+        
+        let valHtml = '';
+        if (Array.isArray(v)) {
+          valHtml = v.map(item => `<span class="bg-[#33333f] text-slate-200 px-1.5 py-0.5 rounded text-[10px] mr-1">${item}</span>`).join('');
+        } else {
+          valHtml = `<span class="font-mono text-slate-200 truncate text-[11px]">${v}</span>`;
+        }
+
+        card.innerHTML = `
+          <div class="flex items-center text-[11px] text-slate-400 mb-1 truncate">
+            <i data-lucide="hash" class="w-3 h-3 mr-1 text-slate-500"></i>${k}
+          </div>
+          <div class="truncate">${valHtml}</div>
+        `;
+        el.propsGrid.appendChild(card);
+      });
+
+      lucide.createIcons();
+    }
+
+    el.btnToggleProps.addEventListener('click', () => {
+      el.propsPanel.classList.toggle('hidden');
+    });
+    el.btnCloseProps.addEventListener('click', () => {
+      el.propsPanel.classList.add('hidden');
+    });
 
     // 通过 WikiLink 标题打开对应文件
     function openByTitle(title) {
@@ -569,10 +781,9 @@
       }
     }
 
-    // 4. 更新预览区
+    // 4. 更新预览区 (包含 LaTeX 公式、图片、维基链接、Dataview)
     function updatePreview() {
       const raw = el.editor.value;
-      // 提取 frontmatter 与 正文
       let content = raw;
       if (raw.startsWith('---')) {
         const end = raw.indexOf('---', 3);
@@ -580,8 +791,16 @@
           content = raw.substring(end + 3).trim();
         }
       }
-      let html = marked.parse(content);
-      html = renderWikiLinks(html);
+      
+      // 先进行 LaTeX 公式转换 (KaTeX)
+      let precessed = renderLatex(content);
+      
+      // 再通过 Marked 解析 Markdown
+      let html = marked.parse(precessed);
+
+      // 最后进行静态资源/图片、维基链接与 .base 嵌入替换
+      html = renderSpecialEmbeds(html);
+
       el.preview.innerHTML = html;
     }
 
@@ -606,12 +825,10 @@
           })
         });
 
-        // 保存成功后立即获取最新 snapshot hash
         const fresh = await api(`/file/content?path=${encodeURIComponent(state.currentPath)}`);
         state.currentHash = fresh.hash;
         el.conflictAlert.classList.add('hidden');
 
-        // 闪烁保存提示
         el.btnSave.classList.remove('bg-emerald-600');
         el.btnSave.classList.add('bg-purple-600');
         el.btnSave.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 mr-1"></i>已保存`;
@@ -625,7 +842,6 @@
 
       } catch (err) {
         if (err.status === 409) {
-          // 409 冲突：外部修改
           el.conflictAlert.classList.remove('hidden');
           lucide.createIcons();
         } else {
@@ -639,7 +855,6 @@
       if (state.currentPath) openFile(state.currentPath);
     });
 
-    // 快捷键 ⌘S / Ctrl+S 保存
     window.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
@@ -647,30 +862,108 @@
       }
     });
 
-    // 6. 快捷切换状态
-    el.selectStatus.addEventListener('change', async (e) => {
-      const newStatus = e.target.value;
-      if (!state.currentPath) return;
-      try {
-        await api('/file/status', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            path: state.currentPath,
-            status: newStatus,
-            expected_hash: state.currentHash
-          })
-        });
-        // 重新拉取新内容与 hash
-        await openFile(state.currentPath);
-        loadTags(); // 刷新标签面板统计
-      } catch (err) {
-        alert(`修改状态失败: ${err.message}`);
-        el.selectStatus.value = state.currentStatus;
-      }
+    // 6. 右侧栏 Tab 切换: 状态中心 vs 标签中心
+    el.tabStatusCenter.addEventListener('click', () => {
+      state.rightTab = 'status';
+      el.tabStatusCenter.className = 'px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]';
+      el.tabTagCenter.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]';
+      el.viewStatusCenter.classList.remove('hidden');
+      el.viewTagCenter.classList.add('hidden');
     });
 
-    // 7. 加载标签中心与热度
+    el.tabTagCenter.addEventListener('click', () => {
+      state.rightTab = 'tags';
+      el.tabTagCenter.className = 'px-2.5 py-1 rounded bg-purple-600 text-white font-medium flex items-center text-[11px]';
+      el.tabStatusCenter.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 flex items-center text-[11px]';
+      el.viewTagCenter.classList.remove('hidden');
+      el.viewStatusCenter.classList.add('hidden');
+    });
+
+    // 右侧栏折叠/展开
+    const toggleRightSidebar = () => {
+      state.rightCollapsed = !state.rightCollapsed;
+      if (state.rightCollapsed) {
+        el.rightSidebar.classList.add('w-0', 'p-0', 'border-l-0', 'overflow-hidden');
+        el.rightSidebar.classList.remove('w-80');
+      } else {
+        el.rightSidebar.classList.remove('w-0', 'p-0', 'border-l-0', 'overflow-hidden');
+        el.rightSidebar.classList.add('w-80');
+      }
+    };
+    el.btnToggleRight.addEventListener('click', toggleRightSidebar);
+    el.btnCollapseRight.addEventListener('click', toggleRightSidebar);
+
+    // 7. 加载【状态中心】数据
+    async function loadStatusesCenter() {
+      try {
+        const data = await api('/statuses');
+        el.statusesCards.innerHTML = '';
+        let total = 0;
+        data.statuses.forEach(st => {
+          total += st.count;
+          const card = document.createElement('div');
+          
+          let badgeColor = 'bg-slate-700 text-slate-200';
+          if (st.status === '进行中') badgeColor = 'bg-amber-950 text-amber-300 border-amber-800/50';
+          else if (st.status === '已完成') badgeColor = 'bg-emerald-950 text-emerald-300 border-emerald-800/50';
+          else if (st.status === '未整理') badgeColor = 'bg-purple-950 text-purple-300 border-purple-800/50';
+          else if (st.status === '已整理') badgeColor = 'bg-blue-950 text-blue-300 border-blue-800/50';
+          else if (st.status === '未开始') badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700/50';
+
+          card.className = `p-2 rounded border cursor-pointer hover:border-purple-500 transition flex flex-col justify-between ${badgeColor}`;
+          card.innerHTML = `
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-xs truncate">${st.status}</span>
+              <span class="font-mono text-xs font-semibold px-1 rounded bg-black/30">${st.count}</span>
+            </div>
+            <div class="text-[10px] text-slate-400 mt-1 truncate">
+              ${st.top_tags.slice(0, 2).map(t => `#${t.tag}`).join(' ')}
+            </div>
+          `;
+          card.addEventListener('click', () => selectStatus(st.status));
+          el.statusesCards.appendChild(card);
+        });
+        el.statusTotalBadge.textContent = `共 ${data.statuses.length} 种状态`;
+      } catch (err) {
+        el.statusesCards.innerHTML = `<div class="text-rose-400 text-xs p-2">加载状态中心失败: ${err.message}</div>`;
+      }
+    }
+
+    // 选中某个工作流状态，展示属于该状态的笔记列表
+    async function selectStatus(statusName) {
+      state.activeStatus = statusName;
+      el.activeStatusTitle.textContent = `[${statusName}] 笔记列表`;
+      el.statusFilesList.innerHTML = '<div class="text-slate-500 text-center py-4">正在查询笔记...</div>';
+
+      try {
+        const data = await api(`/files/by-status?status=${encodeURIComponent(statusName)}`);
+        el.activeStatusCount.textContent = `共 ${data.files.length} 篇`;
+        el.statusFilesList.innerHTML = '';
+
+        if (data.files.length === 0) {
+          el.statusFilesList.innerHTML = '<div class="text-slate-500 text-center py-4">该状态下暂无笔记</div>';
+          return;
+        }
+
+        data.files.forEach(f => {
+          const item = document.createElement('div');
+          item.className = 'p-1.5 bg-[#252530] hover:bg-purple-950/60 rounded border border-[#333342] cursor-pointer flex flex-col justify-between';
+          item.innerHTML = `
+            <div class="text-slate-200 font-medium truncate text-xs">${f.title || f.filename}</div>
+            <div class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
+              <span class="truncate max-w-[140px]">${f.folder || '根目录'}</span>
+              ${f.tags && f.tags.length ? `<span class="text-purple-400 bg-purple-950 px-1 rounded">#${f.tags[0]}</span>` : ''}
+            </div>
+          `;
+          item.addEventListener('click', () => openFile(f.path));
+          el.statusFilesList.appendChild(item);
+        });
+      } catch (err) {
+        el.statusFilesList.innerHTML = `<div class="text-rose-400 text-xs py-4">查询失败: ${err.message}</div>`;
+      }
+    }
+
+    // 8. 加载【标签中心】数据
     async function loadTags() {
       try {
         const data = await api('/tags');
@@ -690,7 +983,7 @@
       }
     }
 
-    // 8. 选中标签，查看状态分布与文件列表
+    // 选中标签，查看状态分布与文件列表
     async function selectTag(tagName) {
       state.activeTag = tagName;
       el.tagFilterView.classList.remove('hidden');
@@ -700,8 +993,6 @@
 
       try {
         const data = await api(`/files/by-tag?tag=${encodeURIComponent(tagName)}`);
-        
-        // 状态小徽章
         el.tagStatusPills.innerHTML = '';
         Object.entries(data.groups).forEach(([stName, list]) => {
           const span = document.createElement('span');
@@ -710,7 +1001,6 @@
           el.tagStatusPills.appendChild(span);
         });
 
-        // 文件列表
         el.tagFilesList.innerHTML = '';
         Object.entries(data.groups).forEach(([stName, list]) => {
           list.forEach(file => {
@@ -724,7 +1014,6 @@
             el.tagFilesList.appendChild(row);
           });
         });
-
       } catch (err) {
         el.tagFilesList.innerHTML = `<div class="text-rose-400 text-[10px]">加载标签失败: ${err.message}</div>`;
       }
@@ -765,7 +1054,7 @@
     el.viewSplit.addEventListener('click', () => setView('split'));
 
     // 10. 新建笔记 Modal（模板创建 + 空白创建）
-    let activeCreateTab = 'tpl'; // 'tpl' | 'blank'
+    let activeCreateTab = 'tpl';
     let loadedTemplates = [];
 
     const tabCreateTpl = document.getElementById('tab-create-tpl');
@@ -900,8 +1189,9 @@
     async function init() {
       await loadConfig();
       await loadFileTree();
-      await loadTags();
-      loadTemplatesList(); // 预拉取模板
+      await loadStatusesCenter(); // 默认加载状态中心
+      await loadTags();           // 后台预加载标签中心
+      loadTemplatesList();        // 预拉取模板
       setView('split');
       lucide.createIcons();
     }

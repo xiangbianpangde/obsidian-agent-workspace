@@ -107,3 +107,138 @@ def files_by_tag(tag: str = Query(...), conn=Depends(get_conn)):
             }
         )
     return {"tag": tag, "groups": grouped}
+
+
+@router.get("/statuses")
+def statuses_overview(conn=Depends(get_conn)):
+    """状态中心：统计知识库中所有工作流状态及其文件数与关联 tags。"""
+    # 1. 查询所有笔记及其状态
+    meta_rows = conn.execute(
+        f"""
+        SELECT file_id, key, value, value_type FROM metadata
+        WHERE key IN ({','.join('?' for _ in STATUS_KEYS)})
+        """,
+        tuple(STATUS_KEYS),
+    ).fetchall()
+
+    by_file: dict[int, list] = {}
+    for r in meta_rows:
+        by_file.setdefault(r["file_id"], []).append(r)
+
+    # 2. 查询所有 (file_id, tag_name)
+    ft_rows = conn.execute(
+        """
+        SELECT ft.file_id, t.name AS tag_name
+        FROM file_tags ft
+        JOIN tags t ON t.id = ft.tag_id
+        """
+    ).fetchall()
+    tags_by_file: dict[int, list[str]] = {}
+    for r in ft_rows:
+        tags_by_file.setdefault(r["file_id"], []).append(r["tag_name"])
+
+    # 3. 统计状态
+    all_files = conn.execute("SELECT id FROM files").fetchall()
+    status_counts: Counter[str] = Counter()
+    status_tags: dict[str, Counter[str]] = {}
+
+    for f in all_files:
+        fid = f["id"]
+        picked = pick_status(by_file.get(fid, []))
+        if picked is None:
+            st_list = ["无状态"]
+        else:
+            v = picked[1]
+            st_list = v if isinstance(v, list) else [str(v)]
+            if not st_list or st_list == [""]:
+                st_list = ["无状态"]
+
+        ftags = tags_by_file.get(fid, [])
+        for st in st_list:
+            status_counts[st] += 1
+            st_counter = status_tags.setdefault(st, Counter())
+            for tg in ftags:
+                st_counter[tg] += 1
+
+    # 按数量排序返回
+    result = []
+    # 常见核心工作流状态置顶
+    order_pref = ["进行中", "已完成", "未整理", "已整理", "未开始", "无状态"]
+    sorted_statuses = sorted(
+        status_counts.keys(),
+        key=lambda s: (
+            order_pref.index(s) if s in order_pref else 99,
+            -status_counts[s],
+        ),
+    )
+
+    for st in sorted_statuses:
+        top_tags = [
+            {"tag": t, "count": c}
+            for t, c in status_tags.get(st, Counter()).most_common(8)
+        ]
+        result.append(
+            {
+                "status": st,
+                "count": status_counts[st],
+                "top_tags": top_tags,
+            }
+        )
+
+    return {"statuses": result}
+
+
+@router.get("/files/by-status")
+def files_by_status(status: str = Query(...), conn=Depends(get_conn)):
+    """获取指定状态下的所有笔记。"""
+    # 获取所有笔记及其状态
+    meta_rows = conn.execute(
+        f"""
+        SELECT file_id, key, value, value_type FROM metadata
+        WHERE key IN ({','.join('?' for _ in STATUS_KEYS)})
+        """,
+        tuple(STATUS_KEYS),
+    ).fetchall()
+    by_file: dict[int, list] = {}
+    for r in meta_rows:
+        by_file.setdefault(r["file_id"], []).append(r)
+
+    # 匹配对应 status 的 file_ids
+    matched_ids = []
+    all_files = conn.execute("SELECT * FROM files ORDER BY modified_at DESC").fetchall()
+    for f in all_files:
+        fid = f["id"]
+        picked = pick_status(by_file.get(fid, []))
+        if picked is None:
+            cur_statuses = ["无状态"]
+        else:
+            v = picked[1]
+            cur_statuses = v if isinstance(v, list) else [str(v)]
+            if not cur_statuses or cur_statuses == [""]:
+                cur_statuses = ["无状态"]
+        if status in cur_statuses:
+            matched_ids.append(f)
+
+    # 查询这些笔记的 tags
+    results = []
+    for f in matched_ids:
+        tags = [
+            r["name"]
+            for r in conn.execute(
+                "SELECT t.name FROM tags t JOIN file_tags ft ON ft.tag_id=t.id WHERE ft.file_id=?",
+                (f["id"],),
+            )
+        ]
+        results.append(
+            {
+                "path": f["path"],
+                "title": f["title"],
+                "filename": f["filename"],
+                "folder": f["folder"],
+                "modified_at": f["modified_at"],
+                "hash": f["hash"],
+                "tags": tags,
+            }
+        )
+
+    return {"status": status, "files": results}

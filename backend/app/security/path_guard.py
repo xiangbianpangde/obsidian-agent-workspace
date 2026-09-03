@@ -145,6 +145,53 @@ def resolve_for_template_read_snapshot(cfg: AppConfig, relative_or_abs: str):
     return full, raw_bytes
 
 
+_ALLOWED_ASSET_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".pdf", ".ico"
+}
+
+
+def resolve_for_asset_read(cfg: AppConfig, asset_path: str, note_path: str | None = None) -> Path:
+    """静态资源（图片/附件）安全读取边界：扩展名受限、必须在 vault 内、不得命中排除区。"""
+    vault_root = cfg.vault_root
+    asset_str = asset_path.strip()
+
+    # 1. 优先根据笔记相对路径解析（相对当前文档目录）
+    cand = None
+    if note_path and note_path.strip():
+        note_parent = (vault_root / note_path.strip()).parent
+        candidate = (note_parent / asset_str).resolve(strict=False)
+        if is_within(vault_root, candidate) and candidate.is_file():
+            cand = candidate
+
+    # 2. 尝试从 Vault 根目录解析
+    if cand is None:
+        candidate = (vault_root / asset_str).resolve(strict=False)
+        if is_within(vault_root, candidate) and candidate.is_file():
+            cand = candidate
+
+    # 3. 若为纯文件名（Obsidian 常见附件），尝试在 vault 内精确查找同名资源
+    if cand is None and "/" not in asset_str and "\\" not in asset_str:
+        matches = list(vault_root.glob(f"**/{asset_str}"))
+        for m in matches:
+            m_res = m.resolve(strict=False)
+            if is_within(vault_root, m_res) and m_res.is_file():
+                cand = m_res
+                break
+
+    if cand is None or not cand.is_file():
+        raise PathError(f"asset not found: {asset_str}")
+
+    # 4. 扩展名白名单校验
+    if cand.suffix.lower() not in _ALLOWED_ASSET_EXTS:
+        raise PathError(f"asset extension not allowed: {cand.suffix}")
+
+    # 5. 排除区校验
+    canonical_rel = cand.relative_to(vault_root).as_posix()
+    _reject_excluded(cfg, canonical_rel)
+
+    return cand
+
+
 def resolve_for_template_read(cfg: AppConfig, relative_or_abs: str) -> Path:
     """模板读取边界：必须在 templates_dir 内，且是 .md 文件，只读。"""
     full, _ = resolve_for_template_read_snapshot(cfg, relative_or_abs)
