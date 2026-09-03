@@ -45,30 +45,47 @@ def _format_date(dt: datetime, fmt: str) -> str:
     return dt.strftime(py_fmt)
 
 
+def _is_quoted_literal(s: str) -> bool:
+    s = s.strip()
+    return (s.startswith('"') and s.endswith('"') and len(s) >= 2) or (
+        s.startswith("'") and s.endswith("'") and len(s) >= 2
+    )
+
+
 def _eval_date_now(args_str: str, base_dt: datetime) -> tuple[bool, str]:
     """
     解析 tp.date.now 参数。
-    P1-M4-3: 必须 fail-closed。若参数含有动态变量（非字面量整数/日期），返回 (False, 原文)，不猜测执行。
+    P1-M4-3: 严格 fail-closed。
+    - 参数数量 > 3: 拒绝 (False, "")
+    - 第一参数必须为字面量字符串（带双引号或单引号），若为动态变量如 fmt，拒绝
+    - 第二参数必须为合法整数字面量
+    - 第三参数必须为字面量日期（YYYY-MM-DD）
     """
     args = [a.strip() for a in args_str.split(",") if a.strip()]
+    if len(args) > 3:
+        return False, ""
+
     fmt = "YYYY-MM-DD"
     offset_days = 0
     ref_date = base_dt
 
     if len(args) >= 1:
-        fmt = args[0].strip("\"' ")
+        if not _is_quoted_literal(args[0]):
+            return False, ""  # 动态 format 如 fmt，fail-closed
+        fmt = args[0][1:-1]
     if len(args) >= 2:
+        val_str = args[1].strip("\"' ")
         try:
-            offset_days = int(args[1].strip("\"' "))
+            offset_days = int(val_str)
         except ValueError:
-            # 动态参数如 -day，fail-closed 返回 False
             return False, ""
     if len(args) >= 3:
-        ref_str = args[2].strip("\"' ")
+        if not _is_quoted_literal(args[2]):
+            return False, ""
+        ref_str = args[2][1:-1]
         try:
             ref_date = datetime.strptime(ref_str, "%Y-%m-%d")
         except Exception:
-            # 动态参数如 baseDate，fail-closed 返回 False
             return False, ""
 
     try:

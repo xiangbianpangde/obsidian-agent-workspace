@@ -92,7 +92,7 @@ metadata(file_id INTEGER, key TEXT, value TEXT, value_type TEXT);
 | PATCH | `/api/file/status` | `{path, status}` 更新 frontmatter `状态` 字段（单文件操作，连同上条 409 语义） |
 | GET | `/api/templates` | 模板列表（path/name/layer/supported） |
 | GET | `/api/template/preview?path=` | 预览：变量替换后内容 + 目标路径建议 |
-| POST | `/api/file/create-with-template` | `{template, title, vars}` → 变量模拟 → 创建 → 刷新索引 |
+| POST | `/api/file/create-with-template` | `{template_path (或 template), title, custom_path?, vars?}` → 变量模拟 → 创建 → 刷新索引 |
 | ❌ | `DELETE` 任何文件路径 | **不存在该端点；后端代码无 delete_file 函数** |
 
 ## 7. 安全设计（P0 硬底线）

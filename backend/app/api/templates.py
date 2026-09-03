@@ -31,10 +31,17 @@ router = APIRouter()
 
 
 class CreateWithTemplateRequest(BaseModel):
-    template_path: str
+    template_path: str | None = None
+    template: str | None = None  # 合同字段对齐 (v0.2 §6)
     title: str
     custom_path: str | None = None
     vars: dict[str, str] | None = None
+
+    def get_template_path(self) -> str:
+        p = self.template_path or self.template
+        if not p:
+            raise HTTPException(400, "必须提供 template_path 或 template 字段")
+        return p
 
 
 def _sanitize_title(title: str) -> str:
@@ -117,8 +124,9 @@ def preview_template(
 def create_with_template(req: CreateWithTemplateRequest, conn=Depends(get_conn)):
     """使用模板创建新笔记并落盘，自动刷新索引（P1-M4-1 两阶段安全落盘）。"""
     cfg = get_cfg()
+    tpl_path = req.get_template_path()
     try:
-        _, raw_bytes = resolve_for_template_read_snapshot(cfg, req.template_path)
+        _, raw_bytes = resolve_for_template_read_snapshot(cfg, tpl_path)
     except PathError as e:
         raise HTTPException(400, str(e))
 

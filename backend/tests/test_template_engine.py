@@ -95,6 +95,16 @@ tR += "复习内容";
         self.assertIn("unsupported Templater JS block", rendered)
         self.assertIn("const days = [1, 2, 4, 7, 15, 30];", rendered)
 
+    def test_dynamic_format_fail_closed(self):
+        # Sol P1-M4-3: 动态 format (如 fmt) 必须判定为 degraded 且原样保留
+        raw = "<% tp.date.now(fmt) %>"
+        info = inspect_template(raw)
+        self.assertTrue(info["has_unsupported_tags"])
+        self.assertEqual(info["supported_level"], "degraded")
+
+        rendered, _ = render_template(raw, title="")
+        self.assertEqual(rendered.strip(), raw)
+
     def test_template_secret_detection(self):
         # P1-M4-2: 模板读取必须受 secret detector 保护
         from app.security.secret_detector import looks_like_secret
