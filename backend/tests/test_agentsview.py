@@ -170,6 +170,27 @@ class TestAgentsView(unittest.TestCase):
             self.assertIn(field, s_cli, f"CLI DTO 必须包含 {field}")
             self.assertIn(field, s_ro, f"SQLite-ro DTO 必须包含 {field}")
 
+    def test_08_search_query_exact_filtering(self):
+        """P1-AV-NEW-1: 关键词搜索精确回归测试 (即使 CLI 可用，带 q 搜索也必须精准命中关键词，绝不返回未过滤列表)"""
+        # 以已知项目/关键词搜索
+        kw = "智慧鱼塘"
+        res = self.client.get(f"/api/agentsview/sessions?q={kw}&limit=10")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertGreater(data["total"], 0, "应命中包含 '智慧鱼塘' 的会话")
+        # 验证总匹配数远小于未过滤总数 (证明真正执行了过滤)
+        all_res = self.client.get("/api/agentsview/sessions?limit=1")
+        self.assertLess(data["total"], all_res.json()["total"])
+
+        for s in data["sessions"]:
+            matched = (
+                kw in s["title"]
+                or kw in s["first_message"]
+                or kw in (s.get("display_name") or "")
+                or kw in (s.get("session_name") or "")
+            )
+            self.assertTrue(matched, f"返回的会话必须包含搜索词 '{kw}': {s['title']}")
+
 
 if __name__ == "__main__":
     unittest.main()

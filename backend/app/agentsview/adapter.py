@@ -193,9 +193,10 @@ class AgentsViewAdapter:
         """查询会话列表 (主路径: CLI Transport; 回退: SQLite-RO)。"""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
+        has_query = bool(query and query.strip())
 
-        # 1. 优先尝试官方 CLI Transport (P1-AV-1)
-        if self._cli_available() and offset == 0:
+        # 1. 优先尝试官方 CLI Transport：在无关键词模糊检索且 offset==0 的主列表场景使用 (P1-AV-NEW-1)
+        if self._cli_available() and offset == 0 and not has_query:
             try:
                 cmd = [
                     str(self.cli_path),
@@ -336,9 +337,17 @@ class AgentsViewAdapter:
                     next_ord = (
                         messages[-1]["ordinal"] + 1 if messages else from_ordinal
                     )
-                    # CLI 若未提供 total，则通过简单探测判断
-                    total = raw.get("total") or (from_ordinal + len(messages))
-                    has_more = len(messages) >= limit
+                    # 若 CLI 未返回准确 total，通过短生命周期只读连接获取真实条数，保证 has_more 精准 (P2-AV-R1)
+                    total = raw.get("total")
+                    if total is None:
+                        try:
+                            c = self._get_ro_connection()
+                            row = c.execute("SELECT COUNT(*) c FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+                            total = row["c"] if row else len(messages)
+                            c.close()
+                        except Exception:
+                            total = from_ordinal + len(messages)
+                    has_more = (from_ordinal + len(messages)) < total
                     return {
                         "session_id": session_id,
                         "messages": messages,
