@@ -75,7 +75,7 @@
       <span class="text-xs bg-[#2e2e3a] text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">AI OS P0</span>
     </div>
 
-    <!-- 顶栏核心工作区切换 (双核架构: Obsidian 知识中心 ↔ AgentsView 会话中心) -->
+    <!-- 顶栏核心工作区切换 (三核架构: Obsidian 知识中心 ↔ AgentsView 会话中心 ↔ 统一消息中心 IM Hub) -->
     <div class="flex items-center space-x-1 bg-[#18181b] p-0.5 rounded-lg border border-[#333342] text-xs">
       <button id="nav-mode-obsidian" class="px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm">
         <i data-lucide="book-open" class="w-3.5 h-3.5 mr-1.5"></i>知识中心 (Obsidian)
@@ -83,6 +83,10 @@
       <button id="nav-mode-agentsview" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
         <i data-lucide="bot" class="w-3.5 h-3.5 mr-1.5 text-emerald-400"></i>AI 会话中心 (AgentsView)
         <span id="badge-agent-total" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-emerald-950 text-emerald-300 rounded-full border border-emerald-800/50">1800+</span>
+      </button>
+      <button id="nav-mode-im" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
+        <i data-lucide="message-square" class="w-3.5 h-3.5 mr-1.5 text-blue-400"></i>统一消息中心 (IM Hub)
+        <span id="badge-im-unseen" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-blue-950 text-blue-300 rounded-full border border-blue-800/50">0</span>
       </button>
     </div>
 
@@ -103,12 +107,24 @@
       </div>
 
       <!-- 会话模式下的快速刷新 -->
-      <div id="agentsview-header-stats" class="hidden items-center space-x-2 text-slate-400">
+      <div id="agentsview-header-stats" class="hidden flex items-center space-x-2 text-slate-400">
         <span class="text-xs text-slate-400 font-mono" id="av-version-badge">AgentsView v0.40.1</span>
         <span>·</span>
         <span class="flex items-center text-emerald-400"><i data-lucide="database" class="w-3 h-3 mr-1"></i>只读直连</span>
         <button id="btn-refresh-av" title="刷新会话数据" class="ml-2 bg-[#2c2c38] hover:bg-[#393948] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3e3e50]">
           <i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1"></i>刷新
+        </button>
+      </div>
+
+      <!-- IM 统一消息中心下的状态 -->
+      <div id="im-header-stats" class="hidden flex items-center space-x-2 text-xs text-slate-400 shrink-0 whitespace-nowrap">
+        <span id="im-stat-wechat" class="flex items-center text-slate-400 text-[11px]"><span class="w-1.5 h-1.5 rounded-full bg-slate-500 mr-1"></span>微信: 离线</span>
+        <span>·</span>
+        <span id="im-stat-wecom" class="flex items-center text-slate-400 text-[11px]"><span class="w-1.5 h-1.5 rounded-full bg-slate-500 mr-1"></span>企微: 快照</span>
+        <span>·</span>
+        <span id="im-stat-qq" class="flex items-center text-emerald-400 text-[11px]"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1 animate-pulse"></span>QQ: 在线</span>
+        <button id="btn-refresh-im" title="刷新消息" class="ml-2 bg-[#2c2c38] hover:bg-[#393948] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3e3e50] text-xs">
+          <i data-lucide="refresh-cw" class="w-3 h-3 mr-1"></i>刷新
         </button>
       </div>
     </div>
@@ -369,6 +385,114 @@
 
   </div>
 
+  <!-- ======================== 工作区 3: 统一消息中心 (IM Hub) ======================== -->
+  <div id="workspace-im" class="flex-1 flex flex-col overflow-hidden hidden bg-[#141418]">
+    <!-- 顶部消息中心概览指标条 -->
+    <div class="bg-[#1c1c22] border-b border-[#2b2b36] px-6 py-2.5 shrink-0 flex items-center justify-between">
+      <div class="flex items-center space-x-6 text-xs">
+        <div class="flex items-center space-x-2">
+          <i data-lucide="inbox" class="w-4 h-4 text-blue-400"></i>
+          <span class="text-slate-300 font-semibold">消息总数: <span id="im-stat-total-msgs" class="font-mono text-white text-sm">0</span></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <i data-lucide="bell" class="w-4 h-4 text-amber-400"></i>
+          <span class="text-slate-300 font-semibold">待阅/未处理: <span id="im-stat-unseen-count" class="font-mono text-amber-300 text-sm">0</span></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <i data-lucide="graduation-cap" class="w-4 h-4 text-purple-400"></i>
+          <span class="text-slate-300 font-semibold">学校重要通告: <span id="im-stat-focus-count" class="font-mono text-purple-300 text-sm">0</span></span>
+        </div>
+      </div>
+      <div class="flex items-center space-x-2 text-[11px] text-slate-400">
+        <span class="flex items-center text-emerald-400 font-mono"><i data-lucide="wifi" class="w-3 h-3 mr-1 animate-pulse"></i>统一 SSE 实时总线</span>
+        <span>·</span>
+        <span>单机私有只读 (0600)</span>
+      </div>
+    </div>
+
+    <!-- 过滤工具栏 (平台选择胶囊 + 学校关注筛选 + 搜索) -->
+    <div class="bg-[#1e1e26] border-b border-[#2a2a36] px-6 py-2 flex flex-wrap items-center justify-between gap-3 shrink-0">
+      <div id="im-platform-pills" class="flex items-center space-x-1.5 text-xs">
+        <button data-platform="all" class="im-filter-btn px-3 py-1 rounded-full bg-blue-600 text-white font-medium shadow-sm transition">全部平台</button>
+        <button data-platform="wechat" class="im-filter-btn px-3 py-1 rounded-full bg-[#282834] text-slate-300 hover:text-white font-medium transition flex items-center">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 mr-1.5"></span>微信 (WeChat)
+        </button>
+        <button data-platform="wecom" class="im-filter-btn px-3 py-1 rounded-full bg-[#282834] text-slate-300 hover:text-white font-medium transition flex items-center">
+          <span class="w-2 h-2 rounded-full bg-blue-400 mr-1.5"></span>企业微信 (WeCom)
+        </button>
+        <button data-platform="qq" class="im-filter-btn px-3 py-1 rounded-full bg-[#282834] text-slate-300 hover:text-white font-medium transition flex items-center">
+          <span class="w-2 h-2 rounded-full bg-red-400 mr-1.5"></span>QQ
+        </button>
+      </div>
+
+      <div class="flex items-center space-x-3 text-xs">
+        <label class="flex items-center space-x-1.5 text-slate-300 cursor-pointer select-none">
+          <input id="im-checkbox-focus-only" type="checkbox" class="rounded bg-[#282834] border-[#3e3e50] text-blue-500 focus:ring-0">
+          <span>仅看学校/重点通知</span>
+        </label>
+        <div class="relative">
+          <i data-lucide="search" class="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-500"></i>
+          <input id="im-input-search" type="text" placeholder="搜索发件人或消息正文..." 
+                 class="bg-[#262632] text-xs text-slate-200 pl-8 pr-3 py-1.5 rounded border border-[#3a3a4c] focus:outline-none focus:ring-1 focus:ring-blue-500 w-56">
+        </div>
+      </div>
+    </div>
+
+    <!-- IM 三栏工作主区 (左：会话列表 · 中：会话消息流 · 右：学校 Focus 视图) -->
+    <div class="flex-1 flex overflow-hidden">
+      <!-- 左栏：会话列表 -->
+      <div class="w-80 bg-[#18181e] border-r border-[#2a2a36] flex flex-col shrink-0">
+        <div class="p-2.5 border-b border-[#242430] text-[11px] text-slate-400 flex items-center justify-between">
+          <span class="font-semibold text-slate-300">会话频道列表</span>
+          <button id="btn-show-all-timeline" class="text-blue-400 hover:text-blue-300 text-[11px] flex items-center font-medium">
+            <i data-lucide="layers" class="w-3 h-3 mr-1"></i>全平台时间线
+          </button>
+        </div>
+        <div id="im-channels-list" class="flex-1 overflow-y-auto p-2 space-y-1 text-xs">
+          <div class="text-slate-500 text-center py-12">正在加载 IM 会话列表...</div>
+        </div>
+      </div>
+
+      <!-- 中栏：消息时间线与会话消息流 -->
+      <div class="flex-1 flex flex-col bg-[#141418] overflow-hidden min-w-0">
+        <!-- 消息流顶栏 -->
+        <div class="h-11 bg-[#1c1c24] border-b border-[#282834] px-4 flex items-center justify-between shrink-0">
+          <div class="flex items-center space-x-2.5 overflow-hidden">
+            <span id="im-chat-platform-badge" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-950 text-blue-300 border border-blue-800/40 shrink-0">全平台</span>
+            <span id="im-chat-title" class="text-xs font-semibold text-slate-200 truncate">跨平台聚合时间线流 (Timeline Feed)</span>
+          </div>
+          <div class="flex items-center space-x-2">
+            <button id="btn-mark-seen" class="text-xs bg-[#262632] hover:bg-[#323242] text-slate-300 px-2.5 py-1 rounded flex items-center transition border border-[#3a3a4c]">
+              <i data-lucide="check-check" class="w-3.5 h-3.5 mr-1 text-emerald-400"></i>标为已读
+            </button>
+          </div>
+        </div>
+
+        <!-- 消息列表流 -->
+        <div id="im-messages-stream" class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div class="text-slate-500 text-center py-20">正在拉取消息记录...</div>
+        </div>
+      </div>
+
+      <!-- 右栏：学校重要通知与 @全体成员 Focus Feed -->
+      <div class="w-80 bg-[#181820] border-l border-[#282834] flex flex-col shrink-0">
+        <div class="p-3 border-b border-[#242430] flex items-center justify-between">
+          <div class="flex items-center space-x-1.5">
+            <i data-lucide="sparkles" class="w-4 h-4 text-purple-400"></i>
+            <span class="text-xs font-bold text-slate-200">学校通知 · Focus 看板</span>
+          </div>
+          <span class="text-[10px] bg-purple-950 text-purple-300 px-2 py-0.5 rounded border border-purple-800/40">确定性规则</span>
+        </div>
+        <div class="p-2.5 bg-[#1e1e28]/50 border-b border-[#252532] text-[11px] text-slate-400 leading-relaxed">
+          自动识别并高亮来自班级群、学院通知、教务、课程群的消息及 @全体成员，防止错过大学关键日程。
+        </div>
+        <div id="im-focus-feed-list" class="flex-1 overflow-y-auto p-2.5 space-y-2 text-xs">
+          <div class="text-slate-500 text-center py-12">暂无高优先级学校通告</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 新建笔记 Modal 弹窗 -->
   <div id="modal-new-file" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-lg shadow-2xl p-5 space-y-4">
@@ -466,13 +590,33 @@
     const el = {
       navModeObsidian: document.getElementById('nav-mode-obsidian'),
       navModeAgentsview: document.getElementById('nav-mode-agentsview'),
+      navModeIm: document.getElementById('nav-mode-im'),
       workspaceObsidian: document.getElementById('workspace-obsidian'),
       workspaceAgentsview: document.getElementById('workspace-agentsview'),
+      workspaceIm: document.getElementById('workspace-im'),
       obsidianHeaderStats: document.getElementById('obsidian-header-stats'),
       agentsviewHeaderStats: document.getElementById('agentsview-header-stats'),
+      imHeaderStats: document.getElementById('im-header-stats'),
       badgeAgentTotal: document.getElementById('badge-agent-total'),
-      avVersionBadge: document.getElementById('av-version-badge'),
+      badgeImUnseen: document.getElementById('badge-im-unseen'),
       btnRefreshAv: document.getElementById('btn-refresh-av'),
+      btnRefreshIm: document.getElementById('btn-refresh-im'),
+      imStatWechat: document.getElementById('im-stat-wechat'),
+      imStatWecom: document.getElementById('im-stat-wecom'),
+      imStatQq: document.getElementById('im-stat-qq'),
+      imStatTotalMsgs: document.getElementById('im-stat-total-msgs'),
+      imStatUnseenCount: document.getElementById('im-stat-unseen-count'),
+      imStatFocusCount: document.getElementById('im-stat-focus-count'),
+      imChannelsList: document.getElementById('im-channels-list'),
+      imMessagesStream: document.getElementById('im-messages-stream'),
+      imFocusFeedList: document.getElementById('im-focus-feed-list'),
+      imChatPlatformBadge: document.getElementById('im-chat-platform-badge'),
+      imChatTitle: document.getElementById('im-chat-title'),
+      btnMarkSeen: document.getElementById('btn-mark-seen'),
+      btnShowAllTimeline: document.getElementById('btn-show-all-timeline'),
+      imPlatformPills: document.getElementById('im-platform-pills'),
+      imCheckboxFocusOnly: document.getElementById('im-checkbox-focus-only'),
+      imInputSearch: document.getElementById('im-input-search'),
       // Obsidian DOM
       statFiles: document.getElementById('stat-files'),
       statTags: document.getElementById('stat-tags'),
@@ -675,30 +819,45 @@
       return html;
     }
 
-    // ======================== 工作区切换 (Obsidian ↔ AgentsView) ========================
+    // ======================== 工作区切换 (Obsidian ↔ AgentsView ↔ IM Hub) ========================
     function setWorkspaceMode(mode) {
       state.workspaceMode = mode;
+      
+      // Reset navigation buttons
+      el.navModeObsidian.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+      el.navModeAgentsview.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+      el.navModeIm.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+
+      // Hide all workspaces & headers
+      el.workspaceObsidian.classList.add('hidden');
+      el.workspaceAgentsview.classList.add('hidden');
+      el.workspaceIm.classList.add('hidden');
+
+      el.obsidianHeaderStats.classList.add('hidden');
+      el.agentsviewHeaderStats.classList.add('hidden');
+      el.imHeaderStats.classList.add('hidden');
+
       if (mode === 'obsidian') {
         el.navModeObsidian.className = 'px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm';
-        el.navModeAgentsview.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
         el.workspaceObsidian.classList.remove('hidden');
-        el.workspaceAgentsview.classList.add('hidden');
         el.obsidianHeaderStats.classList.remove('hidden');
-        el.agentsviewHeaderStats.classList.add('hidden');
-      } else {
+      } else if (mode === 'agentsview') {
         el.navModeAgentsview.className = 'px-3 py-1 rounded bg-emerald-600 text-white font-medium flex items-center transition shadow-sm';
-        el.navModeObsidian.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
         el.workspaceAgentsview.classList.remove('hidden');
-        el.workspaceObsidian.classList.add('hidden');
         el.agentsviewHeaderStats.classList.remove('hidden');
-        el.obsidianHeaderStats.classList.add('hidden');
-        loadAgentsViewData(); // 载入会话中心数据
+        loadAgentsViewData();
+      } else if (mode === 'im') {
+        el.navModeIm.className = 'px-3 py-1 rounded bg-blue-600 text-white font-medium flex items-center transition shadow-sm';
+        el.workspaceIm.classList.remove('hidden');
+        el.imHeaderStats.classList.remove('hidden');
+        loadImHubData();
       }
       lucide.createIcons();
     }
 
     el.navModeObsidian.addEventListener('click', () => setWorkspaceMode('obsidian'));
     el.navModeAgentsview.addEventListener('click', () => setWorkspaceMode('agentsview'));
+    el.navModeIm.addEventListener('click', () => setWorkspaceMode('im'));
 
     // ======================== Obsidian 核心逻辑 ========================
     async function loadConfig() {
@@ -1735,6 +1894,384 @@
 
     el.tabAvMsgs.addEventListener('click', () => setAvDetailTab('messages'));
     el.tabAvTools.addEventListener('click', () => setAvDetailTab('tools'));
+
+    // ======================== IM Hub 统一消息中心逻辑 ========================
+    state.im = {
+      platform: 'all',
+      focusOnly: false,
+      search: '',
+      activeChannelId: null,
+      channels: [],
+      messages: [],
+      headSeq: 0,
+      eventSource: null
+    };
+
+    async function loadImHubData() {
+      try {
+        await Promise.all([
+          loadImStatus(),
+          loadImOverview(),
+          loadImChannels(),
+          loadImTimeline()
+        ]);
+        connectImSSE();
+      } catch (err) {
+        console.error('加载 IM Hub 失败:', err);
+      }
+    }
+
+    async function loadImStatus() {
+      try {
+        const data = await api('/im/status');
+        const sources = data.sources || {};
+        
+        // WeChat status
+        const wx = sources.wechat || {};
+        const wxLive = wx.connectivity === 'live';
+        el.imStatWechat.innerHTML = `<span class="w-2 h-2 rounded-full ${wxLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>微信: ${wxLive ? '在线' : '离线'}`;
+        el.imStatWechat.className = wxLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-400';
+
+        // WeCom status
+        const wecom = sources.wecom || {};
+        const wecomLive = wecom.connectivity === 'live';
+        el.imStatWecom.innerHTML = `<span class="w-2 h-2 rounded-full ${wecomLive ? 'bg-blue-500' : 'bg-slate-500'} mr-1"></span>企微: ${wecom.coverage?.kind || '快照'}`;
+        el.imStatWecom.className = wecomLive ? 'flex items-center text-blue-400' : 'flex items-center text-slate-400';
+
+        // QQ status
+        const qq = sources.qq || {};
+        const qqLive = qq.connectivity === 'live';
+        el.imStatQq.innerHTML = `<span class="w-2 h-2 rounded-full ${qqLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>QQ: ${qqLive ? '在线 (Push)' : '就绪'}`;
+        el.imStatQq.className = qqLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-300';
+
+        state.im.headSeq = data.head_seq || 0;
+      } catch (err) {
+        console.error('拉取 IM 状态失败:', err);
+      }
+    }
+
+    async function loadImOverview() {
+      try {
+        const data = await api('/im/overview');
+        el.imStatTotalMsgs.textContent = data.head_seq || 0;
+        el.imStatUnseenCount.textContent = data.total_unseen || 0;
+        
+        if (data.total_unseen > 0) {
+          el.badgeImUnseen.textContent = data.total_unseen;
+          el.badgeImUnseen.classList.remove('hidden');
+        } else {
+          el.badgeImUnseen.classList.add('hidden');
+        }
+      } catch (err) {
+        console.error('拉取 IM 概览失败:', err);
+      }
+    }
+
+    async function loadImChannels() {
+      try {
+        let url = '/im/channels?';
+        if (state.im.platform !== 'all') url += `platform=${encodeURIComponent(state.im.platform)}&`;
+        if (state.im.focusOnly) url += 'focus_only=true&';
+        
+        const data = await api(url);
+        state.im.channels = data.channels || [];
+        renderImChannels(state.im.channels);
+      } catch (err) {
+        el.imChannelsList.innerHTML = `<div class="text-rose-400 p-3">加载会话失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function loadImTimeline() {
+      try {
+        let url = '/im/timeline?limit=60&';
+        if (state.im.platform !== 'all') url += `platform=${encodeURIComponent(state.im.platform)}&`;
+        if (state.im.focusOnly) url += 'focus_only=true&';
+
+        const data = await api(url);
+        state.im.messages = data.items || [];
+        
+        // Filter by search query if any
+        let filtered = state.im.messages;
+        if (state.im.search) {
+          const q = state.im.search.toLowerCase();
+          filtered = filtered.filter(m => 
+            (m.sender_name && m.sender_name.toLowerCase().includes(q)) ||
+            (m.text && m.text.toLowerCase().includes(q))
+          );
+        }
+
+        // If an active channel is selected, filter by it
+        if (state.im.activeChannelId) {
+          filtered = filtered.filter(m => m.channel_id === state.im.activeChannelId);
+        }
+
+        renderImMessages(filtered);
+        renderImFocusFeed(state.im.messages);
+      } catch (err) {
+        el.imMessagesStream.innerHTML = `<div class="text-rose-400 p-4">拉取消息流失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderImChannels(channels) {
+      el.imChannelsList.innerHTML = '';
+      if (!channels || channels.length === 0) {
+        el.imChannelsList.innerHTML = '<div class="text-slate-500 text-center py-10">暂无匹配的会话频道</div>';
+        return;
+      }
+
+      channels.forEach(ch => {
+        const item = document.createElement('div');
+        const isActive = state.im.activeChannelId === ch.id;
+        const baseClass = isActive 
+          ? 'bg-blue-950/50 border-blue-600/70 text-white' 
+          : 'bg-[#1e1e24] hover:bg-[#262630] border-[#2c2c38] text-slate-300';
+        
+        item.className = `p-2.5 rounded-lg border transition cursor-pointer select-none space-y-1.5 ${baseClass}`;
+
+        // Platform icon & tag
+        let platIcon = '💬';
+        let platBadge = 'bg-slate-700 text-slate-300';
+        if (ch.platform === 'wechat') { platIcon = '🟢'; platBadge = 'bg-emerald-950 text-emerald-300 border border-emerald-800/40'; }
+        if (ch.platform === 'wecom') { platIcon = '🔵'; platBadge = 'bg-blue-950 text-blue-300 border border-blue-800/40'; }
+        if (ch.platform === 'qq') { platIcon = '🔴'; platBadge = 'bg-red-950 text-red-300 border border-red-800/40'; }
+
+        item.innerHTML = `
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-1.5 overflow-hidden">
+              <span class="text-xs shrink-0">${platIcon}</span>
+              <span class="font-semibold text-xs text-slate-100 truncate">${escapeHtml(ch.name)}</span>
+            </div>
+            ${ch.local_unseen_count > 0 ? `<span class="px-1.5 py-0.2 rounded-full bg-blue-600 text-white font-mono text-[10px] font-bold">${ch.local_unseen_count}</span>` : ''}
+          </div>
+          <div class="text-[11px] text-slate-400 truncate">${escapeHtml(ch.last_message || '无消息')}</div>
+          <div class="flex items-center justify-between text-[10px] text-slate-500 font-mono">
+            <span class="px-1.5 py-0.2 rounded ${platBadge}">${escapeHtml(ch.platform.toUpperCase())}</span>
+            <span>${escapeHtml(ch.last_time ? ch.last_time.slice(11, 16) : '')}</span>
+          </div>
+        `;
+
+        item.addEventListener('click', () => {
+          state.im.activeChannelId = ch.id;
+          el.imChatTitle.textContent = ch.name;
+          el.imChatPlatformBadge.textContent = ch.platform.toUpperCase();
+          renderImChannels(state.im.channels);
+          loadImTimeline();
+        });
+
+        el.imChannelsList.appendChild(item);
+      });
+    }
+
+    function renderImMessages(messages) {
+      el.imMessagesStream.innerHTML = '';
+      if (!messages || messages.length === 0) {
+        el.imMessagesStream.innerHTML = '<div class="text-slate-500 text-center py-20">暂无消息记录</div>';
+        return;
+      }
+
+      messages.forEach(msg => {
+        const wrapper = document.createElement('div');
+        const isSelf = msg.is_self === true;
+        wrapper.className = `flex flex-col ${isSelf ? 'items-end' : 'items-start'} space-y-1`;
+
+        // Sender header
+        const header = document.createElement('div');
+        header.className = 'flex items-center space-x-2 text-[10px] text-slate-400 px-1';
+
+        let platBadge = 'bg-slate-800 text-slate-300';
+        if (msg.source === 'wechat') platBadge = 'text-emerald-400 font-semibold';
+        if (msg.source === 'wecom') platBadge = 'text-blue-400 font-semibold';
+        if (msg.source === 'qq') platBadge = 'text-red-400 font-semibold';
+
+        const timeStr = msg.occurred_at ? msg.occurred_at.slice(11, 19) : '';
+        header.innerHTML = `
+          <span class="${platBadge}">[${escapeHtml(msg.source.toUpperCase())}]</span>
+          <span class="font-medium text-slate-300">${escapeHtml(msg.sender_name)}</span>
+          <span class="font-mono text-slate-500">${escapeHtml(timeStr)}</span>
+        `;
+        wrapper.appendChild(header);
+
+        // Bubble body
+        const bubble = document.createElement('div');
+        bubble.className = `max-w-xl p-3 rounded-xl border shadow-sm ${
+          isSelf 
+            ? 'bg-blue-600/90 text-white border-blue-500 rounded-tr-none' 
+            : 'bg-[#1e1e26] text-slate-100 border-[#2e2e3e] rounded-tl-none'
+        }`;
+
+        // Focus Tag Pills if any
+        if (msg.focus_tags && msg.focus_tags.length > 0) {
+          const tagBar = document.createElement('div');
+          tagBar.className = 'flex flex-wrap gap-1 mb-1.5 pb-1 border-b border-white/10';
+          msg.focus_reasons.forEach(r => {
+            const pill = document.createElement('span');
+            pill.className = 'text-[9px] bg-purple-950/80 text-purple-300 px-1.5 py-0.2 rounded border border-purple-800/40 font-medium';
+            pill.textContent = r;
+            tagBar.appendChild(pill);
+          });
+          bubble.appendChild(tagBar);
+        }
+
+        // Reply quote indicator if any (P1-IM-6-R4)
+        if (msg.reply_to) {
+          const replyBox = document.createElement('div');
+          replyBox.className = 'bg-black/30 border-l-2 border-blue-400 px-2 py-1 mb-1.5 rounded text-[10px] text-slate-400 font-mono';
+          replyBox.textContent = `回复: ${msg.reply_to}`;
+          bubble.appendChild(replyBox);
+        }
+
+        // Text content (Strict textContent binding: zero risk of XSS)
+        const textContent = document.createElement('div');
+        textContent.className = 'text-xs whitespace-pre-wrap break-words leading-relaxed';
+        textContent.textContent = msg.text;
+        bubble.appendChild(textContent);
+
+        wrapper.appendChild(bubble);
+        el.imMessagesStream.appendChild(wrapper);
+      });
+
+      // Scroll to bottom
+      el.imMessagesStream.scrollTop = el.imMessagesStream.scrollHeight;
+    }
+
+    function renderImFocusFeed(allMessages) {
+      el.imFocusFeedList.innerHTML = '';
+      const focusMsgs = (allMessages || []).filter(m => m.focus_tags && m.focus_tags.length > 0);
+      el.imStatFocusCount.textContent = focusMsgs.length;
+
+      if (focusMsgs.length === 0) {
+        el.imFocusFeedList.innerHTML = '<div class="text-slate-500 text-center py-12">暂无高优先级学校通告</div>';
+        return;
+      }
+
+      focusMsgs.forEach(m => {
+        const card = document.createElement('div');
+        card.className = 'bg-[#20202a] border border-[#343446] hover:border-purple-600/60 rounded-lg p-2.5 space-y-1.5 transition cursor-pointer';
+
+        let reasonHtml = m.focus_reasons.map(r => 
+          `<span class="px-1.5 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/40 text-[9px] font-semibold">${escapeHtml(r)}</span>`
+        ).join(' ');
+
+        card.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-bold text-slate-200 truncate">${escapeHtml(m.sender_name)}</span>
+            <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(m.occurred_at ? m.occurred_at.slice(11, 16) : '')}</span>
+          </div>
+          <div class="flex flex-wrap gap-1">${reasonHtml}</div>
+          <div class="text-[11px] text-slate-300 leading-snug line-clamp-3">${escapeHtml(m.text)}</div>
+        `;
+
+        card.addEventListener('click', () => {
+          state.im.activeChannelId = m.channel_id;
+          el.imChatTitle.textContent = m.channel_id;
+          renderImChannels(state.im.channels);
+          loadImTimeline();
+        });
+
+        el.imFocusFeedList.appendChild(card);
+      });
+    }
+
+    // ======================== 可靠 SSE 总线 & Resync Fence (P1-IM-7) ========================
+    function connectImSSE(afterSeq) {
+      if (state.im.eventSource) {
+        state.im.eventSource.close();
+      }
+
+      const url = afterSeq ? `/api/im/events?after_seq=${afterSeq}` : '/api/im/events';
+      const es = new EventSource(url);
+      state.im.eventSource = es;
+
+      es.addEventListener('message', (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          state.im.messages.unshift(msg);
+          state.im.headSeq = msg.ingest_seq;
+          el.imStatTotalMsgs.textContent = state.im.headSeq;
+          
+          // Refresh timeline & channels
+          loadImOverview();
+          loadImChannels();
+          renderImMessages(state.im.messages);
+          renderImFocusFeed(state.im.messages);
+        } catch (err) {}
+      });
+
+      es.addEventListener('resync_required', async (e) => {
+        // P1-IM-7-R1: MUST call close() immediately to stop browser native auto-reconnect loop!
+        es.close();
+        try {
+          const data = JSON.parse(e.data);
+          const headSeq = data.snapshot_head_seq;
+          await exhaustImSnapshot(headSeq);
+          // After full snapshot exhaustion, reopen SSE with after_seq = headSeq
+          connectImSSE(headSeq);
+        } catch (err) {
+          console.error('Snapshot Resync failed:', err);
+        }
+      });
+    }
+
+    async function exhaustImSnapshot(snapshotHeadSeq) {
+      let cursor = 0;
+      while (true) {
+        const res = await api(`/im/snapshot?snapshot_head_seq=${snapshotHeadSeq}&cursor=${cursor}&limit=50`);
+        if (res.items && res.items.length > 0) {
+          state.im.messages = res.items.concat(state.im.messages);
+        }
+        if (!res.next_cursor) {
+          break; // Exhaustive pagination completed with 0 gap!
+        }
+        cursor = res.next_cursor;
+      }
+      renderImMessages(state.im.messages);
+      renderImFocusFeed(state.im.messages);
+    }
+
+    // IM 交互事件监听绑定
+    el.btnShowAllTimeline.addEventListener('click', () => {
+      state.im.activeChannelId = null;
+      el.imChatTitle.textContent = '跨平台聚合时间线流 (Timeline Feed)';
+      el.imChatPlatformBadge.textContent = '全平台';
+      renderImChannels(state.im.channels);
+      loadImTimeline();
+    });
+
+    el.btnMarkSeen.addEventListener('click', async () => {
+      if (state.im.activeChannelId) {
+        await api(`/im/channel/${encodeURIComponent(state.im.activeChannelId)}/seen`, { method: 'POST' });
+        loadImOverview();
+        loadImChannels();
+      }
+    });
+
+    el.btnRefreshIm.addEventListener('click', () => {
+      loadImHubData();
+    });
+
+    // 平台选择按钮
+    document.querySelectorAll('.im-filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.im-filter-btn').forEach(b => {
+          b.className = 'im-filter-btn px-3 py-1 rounded-full bg-[#282834] text-slate-300 hover:text-white font-medium transition flex items-center';
+        });
+        btn.className = 'im-filter-btn px-3 py-1 rounded-full bg-blue-600 text-white font-medium shadow-sm transition flex items-center';
+        state.im.platform = btn.getAttribute('data-platform');
+        loadImChannels();
+        loadImTimeline();
+      });
+    });
+
+    el.imCheckboxFocusOnly.addEventListener('change', (e) => {
+      state.im.focusOnly = e.target.checked;
+      loadImChannels();
+      loadImTimeline();
+    });
+
+    el.imInputSearch.addEventListener('input', (e) => {
+      state.im.search = e.target.value.trim();
+      loadImTimeline();
+    });
 
     // ======================== 初始化入口 ========================
     async function init() {

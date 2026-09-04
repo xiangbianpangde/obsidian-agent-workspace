@@ -1,7 +1,7 @@
 # Obsidian Agent Workspace (个人知识工作台)
 
-> **Personal Knowledge Workspace = Vault Intelligence Layer + Governed Operation Layer**  
-> 基于本地 Obsidian Vault 的增强型个人知识工作台，为人类开发者与未来 AI Agent 协作提供统一知识接口。
+> **Personal Knowledge Workspace = Vault Intelligence Layer + Governed Operation Layer + Multi-IM Stream**  
+> 基于本地 Obsidian Vault、AgentsView 与多端 IM 的增强型三核个人工作台，为人类开发者与未来 AI Agent 协作提供统一接口。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
@@ -36,12 +36,26 @@
    - **SHA256 乐观锁并发防覆盖**：保存时严格比对单快照 `expected_hash`，若检测到在 Obsidian 外部被修改，立即返回 `409 Conflict` 并阻断保存；
    - **原子文件写入与创建**：基于 `open(..., "x")`（O_EXCL）防止创建同名笔记覆盖；基于同目录临时文件 + `os.replace` 保证原子更新；
    - **敏感密钥隔离**：扫描器与读取 API 双重运行全量正则密钥拦截器，`.obsidian` 配置区与含 Secret 笔记绝不泄露到界面中；
-6. **双核工作台与 AgentsView AI 会话中心 (第二个 P0 落地)**：
-   - **无缝切换**：顶栏一键切换【知识中心 (Obsidian)】与【AI 会话中心 (AgentsView)】；
-   - **多 Agent 全景感知**：只读直连 `~/.agentsview/sessions.db`（1.1GB），毫秒级聚合 12 种 Agent 引擎（Pi 542 场、Claude 486 场、Codex 395 场、Hermes 91 场、Grok 80 场等共 **1,821 场会话**与 **208,000+ 条消息**）；
-   - **工作流活跃度大盘**：统计近 24 小时、近 7 天高频活跃指标与活跃项目排行榜；
-   - **会话与工具调用回溯**：有界分页拉取问答流，气泡排版支持代码高亮与 KaTeX 数学公式，支持回溯每一个历史 Tool Call（如 `bash`、`read`、`edit`）的参数与执行输出；
-   - **隐私保护**：严格只读连接（`mode=ro`，绝无 `immutable=1`），响应强制注入 `Cache-Control: no-store`，会话内容不在工作台数据库中沉淀，绝不泄露。
+7. **三核工作台与统一消息中心 IM Hub (第三个 P0 落地)**：
+   - **三核无缝切换**：顶栏一键切换【知识中心 (Obsidian)】↔【AI 会话中心 (AgentsView)】↔【统一消息中心 (IM Hub)】；
+   - **多源异构消息接入**：
+     - **微信 (WeChat)**：基于 `wx-cli` 本地服务，支持历史追溯与 SSE 实时事件；
+     - **企业微信 (WeCom)**：基于 `yichen-skills` 本地快照，支持时间戳明文快照解析；
+     - **QQ**：基于 `Zhin.js` 入站事件框架，单向认证推送，工作台零发信凭证；
+   - **本地私密 Derived IM Journal (`im_hub.db`)**：
+     - 独立本地派生存储（`authority=derived`，`0700` 目录，`0600` 数据库与 WAL/SHM 文件，绝不污染 Obsidian Vault）；
+     - 终极物理约束 `UNIQUE(source, account_id, dedupe_key)`；
+     - `synthetic_v1` 物理定位符不变量与服务端规范化 SHA-256 Digest 信任根，杜绝重复与冲突覆盖；
+   - **跨平台时间线流 (Timeline Feed) 与 Keysets 游标分页**：
+     - 按 `occurred_at_epoch_ms DESC, ingest_seq DESC` 毫秒级统一时间线排序；
+   - **确定性聚焦规则看板 (Focus Feed for Students)**：
+     - 自动提炼高亮学校群、班级群通知、@全体成员 与辅导员私聊，明确展示高亮原因，防止大学生遗漏重要学业日程；
+   - **原生浏览器可靠 SSE 与 Resync 穷尽分页门禁**：
+     - 单调自增 `ingest_seq`，支持 `Last-Event-ID` 与 `?after_seq=` 开区间双游标恢复；
+     - 遇到 `resync_required` 立即 `close()` 杜绝原生重连竞态，执行快照穷尽循环分页加载，实现 0 消息盲区；
+   - **全量隐私与安全铁律**：
+     - 绝对只读不发信，全端点注入 `Cache-Control: no-store`；正文使用纯文本数据绑定渲染，彻底杜绝聊天 XSS；
+     - 包含可机械执行的 AT-1 ~ AT-9 自动化验收测试套件（全绿通过）。
 
 ---
 
@@ -50,28 +64,18 @@
 ```text
                      浏览器客户端 (Web Browser)
                                 │
-               ┌────────────────┴────────────────┐
-               │    Personal AI Workspace        │
-               │   (知识中心 ↔ AI 会话中心 双核)   │
-               └────────────────┬────────────────┘
-                                │ REST (127.0.0.1:8787)
-            ┌───────────────────┴───────────────────┐
-            │          FastAPI 后端核心服务         │
-            ├───────────────────┬───────────────────┤
-            │  Obsidian 知识域  │  AgentsView 会话域│
-            │  /api/files, tags │  /api/agentsview/*│
-            ├───────────────────┼───────────────────┤
-            │  Path Guard       │  AgentsView       │
-            │  (Operation-Aware)│  Adapter          │
-            ├───────────────────┼───────────────────┤
-            │  Vault Scanner &  │  mode=ro 只读连接 │
-            │  Watchdog 监听器  │  (no-store 缓存)  │
-            └─────────┬─────────┴─────────┬─────────┘
-                      ▼                   ▼
-            ┌──────────────────┐ ┌──────────────────┐
-            │ 本地用户 Obsidian│ │ 本地 AgentsView  │
-            │ Vault 笔记资产   │ │ sessions.db 库   │
-            └──────────────────┘ └──────────────────┘
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+  【知识中心 (Obsidian)】 【AI 会话中心 (AgentsView)】 【统一消息中心 (IM Hub)】
+   2435+ 笔记 / 标签 / 状态  1821 场会话 / 20万+ 消息     微信 · 企微 · QQ 聚合流
+         │                      │                      │
+         │ REST (127.0.0.1:8787)│                      │ SSE & REST
+         ▼                      ▼                      ▼
+  /api/files, /api/tags  /api/agentsview/*      /api/im/*, /internal/im/*
+         │                      │                      │
+         ▼                      ▼                      ▼
+  Obsidian 本地 Vault    AgentsView sessions.db  本地私密 IM Journal (0600)
+                         (mode=ro 只读直连)      (dedupe / timeline / rules)
 ```
 
 ---
