@@ -87,6 +87,7 @@ class IMJournal:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             str(self.db_path),
+            timeout=30.0,
             check_same_thread=False,
             isolation_level=None  # Explicit transaction management
         )
@@ -96,7 +97,8 @@ class IMJournal:
     def _init_schema(self) -> None:
         with self._lock:
             cur = self._conn.cursor()
-            # Enable WAL mode for high concurrency read/write
+            # Enable WAL mode and busy timeout for high concurrency read/write
+            cur.execute("PRAGMA busy_timeout=30000;")
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA foreign_keys=ON;")
 
@@ -332,14 +334,24 @@ class IMJournal:
             ))
         else:
             unseen = row["local_unseen_count"] + (0 if is_self else 1)
-            cur.execute("""
+            name_update = ""
+            params = [msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen]
+            if msg.channel_name and msg.channel_name not in ("QQ群聊", "QQ好友", "未知会话"):
+                name_update = ", name = ?, is_focus = ?"
+                params.extend([
+                    msg.channel_name,
+                    1 if any(kw in msg.channel_name for kw in ("通知", "班", "课程", "学院", "实验室", "科研", "导师")) else 0,
+                ])
+            params.append(msg.channel_id)
+            cur.execute(f"""
             UPDATE channels SET
                 last_message = ?,
                 last_time = ?,
                 last_occurred_at_epoch_ms = MAX(last_occurred_at_epoch_ms, ?),
                 local_unseen_count = ?
+                {name_update}
             WHERE id = ?;
-            """, (msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen, msg.channel_id))
+            """, params)
 
     # -------------------------------------------------------------------------
     # Channel & Timeline Query APIs

@@ -2,7 +2,7 @@
 
 > 项目：个人工作台 (Personal AI Workspace)  
 > 日期：2026-09-08  
-> 状态：**微信 + 企业微信 已实时接入真实账号；QQ 网关就绪等待推送**
+> 状态：**微信 + 企业微信 + QQ 已全部接入真实本地账号**
 
 ---
 
@@ -11,10 +11,10 @@
 | IM 平台 | 真实账号 | 数据来源 | 接入状态 |
 |---|---|---|---|
 | **微信 (WeChat)** | `wxid_hxwpag2k3qi122`（七十八个钢笔尖，十三瓶墨水） | `wx-cli` 本地只读服务 `http://127.0.0.1:9100` | **🟢 已实时接入** |
-| **企业微信 (WeCom)** | `1688857608826794`（袁浩岚 · 中南民族大学） | 本地明文快照 `~/Library/Application Support/wecom-local-vault/snapshots/` | **🔵 已接入（快照）** |
-| **QQ** | 待绑定 | Zhin.js 单向推送 `POST /internal/im/ingest/zhin` | **⚪ 网关就绪** |
+| **企业微信 (WeCom)** | `1688857608826794`（袁浩岚 · 中南民族大学） | 本地明文快照 `~/Library/Application Support/wecom-local-vault/snapshots/` | **🟢 已接入（快照）** |
+| **QQ** | `qq_primary`（本机已登录账号） | 本地只读快照 `~/Library/Application Support/qq-local-vault/` | **🟢 已接入（快照）** |
 
-实测数据量：**6,400+ 条真实消息 · 167 个会话频道 · 26 条学校重要通告**。
+实测数据量：**15,500+ 条真实消息 · 200+ 个会话频道**（含微信 2,580+ 条、企微 3,880+ 条、QQ 9,115 条）。
 
 ---
 
@@ -89,63 +89,41 @@ python3 ~/Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/vault_c
 
 ---
 
-## 三、QQ 接入（网关就绪）
+## 三、QQ 接入（本地只读快照模式）
 
-工作台已开放内部认证推入端点：
+基于 ADR-005 及 v0.2.8 受控变更，QQ 彻底废弃 Zhin Webhook 推送，采用与企业微信同级的**本地只读明文快照模式**。
 
-```http
-POST http://127.0.0.1:8787/internal/im/ingest/zhin
-X-IM-Secret: workspace_im_secret_token_default
-Content-Type: application/json
+### 核心特性
+- **无需退出 QQ**：实时通过只读内存扫描匹配数据库 salt，提取 live SQLCipher codec；
+- **零特权运行**：日常工作台不加载 LLDB、不拥有解密密钥、不接触 QQ 容器；
+- **安全原子发布**：提取器短暂暂停 QQ 写进程（毫秒级）并 COW 克隆 DB/WAL/SHM，校验 `PRAGMA integrity_check` 与核心 schema 后原子发布为只读明文快照。
+
+### 快照提取步骤
+
+在 QQ 正常登录运行的前提下，执行单次本地快照提取：
+
+```bash
+.venv/bin/python -m backend.scripts.qq_snapshot --confirm-capture --account-alias qq_primary
 ```
 
-### 接入步骤
+输出示例：
+```text
+QQ_SNAPSHOT_OK qqsnap-v1-dee898e87a48d9bc28a350a8 messages=9115
+```
 
-1. 创建 Zhin 项目：
-   ```bash
-   mkdir -p ~/Projects/qq-bot && cd ~/Projects/qq-bot
-   pnpm init && pnpm add zhin.js @zhin.js/adapter-icqq
-   ```
+快照发布于：
+```text
+~/Library/Application Support/qq-local-vault/accounts/qq_primary/
+  snapshots/<snapshot_id>/
+    export/
+      nt_msg.db          # 标准 SQLite 格式（8.5MB+，7700+ 群消息，1380+ 私聊）
+      group_info.db      # 群名称及成员详情
+      profile_info.db    # 好友与联系人信息
+    manifest.json        # 内容哈希自校验元数据
+  CURRENT                # 指向当前有效快照 ID
+```
 
-2. 编写转发插件 `bot.ts`：
-   ```typescript
-   import { definePlugin } from 'zhin.js/plugin-runtime';
-
-   export default definePlugin({
-     name: 'workspace-forwarder',
-     setup({ onMessage }) {
-       onMessage(async (msg) => {
-         await fetch('http://127.0.0.1:8787/internal/im/ingest/zhin', {
-           method: 'POST',
-           headers: {
-             'Content-Type': 'application/json',
-             'X-IM-Secret': 'workspace_im_secret_token_default',
-           },
-           body: JSON.stringify({
-             event_id: `qq_${msg.id}`,
-             account_id: 'my_qq',
-             occurred_at: new Date(msg.time * 1000).toISOString(),
-             occurred_at_epoch_ms: msg.time * 1000,
-             payload: {
-               message_type: 'text',
-               sender_id: String(msg.sender.user_id),
-               sender_name: msg.sender.nickname,
-               group_id: msg.group_id ? String(msg.group_id) : undefined,
-               group_name: msg.group_name,
-               text: msg.raw_message,
-               mentions: msg.at_all ? [{ is_all: true }] : [],
-             },
-           }),
-         });
-       });
-     },
-   });
-   ```
-
-3. 扫码登录并启动：
-   ```bash
-   npx zhin dev
-   ```
+工作台中的 `QQSnapshotAdapter` 会自动只读加载该快照并导入 IM Journal。后续如需更新 QQ 消息，只需再次运行一次上述提取命令。
 
 ---
 
@@ -174,16 +152,16 @@ Content-Type: application/json
 | `WECHAT_BACKFILL_DAYS` | `30` | 微信历史回溯天数 |
 | `WECOM_ACCOUNT_ID` | `wecom_primary` | 企微账号 ID |
 | `QQ_ACCOUNT_ID` | `qq_primary` | QQ 账号 ID |
-| `IM_INGEST_SECRET` | `workspace_im_secret_token_default` | Zhin 推入共享密钥 |
+| `QQ_SNAPSHOT_ROOT` | `~/Library/Application Support/qq-local-vault/accounts/qq_primary` | QQ 快照根目录（可选） |
 
 ---
 
 ## 六、安全边界（始终生效）
 
 1. **源端只读**：工作台绝不向微信/企微/QQ 发送任何消息，无发信 API；
-2. **零反向控制**：不持有 wx-cli 写入权限、不持有企微客户端、不持有 Zhin 发信凭证；
+2. **零反向控制**：不持有 wx-cli 写入权限、不持有企微客户端、不持有 QQ bot 发信凭证；
 3. **私密存储**：IM Journal 位于 `~/.personal-ai-workspace/im/`，目录 `0700`、数据库与 WAL/SHM `0600`；
-4. **明文快照隔离**：企微快照与密钥位于 `~/Library/Application Support/wecom-local-vault/`，`0600` 权限，绝不进入 Git；
-5. **全端点 `Cache-Control: no-store`**：个人消息内容不落浏览器缓存；
+4. **明文快照隔离**：企微与 QQ 快照位于用户私有 Vault 目录，`0700/0600` 权限，绝不进入 Git；
+5. **全端点 `Cache-Control: no-store`**：个人消息内容不落浏览器缓存，由全局 HTTP 中间件强制守护；
 6. **纯文本渲染**：聊天正文使用 `textContent` 绑定，杜绝聊天 XSS；
-7. **日志脱敏**：消息正文与搜索关键词不写入应用日志。
+7. **日志脱敏**：消息正文、密钥与搜索关键词严禁写入任何应用日志或临时文件。

@@ -14,7 +14,7 @@ WX_CLI="${HOME}/.local/bin/wx-cli"
 # ---------------------------------------------------------------------------
 if [ -x "$WX_CLI" ]; then
   echo ""
-  echo "[1/3] 检查微信 wx-cli 服务..."
+  echo "[1/4] 检查微信 wx-cli 服务..."
   if "$WX_CLI" server status 2>/dev/null | grep -q "running"; then
     echo "      ✓ 微信服务已在运行 (http://127.0.0.1:9100)"
   else
@@ -32,14 +32,14 @@ if [ -x "$WX_CLI" ]; then
     fi
   fi
 else
-  echo "[1/3] ⚠ 未安装 wx-cli，跳过微信接入"
+  echo "[1/4] ⚠ 未安装 wx-cli，跳过微信接入"
 fi
 
 # ---------------------------------------------------------------------------
 # 2. 企业微信 (快照)
 # ---------------------------------------------------------------------------
 echo ""
-echo "[2/3] 检查企业微信快照..."
+echo "[2/4] 检查企业微信快照..."
 SNAP_ROOT="${HOME}/Library/Application Support/wecom-local-vault/snapshots"
 if [ -d "$SNAP_ROOT" ] && [ -n "$(ls -A "$SNAP_ROOT" 2>/dev/null)" ]; then
   LATEST=$(ls -1 "$SNAP_ROOT" | sort | tail -n 1)
@@ -51,11 +51,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. QQ (Zhin 推送端点)
+# 3. QQ (本地只读快照；启动器绝不执行提取、调试或进程控制)
 # ---------------------------------------------------------------------------
 echo ""
-echo "[3/3] QQ 入站端点: POST http://127.0.0.1:8787/internal/im/ingest/zhin"
-echo "      请求头: X-IM-Secret: ${IM_INGEST_SECRET:-workspace_im_secret_token_default}"
+echo "[3/4] 检查 QQ 本地只读快照..."
+QQ_ACCOUNT_ALIAS="${QQ_ACCOUNT_ID:-qq_primary}"
+QQ_SNAPSHOT_DIR="${QQ_SNAPSHOT_ROOT:-${HOME}/Library/Application Support/qq-local-vault/accounts/${QQ_ACCOUNT_ALIAS}}"
+if [ -f "$QQ_SNAPSHOT_DIR/CURRENT" ]; then
+  QQ_CURRENT=$(tr -d '\r\n' < "$QQ_SNAPSHOT_DIR/CURRENT")
+  if [[ "$QQ_CURRENT" =~ ^qqsnap-v1-[0-9a-f]{24}$ ]] && [ -f "$QQ_SNAPSHOT_DIR/snapshots/$QQ_CURRENT/manifest.json" ]; then
+    echo "      ✓ 发现已发布快照: $QQ_CURRENT"
+  else
+    echo "      ⚠ CURRENT 无效；工作台将拒绝该快照"
+  fi
+else
+  echo "      ⚠ 未发现 QQ 快照。经用户授权后，另行手动运行："
+  echo "        .venv/bin/python -m backend.scripts.qq_snapshot --confirm-capture --account-alias $QQ_ACCOUNT_ALIAS"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. 工作台

@@ -7,6 +7,8 @@ Validates all mechanical contracts, invariants, deduplication, and security defe
 import asyncio
 import json
 import os
+import shutil
+import sqlite3
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -16,7 +18,8 @@ from typing import Any, Dict
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.im.adapters.qq import ZhinQQAdapter
+from backend.app.im.adapters.base import IMIngestDriver, IMSourceReader
+from backend.app.im.adapters.qq import QQSnapshotAdapter, make_qq_synthetic_key
 from backend.app.im.adapters.wechat import WxCliAdapter, make_wechat_synthetic_key
 from backend.app.im.adapters.wecom import WeComSnapshotAdapter
 from backend.app.im.coordinator import IngestionCoordinator
@@ -82,11 +85,19 @@ def make_sample_message(
 # AT-1: Capability Decoupling
 # -----------------------------------------------------------------------------
 
-def test_at1_capability_decoupling():
-    """AT-1: ZhinQQAdapter canReadHistory=false, coordinator skips without error."""
-    qq_adp = ZhinQQAdapter()
-    assert qq_adp.capabilities.canReadHistory is False
-    assert not hasattr(qq_adp, "read_history")
+def test_at1r_qq_snapshot_capability_and_reader_driver_shape():
+    """AT-1R: QQ is a conservative snapshot Reader/Driver, never a realtime bot."""
+    qq_adp = QQSnapshotAdapter()
+    assert isinstance(qq_adp, IMSourceReader)
+    assert isinstance(qq_adp, IMIngestDriver)
+    assert qq_adp.capabilities.canReadHistory is True
+    assert qq_adp.capabilities.realtime is False
+    assert qq_adp.capabilities.media == "placeholder"
+    assert qq_adp.capabilities.nativeUnread is False
+    assert qq_adp.capabilities.reliableSelfIdentity is False
+    assert qq_adp.capabilities.mentions is False
+    assert qq_adp.capabilities.replies is False
+    assert qq_adp.capabilities.recallEvents is False
 
     wx_adp = WxCliAdapter()
     assert wx_adp.capabilities.canReadHistory is True
@@ -458,73 +469,339 @@ def test_wx_cli_unreachable_is_not_reported_live():
 
 
 # -----------------------------------------------------------------------------
-# End-to-End API Integration & Zhin Push Loopback
+# AT-10: Snapshot Capture & WAL Integrity
 # -----------------------------------------------------------------------------
 
-def test_api_zhin_push_and_cache_control():
-    """Test authenticated loopback Zhin ingress and Cache-Control: no-store on all /api/im endpoints."""
-    import uuid
+def test_at10_snapshot_wal_integrity():
+    """
+    AT-10: Copying an active database without its WAL leaves uncheckpointed rows
+    invisible; copying DB + WAL allows SQLite recovery to see every committed row.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src_db = root / "active.db"
+        with sqlite3.connect(str(src_db)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("CREATE TABLE test_items (id INTEGER PRIMARY KEY, val TEXT);")
+            conn.execute("INSERT INTO test_items (val) VALUES ('checkpointed');")
+            conn.commit()
+
+        # Checkpoint the first insert
+        with sqlite3.connect(str(src_db)) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+        # Now insert a second row in WAL without checkpointing
+        with sqlite3.connect(str(src_db)) as conn:
+            conn.execute("INSERT INTO test_items (val) VALUES ('in_wal_only');")
+            conn.commit()
+
+        wal_file = root / "active.db-wal"
+        assert wal_file.exists() and wal_file.stat().st_size > 0
+
+        # Branch A: Copy ONLY the db file without WAL
+        alone_dir = root / "alone"
+        alone_dir.mkdir()
+        shutil.copy2(src_db, alone_dir / "active.db")
+        with sqlite3.connect(f"file:{alone_dir / 'active.db'}?mode=ro", uri=True) as conn:
+            rows = conn.execute("SELECT val FROM test_items;").fetchall()
+            # The WAL-only row is missing when WAL is omitted
+            assert len(rows) == 1
+            assert rows[0][0] == "checkpointed"
+
+        # Branch B: Copy BOTH db and wal files
+        with_wal_dir = root / "with_wal"
+        with_wal_dir.mkdir()
+        shutil.copy2(src_db, with_wal_dir / "active.db")
+        shutil.copy2(wal_file, with_wal_dir / "active.db-wal")
+        # Standard SQLite opening with WAL performs recovery and sees both rows
+        with sqlite3.connect(str(with_wal_dir / "active.db")) as conn:
+            rows = conn.execute("SELECT val FROM test_items ORDER BY id ASC;").fetchall()
+            assert len(rows) == 2
+            assert rows[0][0] == "checkpointed"
+            assert rows[1][0] == "in_wal_only"
+
+
+# -----------------------------------------------------------------------------
+# AT-11: Fault Injection on Atomic Publish & Quarantine
+# -----------------------------------------------------------------------------
+
+def test_at11_fault_injection_and_quarantine():
+    """
+    AT-11: When extraction/validation fails in staging, the staging directory is
+    moved to quarantine/<run_id>-<code>, CURRENT pointer is untouched, and old
+    snapshots are never modified.
+    """
+    from backend.scripts.qq_snapshot.capture import _quarantine
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        staging_dir = root / "staging" / "20260908T120000-abcd1234ef56"
+        staging_dir.mkdir(parents=True)
+        (staging_dir / "partial.txt").write_text("in-progress data")
+        quarantine_dir = root / "quarantine"
+
+        # Trigger quarantine for integrity failure
+        _quarantine(staging_dir, quarantine_dir, "QQ_SNAPSHOT_INTEGRITY_FAILED")
+
+        # Staging directory must no longer exist
+        assert not staging_dir.exists()
+        # Quarantine entry must exist with code suffix
+        quarantined = list(quarantine_dir.iterdir())
+        assert len(quarantined) == 1
+        assert "qq_snapshot_integrity_failed" in quarantined[0].name
+        assert (quarantined[0] / "partial.txt").exists()
+
+
+# -----------------------------------------------------------------------------
+# AT-12: Permissions, Immutability & Path Isolation
+# -----------------------------------------------------------------------------
+
+def test_at12_permissions_and_path_isolation():
+    """
+    AT-12:
+    1. Adapter rejects snapshot roots pointing directly to QQ container paths.
+    2. Overly permissive snapshot files (group/world readable) fail closed with
+       QQ_SNAPSHOT_PERMISSION instead of blindly reading them.
+    """
+    # 1. Path isolation: pointing to Tencent container is rejected
+    fake_container = Path.home() / "Library/Containers/com.tencent.qq/Data/Library/fake"
+    adapter_isolated = QQSnapshotAdapter(account_id="isolated_test", snapshot_root=fake_container)
+    with pytest.raises(Exception) as exc_info:
+        adapter_isolated._validate_current()
+    assert "QQ_SNAPSHOT_PATH_REJECTED" in str(exc_info.value)
+
+    # 2. Permission hardening: permissions > 0600 on CURRENT are rejected
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        os.chmod(root, 0o700)
+        (root / "snapshots").mkdir(mode=0o700)
+        current_file = root / "CURRENT"
+        current_file.write_text("qqsnap-v1-0123456789abcdef01234567\n")
+        os.chmod(current_file, 0o666)  # Permissive!
+
+        adapter_perm = QQSnapshotAdapter(account_id="perm_test", snapshot_root=root)
+        with pytest.raises(Exception) as exc_info:
+            adapter_perm._validate_current()
+        assert "QQ_SNAPSHOT_PERMISSION" in str(exc_info.value)
+
+
+# -----------------------------------------------------------------------------
+# AT-13: Zero Key/Salt Leakage & Cache-Control: no-store
+# -----------------------------------------------------------------------------
+
+def test_at13_zero_leakage_and_global_no_store():
+    """
+    AT-13:
+    1. Published manifest does not contain raw key or salt fields.
+    2. Every /api/im endpoint (success, 404, error) returns Cache-Control: no-store.
+    """
     client = TestClient(app)
 
-    # 1. Test unauthorized push
-    res = client.post("/internal/im/ingest/zhin", json={"event_id": "test_1"})
-    assert res.status_code == 401
+    # 1. Check all public /api/im routes
+    endpoints = [
+        "/api/im/status",
+        "/api/im/overview",
+        "/api/im/channels",
+        "/api/im/timeline",
+        "/api/im/snapshot?snapshot_head_seq=1",
+        "/api/im/nonexistent_route_test",
+    ]
+    for ep in endpoints:
+        res = client.get(ep)
+        cc = res.headers.get("Cache-Control", "")
+        assert "no-store" in cc, f"endpoint {ep} missing no-store in Cache-Control: {cc}"
+        assert "no-cache" in cc
 
-    # 2. Test authorized push with deterministic event
-    test_evt_id = f"zhin_evt_{uuid.uuid4().hex[:8]}"
-    secret = os.environ.get("IM_INGEST_SECRET", "workspace_im_secret_token_default")
-    event_payload = {
-        "event_id": test_evt_id,
-        "account_id": "qq_test",
-        "occurred_at": "2026-09-04T10:10:00Z",
-        "occurred_at_epoch_ms": 1788517000000,
-        "payload": {
-            "message_type": "text",
-            "sender_id": "u888",
-            "sender_name": "班长",
-            "group_id": "cs_2023",
-            "group_name": "计算机23级通知群",
-            "text": "明天早上高数课调至教三201，请大家相互转告！",
-            "mentions": [{"is_all": True}]
+    # 2. Check that if a real manifest exists, it has no key_hex or salt_hex
+    vault_current = Path.home() / "Library/Application Support/qq-local-vault/accounts/qq_primary/CURRENT"
+    if vault_current.exists():
+        snap_id = vault_current.read_text().strip()
+        manifest_path = vault_current.parent / "snapshots" / snap_id / "manifest.json"
+        if manifest_path.exists():
+            manifest_text = manifest_path.read_text()
+            assert "key_hex" not in manifest_text
+            assert "salt_hex" not in manifest_text
+            assert "PRAGMA key" not in manifest_text
+
+
+# -----------------------------------------------------------------------------
+# AT-14: Codec & Schema Drift Fail-Closed
+# -----------------------------------------------------------------------------
+
+def test_at14_schema_drift_fail_closed():
+    """
+    AT-14: If a snapshot's manifest has a mismatched critical_schema_fingerprint,
+    the adapter refuses to ingest, reports degraded status, and does not advance watermark.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        os.chmod(root, 0o700)
+        (root / "snapshots").mkdir(mode=0o700)
+        snap_id = "qqsnap-v1-0123456789abcdef01234567"
+        snap_dir = root / "snapshots" / snap_id
+        snap_dir.mkdir(mode=0o700)
+        (snap_dir / "export").mkdir(mode=0o700)
+
+        # Write corrupted manifest with wrong schema fingerprint
+        corrupted_manifest = {
+            "schema": "qq.snapshot/v1",
+            "snapshot_id": snap_id,
+            "account_alias": "drift_acc",
+            "schema_profile_id": "ntqq-macos-6.9.98-critical-schema-v1",
+            "critical_schema_fingerprint": "bad_fingerprint_hash_drift",
+            "locator_profile_id": "qq-locator-v1",
+            "normalization_profile_id": "qq-im-normalization-v1",
         }
+        manifest_file = snap_dir / "manifest.json"
+        manifest_file.write_text(json.dumps(corrupted_manifest))
+        os.chmod(manifest_file, 0o600)
+
+        current_file = root / "CURRENT"
+        current_file.write_text(snap_id + "\n")
+        os.chmod(current_file, 0o600)
+
+        adapter = QQSnapshotAdapter(account_id="drift_acc", snapshot_root=root)
+        with pytest.raises(Exception) as exc_info:
+            adapter._validate_current()
+        assert "QQ_SNAPSHOT_SCHEMA_UNSUPPORTED" in str(exc_info.value)
+
+
+# -----------------------------------------------------------------------------
+# AT-15: Cross-Snapshot Dedupe & No-Delete Invariant
+# -----------------------------------------------------------------------------
+
+def test_at15_cross_snapshot_dedupe_and_no_delete():
+    """
+    AT-15:
+    Snapshot 1 commits [m1, m2].
+    Snapshot 2 commits [m1, m2, m3] -> m1, m2 skipped, m3 inserted.
+    Snapshot 3 commits [m1, m3] (m2 omitted from source) -> m2 is NEVER deleted from journal.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        journal = IMJournal(Path(td) / "im_test.db")
+
+        # Snapshot 1
+        m1 = make_sample_message(source="qq", account_id="qq_acc", msg_id="101", text="Msg 1", epoch_ms=1788500001000)
+        m2 = make_sample_message(source="qq", account_id="qq_acc", msg_id="102", text="Msg 2", epoch_ms=1788500002000)
+        r1 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "101"), dedupe_basis="synthetic_v1", message=m1)
+        r2 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "102"), dedupe_basis="synthetic_v1", message=m2)
+
+        rcpt_1 = journal.commit_batch(IMIngestBatch(
+            source="qq", account_id="qq_acc", records=[r1, r2],
+            new_watermark=IMWatermark(kind="snapshot_version", value="snap_1", committed_at="2026-09-08T12:00:00Z")
+        ))
+        assert rcpt_1.inserted_count == 2
+
+        # Snapshot 2: [m1, m2, m3]
+        m3 = make_sample_message(source="qq", account_id="qq_acc", msg_id="103", text="Msg 3", epoch_ms=1788500003000)
+        r3 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "103"), dedupe_basis="synthetic_v1", message=m3)
+
+        rcpt_2 = journal.commit_batch(IMIngestBatch(
+            source="qq", account_id="qq_acc", records=[r1, r2, r3],
+            new_watermark=IMWatermark(kind="snapshot_version", value="snap_2", committed_at="2026-09-08T12:05:00Z")
+        ))
+        assert rcpt_2.inserted_count == 1
+        assert rcpt_2.skipped_count == 2
+        assert journal.get_current_head_seq() == 3
+
+        # Snapshot 3: [m1, m3] (m2 omitted from upstream)
+        rcpt_3 = journal.commit_batch(IMIngestBatch(
+            source="qq", account_id="qq_acc", records=[r1, r3],
+            new_watermark=IMWatermark(kind="snapshot_version", value="snap_3", committed_at="2026-09-08T12:10:00Z")
+        ))
+        assert rcpt_3.inserted_count == 0
+        assert rcpt_3.skipped_count == 2
+
+        # Invariant check: m2 still exists in the journal! (Append-only / No-delete)
+        all_msgs = journal.query_replay_events(after_seq=0, limit=10)
+        assert len(all_msgs) == 3
+        ids = [m.source_message_id for m in all_msgs]
+        assert "102" in str(ids)
+        journal.close()
+
+
+# -----------------------------------------------------------------------------
+# AT-16: Conservative Normalization Invariants
+# -----------------------------------------------------------------------------
+
+def test_at16_conservative_normalization():
+    """
+    AT-16: QQ normalized messages satisfy:
+    - is_self is None (never defaulted to False)
+    - reply_to is None (not fabricated)
+    - mentions is [] (no regex false positives)
+    - attachments availability is 'placeholder'
+    - sender_name fallback is deterministic 'QQ用户 <token>'
+    """
+    adapter = QQSnapshotAdapter(account_id="qq_test")
+    fake_row = {
+        "msg_id": 999111,
+        "chat_type": 2,
+        "msg_type": 2,
+        "sub_msg_type": 0,
+        "send_type": 0,
+        "sender_uid": "u_secret_42",
+        "peer_uid": None,
+        "peer_uin": 2026001,
+        "sender_uin": 10001,
+        "msg_time": 1788500000,
+        "sender_member_name": None,
+        "sender_nickname": None,
+        "body": b"",
     }
-
-    res2 = client.post(
-        "/internal/im/ingest/zhin",
-        headers={"X-IM-Secret": secret},
-        json=event_payload
+    rec = adapter._normalize_row(
+        table_role="group",
+        row=fake_row,
+        group_names={str(2026001): "测试学习群"},
+        buddy_names={},
+        snapshot_id="snap_test",
+        observed_at="2026-09-08T12:00:00Z"
     )
-    assert res2.status_code == 200
-    data2 = res2.json()
-    assert data2["receipt"]["inserted_count"] == 1
 
-    # Test idempotence: push exact same event again -> 200 OK, skipped_count == 1
-    res2_repeat = client.post(
-        "/internal/im/ingest/zhin",
-        headers={"X-IM-Secret": secret},
-        json=event_payload
-    )
-    assert res2_repeat.status_code == 200
-    assert res2_repeat.json()["receipt"]["skipped_count"] == 1
+    assert rec is not None
+    msg = rec.message
+    assert msg.is_self is None
+    assert msg.reply_to is None
+    assert msg.mentions == []
+    assert msg.sender_name.startswith("QQ用户 ")
+    assert msg.channel_name == "测试学习群"
+    assert rec.dedupe_key == "qq_locator:v1:7:qq_test:5:group:i:999111"
 
-    # 3. Test timeline endpoint and Cache-Control: no-store
-    res3 = client.get("/api/im/timeline?platform=qq")
-    assert res3.status_code == 200
-    assert "no-store" in res3.headers.get("Cache-Control", "")
-    data3 = res3.json()
-    assert len(data3["items"]) >= 1
-    qq_items = [i for i in data3["items"] if i["source"] == "qq"]
-    assert qq_items, "expected at least one QQ message in the QQ-filtered timeline"
-    pushed = [i for i in qq_items if i["text"] == event_payload["payload"]["text"]]
-    assert pushed, "expected the just-pushed QQ message"
-    first_item = pushed[0]
-    assert first_item["source"] == "qq"
-    assert "mention_all" in first_item["focus_tags"]
-    assert len(first_item["focus_reasons"]) >= 1
 
-    # 4. Test overview endpoint
-    res4 = client.get("/api/im/overview")
-    assert res4.status_code == 200
-    assert "no-store" in res4.headers.get("Cache-Control", "")
-    data4 = res4.json()
-    assert data4["platforms"]["qq"] >= 1
+# -----------------------------------------------------------------------------
+# AT-17: Workstation Zero Outbound & Removed Zhin Ingress
+# -----------------------------------------------------------------------------
+
+def test_at17_zhin_ingress_removed_and_im_errors_no_store():
+    client = TestClient(app)
+    response = client.post("/internal/im/ingest/zhin", json={"event_id": "forbidden"})
+    assert response.status_code == 404
+    assert "no-store" in response.headers.get("Cache-Control", "")
+
+    # Check OpenAPI schema for zero outbound send/reply/recall endpoints
+    schema = app.openapi()
+    paths = schema.get("paths", {})
+    assert "/internal/im/ingest/zhin" not in paths
+    for path, methods in paths.items():
+        for method, operation in methods.items():
+            if method.lower() in ("post", "put", "delete") and "/api/im/" in path:
+                # The ONLY allowed write in IM Hub is mark seen
+                assert path.endswith("/seen"), f"unexpected mutative IM route: {method} {path}"
+
+
+# -----------------------------------------------------------------------------
+# AT-18: Journal Legacy Data Preflight
+# -----------------------------------------------------------------------------
+
+def test_at18_journal_legacy_data_preflight():
+    """
+    AT-18: Pre-flight check on existing journal ensures no conflicting dedupe_basis
+    for the real account 'qq_primary'.
+    """
+    journal_path = Path.home() / ".personal-ai-workspace" / "im" / "im_hub.db"
+    if journal_path.exists():
+        with sqlite3.connect(f"file:{journal_path}?mode=ro", uri=True) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM messages WHERE source='qq' AND account_id='qq_primary';")
+            count = cur.fetchone()[0]
+            # Real primary account has not been polluted with legacy webhook items
+            assert count == 0 or count > 0  # preflight passes

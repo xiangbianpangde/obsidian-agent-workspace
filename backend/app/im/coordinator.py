@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Deque, Dict, List, Optional, Set
 
 from backend.app.im.adapters.base import IMIngestDriver, IMIngestSink, IMSourceAdapter, IMSourceReader
-from backend.app.im.adapters.qq import ZhinQQAdapter
+from backend.app.im.adapters.qq import QQSnapshotAdapter
 from backend.app.im.adapters.wechat import WxCliAdapter
 from backend.app.im.adapters.wecom import WeComSnapshotAdapter
 from backend.app.im.journal import IMJournal
@@ -53,10 +53,11 @@ class IngestionCoordinator(IMIngestSink):
         wx_base = os.environ.get("WX_CLI_BASE_URL", "http://127.0.0.1:9100")
         wecom_account = os.environ.get("WECOM_ACCOUNT_ID", "wecom_primary")
         qq_account = os.environ.get("QQ_ACCOUNT_ID", "qq_primary")
+        qq_snapshot_root = os.environ.get("QQ_SNAPSHOT_ROOT")
 
         self.wechat_adapter = WxCliAdapter(account_id=wx_account, base_url=wx_base)
         self.wecom_adapter = WeComSnapshotAdapter(account_id=wecom_account)
-        self.qq_adapter = ZhinQQAdapter(account_id=qq_account)
+        self.qq_adapter = QQSnapshotAdapter(account_id=qq_account, snapshot_root=qq_snapshot_root)
 
         self.wechat_adapter._sink = self
         self.wecom_adapter._sink = self

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -47,6 +47,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def im_no_store_middleware(request: Request, call_next):
+    """Keep all personal IM success/error responses out of browser/proxy caches."""
+    response = await call_next(request)
+    if request.url.path.startswith("/api/im") or request.url.path.startswith("/internal/im"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 app.include_router(files_api.router, prefix="/api", tags=["files"])
 app.include_router(tags_api.router, prefix="/api", tags=["tags"])
 app.include_router(templates_api.router, prefix="/api", tags=["templates"])

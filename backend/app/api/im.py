@@ -4,22 +4,15 @@ Conforms strictly to docs/03-im-integration-v0.2.7.md
 Implements Cache-Control: no-store, loopback secret auth, and SSE endpoint.
 """
 
-import hmac
-import os
-import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from backend.app.im.coordinator import IngestionCoordinator
-from backend.app.im.journal import IdentityConflictError, IMJournal, InvalidIngestEnvelopeError
+from backend.app.im.journal import IMJournal
 
 router = APIRouter(tags=["IM Hub"])
-
-# Default loopback shared secret for Zhin ingress
-IM_INGEST_SECRET = os.environ.get("IM_INGEST_SECRET", "workspace_im_secret_token_default")
 
 _global_journal: Optional[IMJournal] = None
 _global_coordinator: Optional[IngestionCoordinator] = None
@@ -204,60 +197,6 @@ async def get_im_events(
         "Content-Type": "text/event-stream"
     }
     return StreamingResponse(gen, media_type="text/event-stream", headers=headers)
-
-
-# -----------------------------------------------------------------------------
-# Internal Ingress for Zhin QQ Push
-# -----------------------------------------------------------------------------
-
-@router.post("/internal/im/ingest/zhin")
-async def ingest_from_zhin(
-    request: Request,
-    x_im_secret: Optional[str] = Header(None, alias="X-IM-Secret")
-) -> Dict[str, Any]:
-    """
-    Internal one-way push ingress for Zhin.js.
-    Bound strictly to loopback (127.0.0.1 / ::1) and validated with shared secret.
-    """
-    # 1. Loopback defense
-    client_host = request.client.host if request.client else "unknown"
-    if client_host not in ["127.0.0.1", "::1", "localhost", "testclient"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Loopback only")
-
-    # 2. Secret authentication
-    expected_secret = os.environ.get("IM_INGEST_SECRET", IM_INGEST_SECRET)
-    if not x_im_secret or not hmac.compare_digest(x_im_secret, expected_secret):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid X-IM-Secret header")
-
-    # 3. Parse JSON body (Limit < 5MB)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body")
-
-    coordinator = await ensure_im_coordinator_started()
-    qq_adapter = coordinator.qq_adapter
-
-    try:
-        receipt = await qq_adapter.ingest_inbound_event(body)
-        return {
-            "status": "ok",
-            "receipt": {
-                "source": receipt.source,
-                "account_id": receipt.account_id,
-                "inserted_count": receipt.inserted_count,
-                "skipped_count": receipt.skipped_count,
-                "head_seq": receipt.committed_seq_head
-            }
-        }
-    except InvalidIngestEnvelopeError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except IdentityConflictError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 def asdict_message(m: Any) -> Dict[str, Any]:

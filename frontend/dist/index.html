@@ -1934,20 +1934,20 @@
         el.imStatWechat.className = wxLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-400';
         el.imStatWechat.title = wx.detail || '';
 
-        // WeCom status — a configured/readable snapshot is required for live.
+        // WeCom status
         const wecom = sources.wecom || {};
-        const wecomLive = wecom.connectivity === 'live';
-        const wecomLabel = wecomLive ? '在线' : (wecom.connectivity === 'degraded' ? '需配置快照读取器' : '未接入');
-        el.imStatWecom.innerHTML = `<span class="w-2 h-2 rounded-full ${wecomLive ? 'bg-blue-500' : 'bg-slate-500'} mr-1"></span>企微: ${wecomLabel}`;
-        el.imStatWecom.className = wecomLive ? 'flex items-center text-blue-400' : 'flex items-center text-slate-400';
+        const wecomHasSnap = !!(wecom.watermark && wecom.watermark.value);
+        const wecomLabel = wecomHasSnap ? '快照' : (wecom.connectivity === 'catching_up' ? '同步中' : '未接入');
+        el.imStatWecom.innerHTML = `<span class="w-2 h-2 rounded-full ${wecomHasSnap ? 'bg-blue-500' : 'bg-slate-500'} mr-1"></span>企微: ${wecomLabel}`;
+        el.imStatWecom.className = wecomHasSnap ? 'flex items-center text-blue-400' : 'flex items-center text-slate-400';
         el.imStatWecom.title = wecom.detail || '';
 
-        // QQ status — "等待推送" is not the same as an online QQ account.
+        // QQ status — Local read-only snapshot mode (v0.2.8 / ADR-005)
         const qq = sources.qq || {};
-        const qqLive = qq.connectivity === 'live';
-        const qqLabel = qqLive ? '在线 (Push)' : (qq.connectivity === 'catching_up' ? '等待推送' : '离线');
-        el.imStatQq.innerHTML = `<span class="w-2 h-2 rounded-full ${qqLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>QQ: ${qqLabel}`;
-        el.imStatQq.className = qqLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-300';
+        const qqHasSnap = !!(qq.watermark && qq.watermark.value);
+        const qqLabel = qqHasSnap ? '快照' : (qq.connectivity === 'catching_up' ? '同步中' : (qq.connectivity === 'degraded' ? '快照异常' : '未接入'));
+        el.imStatQq.innerHTML = `<span class="w-2 h-2 rounded-full ${qqHasSnap ? 'bg-amber-500' : 'bg-slate-500'} mr-1"></span>QQ: ${qqLabel}`;
+        el.imStatQq.className = qqHasSnap ? 'flex items-center text-amber-400' : 'flex items-center text-slate-400';
         el.imStatQq.title = qq.detail || '';
 
         state.im.headSeq = data.head_seq || 0;
