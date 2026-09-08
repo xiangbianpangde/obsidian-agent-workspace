@@ -136,8 +136,11 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
         start_w, end_w, pattern, custom_w = parse_week_pattern(row["weeks"])
         room = row.get("classroom") or course.classroom
 
+        slot_key = f"{course.id}::{day}::{start_p}_{end_p}::{pattern}::{start_w}_{end_w}"
+        slot_id = f"ts_{hashlib.md5(slot_key.encode()).hexdigest()[:12]}"
+
         slot = CourseTimeSlot(
-            id=f"ts_{uuid.uuid4().hex[:8]}",
+            id=slot_id,
             course_id=course.id,
             day_of_week=day,
             start_period=start_p,

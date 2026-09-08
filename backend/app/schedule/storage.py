@@ -2,9 +2,11 @@
 
 Implements:
 - Slot-occurrence exact binding for CourseOverride (time_slot_id)
-- Zero Delete compliance (soft deletes: is_deleted, is_revoked)
-- Atomic transactions (BEGIN TRANSACTION / COMMIT / ROLLBACK)
+- Universal Zero Delete compliance (soft deletes: is_deleted, is_revoked)
+- Atomic transactions (BEGIN TRANSACTION / COMMIT / ROLLBACK) across all mutations
+- Batch atomic transactions for course imports
 - Synchronized period-to-time derivation for rescheduled courses
+- Pre-existing DB migration and unique index enforcement
 """
 
 from __future__ import annotations
@@ -76,7 +78,6 @@ class ScheduleStorage:
             );
             """)
 
-            # Courses table with soft delete (Zero Delete compliance)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS courses (
                 id TEXT PRIMARY KEY,
@@ -96,7 +97,6 @@ class ScheduleStorage:
             );
             """)
 
-            # Time slots table with soft delete
             cur.execute("""
             CREATE TABLE IF NOT EXISTS time_slots (
                 id TEXT PRIMARY KEY,
@@ -116,7 +116,6 @@ class ScheduleStorage:
             );
             """)
 
-            # Overrides table with exact time_slot_id occurrence binding and soft revocation
             cur.execute("""
             CREATE TABLE IF NOT EXISTS overrides (
                 id TEXT PRIMARY KEY,
@@ -139,7 +138,6 @@ class ScheduleStorage:
             );
             """)
 
-            # Academic events table with soft delete
             cur.execute("""
             CREATE TABLE IF NOT EXISTS academic_events (
                 id TEXT PRIMARY KEY,
@@ -159,7 +157,7 @@ class ScheduleStorage:
             );
             """)
 
-            # Automatic forward migration for pre-existing databases (R8 / R10)
+            # Forward migration for pre-existing databases (R6, R8, R10)
             def _ensure_col(table: str, col: str, col_type: str) -> None:
                 cur.execute(f"PRAGMA table_info({table});")
                 cols = {row[1] for row in cur.fetchall()}
@@ -174,6 +172,12 @@ class ScheduleStorage:
             _ensure_col("overrides", "revoked_at", "TEXT")
             _ensure_col("academic_events", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
             _ensure_col("academic_events", "deleted_at", "TEXT")
+
+            # B3: Enforce unique index on overrides(time_slot_id, week_number) for all DBs
+            cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_slot_week
+            ON overrides(time_slot_id, week_number);
+            """)
 
             cur.close()
             secure_harden_path(self.db_path)
@@ -244,26 +248,33 @@ class ScheduleStorage:
     def save_calendar(self, cal: AcademicCalendar) -> None:
         with self._lock:
             cur = self._conn.cursor()
-            holidays_json = json.dumps([asdict(h) for h in cal.holidays], ensure_ascii=False)
-            cur.execute("""
-            INSERT INTO calendar_config (
-                semester, start_date, total_weeks, teaching_weeks_start,
-                teaching_weeks_end, exam_weeks_start, exam_weeks_end, holidays_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(semester) DO UPDATE SET
-                start_date = excluded.start_date,
-                total_weeks = excluded.total_weeks,
-                teaching_weeks_start = excluded.teaching_weeks_start,
-                teaching_weeks_end = excluded.teaching_weeks_end,
-                exam_weeks_start = excluded.exam_weeks_start,
-                exam_weeks_end = excluded.exam_weeks_end,
-                holidays_json = excluded.holidays_json;
-            """, (
-                cal.semester, cal.start_date, cal.total_weeks,
-                cal.teaching_weeks_start, cal.teaching_weeks_end,
-                cal.exam_weeks_start, cal.exam_weeks_end, holidays_json
-            ))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                holidays_json = json.dumps([asdict(h) for h in cal.holidays], ensure_ascii=False)
+                cur.execute("""
+                INSERT INTO calendar_config (
+                    semester, start_date, total_weeks, teaching_weeks_start,
+                    teaching_weeks_end, exam_weeks_start, exam_weeks_end, holidays_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(semester) DO UPDATE SET
+                    start_date = excluded.start_date,
+                    total_weeks = excluded.total_weeks,
+                    teaching_weeks_start = excluded.teaching_weeks_start,
+                    teaching_weeks_end = excluded.teaching_weeks_end,
+                    exam_weeks_start = excluded.exam_weeks_start,
+                    exam_weeks_end = excluded.exam_weeks_end,
+                    holidays_json = excluded.holidays_json;
+                """, (
+                    cal.semester, cal.start_date, cal.total_weeks,
+                    cal.teaching_weeks_start, cal.teaching_weeks_end,
+                    cal.exam_weeks_start, cal.exam_weeks_end, holidays_json
+                ))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def compute_current_week(
         self,
@@ -321,7 +332,7 @@ class ScheduleStorage:
         }
 
     # -------------------------------------------------------------------------
-    # Course CRUD (Atomic Transactions & Soft Delete Compliance)
+    # Course CRUD (Atomic Transactions, Conflict-Free Slots & Soft Deletes)
     # -------------------------------------------------------------------------
 
     def list_courses(self, semester: str = "2026-2027-1") -> List[Course]:
@@ -351,58 +362,124 @@ class ScheduleStorage:
             c.time_slots = self._get_time_slots(course_id)
             return c
 
+    def _save_course_in_cursor(self, cur: sqlite3.Cursor, course: Course) -> None:
+        """Internal worker executing course and slot upsert within an active transaction."""
+        cur.execute("""
+        INSERT INTO courses (
+            id, name, code, teacher, classroom, credits, semester,
+            color, notes, course_group_id, meeting_url, reminder_minutes,
+            is_deleted, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            code = excluded.code,
+            teacher = excluded.teacher,
+            classroom = excluded.classroom,
+            credits = excluded.credits,
+            semester = excluded.semester,
+            color = excluded.color,
+            notes = excluded.notes,
+            course_group_id = excluded.course_group_id,
+            meeting_url = excluded.meeting_url,
+            reminder_minutes = excluded.reminder_minutes,
+            is_deleted = 0,
+            deleted_at = NULL;
+        """, (
+            course.id, course.name, course.code, course.teacher, course.classroom,
+            course.credits, course.semester, course.color, course.notes,
+            course.course_group_id, course.meeting_url, course.reminder_minutes
+        ))
+
+        # Soft delete any slots that are NOT present in the updated course.time_slots
+        active_ids = [ts.id for ts in course.time_slots if ts.id]
+        if active_ids:
+            placeholders = ",".join("?" for _ in active_ids)
+            cur.execute(
+                f"UPDATE time_slots SET is_deleted = 1 WHERE course_id = ? AND id NOT IN ({placeholders});",
+                [course.id, *active_ids]
+            )
+        else:
+            cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course.id,))
+
+        # Upsert active slots (ON CONFLICT DO UPDATE to avoid UNIQUE constraint crash B1)
+        for ts in course.time_slots:
+            slot_id = ts.id or f"ts_{uuid.uuid4().hex[:8]}"
+            cw_json = json.dumps(ts.custom_weeks)
+            cur.execute("""
+            INSERT INTO time_slots (
+                id, course_id, day_of_week, start_period, end_period,
+                start_time, end_time, week_pattern, start_week, end_week,
+                custom_weeks_json, classroom, is_deleted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(id) DO UPDATE SET
+                course_id = excluded.course_id,
+                day_of_week = excluded.day_of_week,
+                start_period = excluded.start_period,
+                end_period = excluded.end_period,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time,
+                week_pattern = excluded.week_pattern,
+                start_week = excluded.start_week,
+                end_week = excluded.end_week,
+                custom_weeks_json = excluded.custom_weeks_json,
+                classroom = excluded.classroom,
+                is_deleted = 0;
+            """, (
+                slot_id, course.id, ts.day_of_week, ts.start_period, ts.end_period,
+                ts.start_time, ts.end_time, ts.week_pattern, ts.start_week, ts.end_week,
+                cw_json, ts.classroom or course.classroom
+            ))
+
     def save_course(self, course: Course) -> None:
-        """Saves course and slots in an atomic transaction. Soft-deletes superseded slots."""
+        """Saves course and slots in an atomic transaction."""
         with self._lock:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
+                self._save_course_in_cursor(cur, course)
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
-                cur.execute("""
-                INSERT INTO courses (
-                    id, name, code, teacher, classroom, credits, semester,
-                    color, notes, course_group_id, meeting_url, reminder_minutes,
-                    is_deleted, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    code = excluded.code,
-                    teacher = excluded.teacher,
-                    classroom = excluded.classroom,
-                    credits = excluded.credits,
-                    semester = excluded.semester,
-                    color = excluded.color,
-                    notes = excluded.notes,
-                    course_group_id = excluded.course_group_id,
-                    meeting_url = excluded.meeting_url,
-                    reminder_minutes = excluded.reminder_minutes,
-                    is_deleted = 0,
-                    deleted_at = NULL;
-                """, (
-                    course.id, course.name, course.code, course.teacher, course.classroom,
-                    course.credits, course.semester, course.color, course.notes,
-                    course.course_group_id, course.meeting_url, course.reminder_minutes
-                ))
+    def save_courses_batch(self, courses: List[Course]) -> None:
+        """R8: Atomic batch transaction. Fails closed and rolls back 100% on any error."""
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                for c in courses:
+                    self._save_course_in_cursor(cur, c)
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
-                # Soft delete existing slots instead of physical deletion (Zero Delete)
-                cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course.id,))
+    def update_meeting_url(self, course_id: str, meeting_url: str) -> None:
+        """Atomic targeted update without touching time slots (R12 / B1)."""
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                cur.execute("UPDATE courses SET meeting_url = ? WHERE id = ? AND is_deleted = 0;", (meeting_url, course_id))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
-                # Insert active slots
-                for ts in course.time_slots:
-                    cw_json = json.dumps(ts.custom_weeks)
-                    cur.execute("""
-                    INSERT INTO time_slots (
-                        id, course_id, day_of_week, start_period, end_period,
-                        start_time, end_time, week_pattern, start_week, end_week,
-                        custom_weeks_json, classroom, is_deleted
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
-                    """, (
-                        ts.id or f"ts_{uuid.uuid4().hex[:8]}", course.id, ts.day_of_week,
-                        ts.start_period, ts.end_period, ts.start_time, ts.end_time,
-                        ts.week_pattern, ts.start_week, ts.end_week, cw_json,
-                        ts.classroom or course.classroom
-                    ))
-
+    def update_reminder_minutes(self, course_id: str, reminder_minutes: int) -> None:
+        """Atomic targeted update without touching time slots (R12 / B1)."""
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                cur.execute("UPDATE courses SET reminder_minutes = ? WHERE id = ? AND is_deleted = 0;", (reminder_minutes, course_id))
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -480,15 +557,14 @@ class ScheduleStorage:
         """
         Stores an occurrence-level override bound to `time_slot_id`.
         Synchronously derives exact start and end times if periods are rescheduled.
+        B9: ON CONFLICT updates id = excluded.id so stored and returned IDs match.
         """
-        # R7: Synchronize period and absolute time derivation
-        new_s_time = override.new_start_time
-        new_e_time = override.new_end_time
+        # R7: Synchronize period and absolute time derivation unconditionally
         if override.new_start_period is not None:
             end_p = override.new_end_period or (override.new_start_period + 1)
             derived_s, derived_e = period_range_to_time(override.new_start_period, end_p)
-            new_s_time = new_s_time or derived_s
-            new_e_time = new_e_time or derived_e
+            override.new_start_time = derived_s
+            override.new_end_time = derived_e
 
         with self._lock:
             cur = self._conn.cursor()
@@ -502,6 +578,8 @@ class ScheduleStorage:
                     reason, is_revoked, revoked_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
                 ON CONFLICT(time_slot_id, week_number) DO UPDATE SET
+                    id = excluded.id,
+                    course_id = excluded.course_id,
                     override_type = excluded.override_type,
                     new_classroom = excluded.new_classroom,
                     new_day_of_week = excluded.new_day_of_week,
@@ -516,7 +594,7 @@ class ScheduleStorage:
                     override.id, override.time_slot_id, override.course_id, override.semester,
                     override.week_number, override.day_of_week, override.override_type,
                     override.new_classroom, override.new_day_of_week, override.new_start_period,
-                    override.new_end_period, new_s_time, new_e_time, override.reason
+                    override.new_end_period, override.new_start_time, override.new_end_time, override.reason
                 ))
                 cur.execute("COMMIT;")
             except Exception:
@@ -529,9 +607,16 @@ class ScheduleStorage:
         """Soft revocation (Zero Delete compliance)."""
         with self._lock:
             cur = self._conn.cursor()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE id = ?;", (now_iso, override_id))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                now_iso = datetime.now(timezone.utc).isoformat()
+                cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE id = ?;", (now_iso, override_id))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def list_overrides(self, semester: str = "2026-2027-1", week_number: Optional[int] = None) -> List[CourseOverride]:
         with self._lock:
@@ -583,7 +668,6 @@ class ScheduleStorage:
         """
         courses = self.list_courses(semester)
         overrides = self.list_overrides(semester, week_number)
-        # Occurrence-level map: time_slot_id -> override
         slot_override_map: Dict[str, CourseOverride] = {
             o.time_slot_id: o for o in overrides
         }
@@ -700,7 +784,7 @@ class ScheduleStorage:
         return active_slots
 
     # -------------------------------------------------------------------------
-    # Academic Events (Soft Delete Compliance)
+    # Academic Events (Soft Delete Compliance & Transactions)
     # -------------------------------------------------------------------------
 
     def list_events(
@@ -746,53 +830,74 @@ class ScheduleStorage:
     def save_event(self, event: AcademicEvent) -> None:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
-            INSERT INTO academic_events (
-                id, semester, title, event_type, due_date, due_time,
-                week_number, related_course_id, location, notes, is_completed,
-                priority, is_deleted, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-            ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
-                event_type = excluded.event_type,
-                due_date = excluded.due_date,
-                due_time = excluded.due_time,
-                week_number = excluded.week_number,
-                related_course_id = excluded.related_course_id,
-                location = excluded.location,
-                notes = excluded.notes,
-                is_completed = excluded.is_completed,
-                priority = excluded.priority,
-                is_deleted = 0,
-                deleted_at = NULL;
-            """, (
-                event.id, event.semester, event.title, event.event_type,
-                event.due_date, event.due_time, event.week_number,
-                event.related_course_id, event.location, event.notes,
-                1 if event.is_completed else 0, event.priority
-            ))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                cur.execute("""
+                INSERT INTO academic_events (
+                    id, semester, title, event_type, due_date, due_time,
+                    week_number, related_course_id, location, notes, is_completed,
+                    priority, is_deleted, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    event_type = excluded.event_type,
+                    due_date = excluded.due_date,
+                    due_time = excluded.due_time,
+                    week_number = excluded.week_number,
+                    related_course_id = excluded.related_course_id,
+                    location = excluded.location,
+                    notes = excluded.notes,
+                    is_completed = excluded.is_completed,
+                    priority = excluded.priority,
+                    is_deleted = 0,
+                    deleted_at = NULL;
+                """, (
+                    event.id, event.semester, event.title, event.event_type,
+                    event.due_date, event.due_time, event.week_number,
+                    event.related_course_id, event.location, event.notes,
+                    1 if event.is_completed else 0, event.priority
+                ))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def toggle_event_completed(self, event_id: str) -> bool:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("SELECT is_completed FROM academic_events WHERE id = ? AND is_deleted = 0;", (event_id,))
-            row = cur.fetchone()
-            if not row:
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                cur.execute("SELECT is_completed FROM academic_events WHERE id = ? AND is_deleted = 0;", (event_id,))
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("COMMIT;")
+                    return False
+                new_val = 0 if row["is_completed"] else 1
+                cur.execute("UPDATE academic_events SET is_completed = ? WHERE id = ?;", (new_val, event_id))
+                cur.execute("COMMIT;")
+                return bool(new_val)
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
                 cur.close()
-                return False
-            new_val = 0 if row["is_completed"] else 1
-            cur.execute("UPDATE academic_events SET is_completed = ? WHERE id = ?;", (new_val, event_id))
-            cur.close()
-            return bool(new_val)
 
     def delete_event(self, event_id: str) -> None:
         """Soft delete (Zero Delete compliance)."""
         with self._lock:
             cur = self._conn.cursor()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            cur.execute("UPDATE academic_events SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, event_id))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                now_iso = datetime.now(timezone.utc).isoformat()
+                cur.execute("UPDATE academic_events SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, event_id))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     # -------------------------------------------------------------------------
     # Course Teachers Registry for WeCom Filtering

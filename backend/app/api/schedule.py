@@ -1,4 +1,4 @@
-"""FastAPI Router for Course Schedule & Academic Calendar (v0.2.8 / R6-R10)."""
+"""FastAPI Router for Course Schedule & Academic Calendar (v0.2.8 / R1-R13)."""
 
 from __future__ import annotations
 
@@ -39,8 +39,7 @@ def get_schedule_storage() -> ScheduleStorage:
             try:
                 cfg = load_config()
                 courses = import_schedule_from_obsidian_vault(cfg.vault_path)
-                for c in courses:
-                    _storage.save_course(c)
+                _storage.save_courses_batch(courses)
             except Exception:
                 pass
     return _storage
@@ -81,16 +80,16 @@ class CourseIn(BaseModel):
 
 
 class OverrideIn(BaseModel):
-    time_slot_id: str  # R6: Exact slot occurrence binding
+    time_slot_id: str
     course_id: str
     semester: str = "2026-2027-1"
-    week_number: int
-    day_of_week: int
+    week_number: int = Field(..., ge=1, le=30)
+    day_of_week: int = Field(..., ge=1, le=7)
     override_type: str  # "cancel" | "reschedule" | "relocate" | "makeup"
     new_classroom: Optional[str] = None
-    new_day_of_week: Optional[int] = None
-    new_start_period: Optional[int] = None
-    new_end_period: Optional[int] = None
+    new_day_of_week: Optional[int] = Field(None, ge=1, le=7)
+    new_start_period: Optional[int] = Field(None, ge=1, le=11)
+    new_end_period: Optional[int] = Field(None, ge=1, le=11)
     new_start_time: Optional[str] = None
     new_end_time: Optional[str] = None
     reason: str = ""
@@ -100,7 +99,7 @@ class EventIn(BaseModel):
     id: Optional[str] = None
     semester: str = "2026-2027-1"
     title: str
-    event_type: str = "assignment"  # "assignment" | "exam" | "lab" | "meeting" | "activity"
+    event_type: str = "assignment"
     due_date: str
     due_time: Optional[str] = "23:59"
     week_number: Optional[int] = None
@@ -183,7 +182,13 @@ def get_course(course_id: str) -> Dict[str, Any]:
 @router.post("/course")
 def create_course(payload: CourseIn) -> Dict[str, Any]:
     storage = get_schedule_storage()
-    cid = payload.id or f"crs_{payload.semester.replace('-', '_')}_{uuid.uuid4().hex[:8]}"
+    # B7: Enforce semester namespace on ID
+    sem_clean = payload.semester.replace("-", "_")
+    if not payload.id or not payload.id.startswith(f"crs_{sem_clean}_"):
+        cid = f"crs_{sem_clean}_{uuid.uuid4().hex[:8]}"
+    else:
+        cid = payload.id
+
     slots = [
         CourseTimeSlot(
             id=ts.id or f"ts_{uuid.uuid4().hex[:8]}",
@@ -228,24 +233,24 @@ def update_course(course_id: str, payload: CourseIn) -> Dict[str, Any]:
 
 @router.put("/course/{course_id}/meeting")
 def update_course_meeting(course_id: str, payload: MeetingUrlIn) -> Dict[str, Any]:
+    """Atomic update of meeting URL without touching slots (B1 / R12)."""
     storage = get_schedule_storage()
     course = storage.get_course(course_id)
     if not course:
         raise HTTPException(status_code=404, detail="课程不存在")
-    course.meeting_url = payload.meeting_url
-    storage.save_course(course)
-    return {"status": "ok", "course_id": course_id, "meeting_url": course.meeting_url}
+    storage.update_meeting_url(course_id, payload.meeting_url)
+    return {"status": "ok", "course_id": course_id, "meeting_url": payload.meeting_url}
 
 
 @router.put("/course/{course_id}/reminder")
 def update_course_reminder(course_id: str, payload: ReminderMinutesIn) -> Dict[str, Any]:
+    """Atomic update of reminder threshold without touching slots (B1 / R12)."""
     storage = get_schedule_storage()
     course = storage.get_course(course_id)
     if not course:
         raise HTTPException(status_code=404, detail="课程不存在")
-    course.reminder_minutes = payload.reminder_minutes
-    storage.save_course(course)
-    return {"status": "ok", "course_id": course_id, "reminder_minutes": course.reminder_minutes}
+    storage.update_reminder_minutes(course_id, payload.reminder_minutes)
+    return {"status": "ok", "course_id": course_id, "reminder_minutes": payload.reminder_minutes}
 
 
 @router.delete("/course/{course_id}")
@@ -261,6 +266,14 @@ def add_override(payload: OverrideIn) -> Dict[str, Any]:
     """Occurrence-level temporary override (cancel, relocate, reschedule, makeup)."""
     storage = get_schedule_storage()
     oid = f"ov_{uuid.uuid4().hex[:10]}"
+
+    # B5: Unconditional time derivation when start_period is given
+    derived_s = payload.new_start_time
+    derived_e = payload.new_end_time
+    if payload.new_start_period is not None:
+        end_p = payload.new_end_period or (payload.new_start_period + 1)
+        derived_s, derived_e = period_range_to_time(payload.new_start_period, end_p)
+
     override = CourseOverride(
         id=oid,
         time_slot_id=payload.time_slot_id,
@@ -273,8 +286,8 @@ def add_override(payload: OverrideIn) -> Dict[str, Any]:
         new_day_of_week=payload.new_day_of_week,
         new_start_period=payload.new_start_period,
         new_end_period=payload.new_end_period,
-        new_start_time=payload.new_start_time,
-        new_end_time=payload.new_end_time,
+        new_start_time=derived_s,
+        new_end_time=derived_e,
         reason=payload.reason,
     )
     storage.add_override(override)
@@ -374,12 +387,11 @@ def get_reminders(
 
 @router.post("/import/obsidian")
 def import_from_obsidian_vault(semester: str = Query("2026-2027-1")) -> Dict[str, Any]:
-    """1-click import from 课表.md inside the user's Obsidian Vault."""
+    """B4: 1-click import from 课表.md executed in an atomic batch transaction."""
     storage = get_schedule_storage()
     cfg = load_config()
     courses = import_schedule_from_obsidian_vault(cfg.vault_path, semester=semester)
-    for c in courses:
-        storage.save_course(c)
+    storage.save_courses_batch(courses)
     return {
         "status": "ok",
         "imported_courses": len(courses),
@@ -389,10 +401,10 @@ def import_from_obsidian_vault(semester: str = Query("2026-2027-1")) -> Dict[str
 
 @router.post("/import/markdown")
 def import_from_markdown(payload: MarkdownImportIn) -> Dict[str, Any]:
+    """B4: Import from markdown executed in an atomic batch transaction."""
     storage = get_schedule_storage()
     courses = parse_markdown_schedule_table(payload.markdown, semester=payload.semester)
-    for c in courses:
-        storage.save_course(c)
+    storage.save_courses_batch(courses)
     return {
         "status": "ok",
         "imported_courses": len(courses),

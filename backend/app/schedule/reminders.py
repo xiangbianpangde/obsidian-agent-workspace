@@ -45,9 +45,9 @@ def get_upcoming_reminders(
 
         diff_mins = (class_start_dt - now).total_seconds() / 60.0
 
-        # Trigger if starting within reminder_minutes window
+        # Trigger strictly based on the course's configured reminder_minutes window
         reminder_threshold = s.get("reminder_minutes") or 15
-        if 0 <= diff_mins <= max(reminder_threshold, lookahead_minutes):
+        if 0 <= diff_mins <= reminder_threshold:
             reminders.append({
                 "course_name": s["course_name"],
                 "classroom": s["classroom"],

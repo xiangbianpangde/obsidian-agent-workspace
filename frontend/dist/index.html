@@ -612,20 +612,16 @@
           <div class="grid grid-cols-2 gap-2 text-[10px] pt-1">
             <div class="bg-[#20202a] p-2 rounded-lg border border-[#2e2e3e]">
               <div class="text-slate-400">教学周</div>
-              <div class="font-bold text-slate-200 mt-0.5">第 1 ~ 16 周</div>
+              <div id="stat-teaching-weeks" class="font-bold text-slate-200 mt-0.5">第 1 ~ 16 周</div>
             </div>
             <div class="bg-[#20202a] p-2 rounded-lg border border-[#2e2e3e]">
               <div class="text-slate-400">期末考试周</div>
-              <div class="font-bold text-purple-300 mt-0.5">第 17 ~ 18 周</div>
+              <div id="stat-exam-weeks" class="font-bold text-purple-300 mt-0.5">第 17 ~ 18 周</div>
             </div>
           </div>
 
-          <div class="bg-[#20202a] p-2.5 rounded-lg border border-[#2e2e3e] text-[10px] space-y-1">
-            <div class="flex items-center justify-between text-slate-400">
-              <span class="flex items-center"><i data-lucide="flag" class="w-3 h-3 mr-1 text-rose-400"></i>临近节假日</span>
-              <span class="text-rose-300 font-semibold">中秋 (9.25 - 9.27)</span>
-            </div>
-            <div class="text-slate-500">国庆节: 10月1日 ~ 10月7日 (放假7天)</div>
+          <div id="container-holidays-list" class="bg-[#20202a] p-2.5 rounded-lg border border-[#2e2e3e] text-[10px] space-y-1.5">
+            <!-- 动态渲染校历节假日 -->
           </div>
         </div>
 
@@ -3012,28 +3008,81 @@
 
     async function loadCurrentWeekInfo() {
       try {
-        const res = await api(`/schedule/current-week?semester=${encodeURIComponent(state.schedule.semester)}`);
-        state.schedule.weekInfo = res;
-        state.schedule.currentWeek = res.current_week || 2;
-        if (!state.schedule.selectedWeek) {
+        const [resWeek, resCal] = await Promise.all([
+          api(`/schedule/current-week?semester=${encodeURIComponent(state.schedule.semester)}`),
+          api(`/schedule/calendar?semester=${encodeURIComponent(state.schedule.semester)}`)
+        ]);
+        state.schedule.weekInfo = resWeek;
+        state.schedule.calendar = resCal;
+        state.schedule.currentWeek = resWeek.current_week || 2;
+        if (state.schedule.selectedWeek === undefined || state.schedule.selectedWeek === null) {
           state.schedule.selectedWeek = state.schedule.currentWeek;
         }
 
         // Update header & badges
         scheduleEl.badgeScheduleWeek.textContent = `第${state.schedule.currentWeek}周`;
-        scheduleEl.statScheduleWeekBadge.textContent = res.phase_label || `第 ${state.schedule.currentWeek} 周`;
+        scheduleEl.statScheduleWeekBadge.textContent = resWeek.phase_label || `第 ${state.schedule.currentWeek} 周`;
         
         // Progress bar
-        const totalW = res.total_weeks || 20;
+        const totalW = resCal.total_weeks || resWeek.total_weeks || 20;
         const pct = Math.min(100, Math.round((state.schedule.selectedWeek / totalW) * 100));
         scheduleEl.labelProgressText.textContent = `第 ${state.schedule.selectedWeek} 周 / ${totalW} 周 (${pct}%)`;
         scheduleEl.barSemesterProgress.style.width = `${pct}%`;
 
-        // Display labels
+        // Update display and dynamic week dates
         updateWeekDisplay();
       } catch (err) {
         console.error('拉取周次信息失败:', err);
       }
+    }
+
+    function updateDynamicWeekDates() {
+      if (!state.schedule.weekInfo) return;
+      const semStart = new Date(state.schedule.weekInfo.semester_start_date + 'T00:00:00');
+      const monday = new Date(semStart.getTime() + (state.schedule.selectedWeek - 1) * 7 * 86400000);
+      const sunday = new Date(monday.getTime() + 6 * 86400000);
+      
+      // Update date range label
+      const mStr = monday.toISOString().slice(0, 10);
+      const sStr = sunday.toISOString().slice(0, 10);
+      scheduleEl.labelWeekDateRange.textContent = `${mStr} ~ ${sStr}`;
+
+      // Update 7 day headers dynamically
+      const isCurWeek = (state.schedule.selectedWeek === state.schedule.currentWeek);
+      const todayDayOfWeek = state.schedule.weekInfo.day_of_week;
+
+      for (let day = 1; day <= 7; day++) {
+        const dayDate = new Date(monday.getTime() + (day - 1) * 86400000);
+        const month = dayDate.getMonth() + 1;
+        const d = dayDate.getDate();
+        const isToday = isCurWeek && (day === todayDayOfWeek);
+        const headerEl = document.getElementById(`header-day-${day}`);
+        if (headerEl) {
+          headerEl.className = `py-2.5 ${isToday ? 'bg-amber-950/20 text-amber-300 font-bold' : 'text-slate-300'}`;
+          headerEl.innerHTML = `周${['一','二','三','四','五','六','日'][day-1]} <span class="text-[10px] ${isToday ? 'text-amber-400 font-mono font-bold' : 'text-slate-500 font-mono'} block">${month}/${d}${isToday ? ' (今天)' : ''}</span>`;
+        }
+      }
+
+      // Update academic calendar sidebar stats
+      const cal = state.schedule.calendar;
+      if (cal) {
+        const twEl = document.getElementById('stat-teaching-weeks');
+        if (twEl) twEl.textContent = `第 ${cal.teaching_weeks_start} ~ ${cal.teaching_weeks_end} 周`;
+        const ewEl = document.getElementById('stat-exam-weeks');
+        if (ewEl) ewEl.textContent = `第 ${cal.exam_weeks_start} ~ ${cal.exam_weeks_end} 周`;
+        
+        const holContainer = document.getElementById('container-holidays-list');
+        if (holContainer && cal.holidays) {
+          holContainer.innerHTML = '<div class="text-slate-400 font-bold flex items-center mb-1"><i data-lucide="flag" class="w-3 h-3 mr-1 text-rose-400"></i>学期节假日</div>' +
+            cal.holidays.map(h => `
+              <div class="flex items-center justify-between text-slate-300 text-[10px]">
+                <span class="font-medium">${escapeHtml(h.name)}</span>
+                <span class="text-rose-300 font-mono">${escapeHtml(h.start_date.slice(5))} ~ ${escapeHtml(h.end_date.slice(5))}</span>
+              </div>
+            `).join('');
+        }
+      }
+      lucide.createIcons();
     }
 
     function updateWeekDisplay() {
@@ -3042,6 +3091,7 @@
       scheduleEl.labelWeekDisplay.textContent = `第 ${sw} 周 · ${isCur ? '本周' : '浏览中'}`;
       scheduleEl.btnCurrentWeek.style.display = isCur ? 'none' : 'inline-block';
       scheduleEl.badgeOverrideActiveWeek.textContent = `仅第 ${sw} 周生效`;
+      updateDynamicWeekDates();
     }
 
     async function loadWeekSchedule(weekNum) {

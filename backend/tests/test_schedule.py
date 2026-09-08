@@ -605,3 +605,231 @@ def test_zero_delete_soft_delete_compliance():
             assert row[2] is not None  # Timestamp preserved for audit!
 
         storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 12. PUT Meeting & Reminder Endpoints Return 200 without Slot Duplication (B1)
+# -----------------------------------------------------------------------------
+
+def test_meeting_and_reminder_put_endpoints_atomic_success():
+    """
+    B1: Calling PUT /api/schedule/course/{id}/meeting or /reminder on a course
+    with existing slots MUST return 200 (not 500) and preserve slot count.
+    """
+    client = TestClient(app)
+    c_payload = {
+        "name": "大学物理B(2)",
+        "teacher": "谢金翠",
+        "classroom": "15204",
+        "semester": "2026-2027-1",
+        "time_slots": [
+            {
+                "day_of_week": 3, "start_period": 1, "end_period": 2,
+                "start_time": "08:00", "end_time": "09:40", "classroom": "15204"
+            },
+            {
+                "day_of_week": 5, "start_period": 3, "end_period": 4,
+                "start_time": "10:00", "end_time": "11:40", "classroom": "15204"
+            }
+        ]
+    }
+    r = client.post("/api/schedule/course", json=c_payload)
+    assert r.status_code == 200
+    cid = r.json()["course"]["id"]
+
+    # Update meeting URL -> MUST return 200
+    r_meet = client.put(f"/api/schedule/course/{cid}/meeting", json={"meeting_url": "https://meeting.tencent.com/dm/123456"})
+    assert r_meet.status_code == 200
+    assert r_meet.json()["meeting_url"] == "https://meeting.tencent.com/dm/123456"
+
+    # Update reminder minutes -> MUST return 200
+    r_rem = client.put(f"/api/schedule/course/{cid}/reminder", json={"reminder_minutes": 30})
+    assert r_rem.status_code == 200
+    assert r_rem.json()["reminder_minutes"] == 30
+
+    # Verify slots are intact (still 2 slots, no duplication or integrity crash)
+    r_get = client.get(f"/api/schedule/course/{cid}")
+    assert r_get.status_code == 200
+    assert len(r_get.json()["time_slots"]) == 2
+    assert r_get.json()["meeting_url"] == "https://meeting.tencent.com/dm/123456"
+    assert r_get.json()["reminder_minutes"] == 30
+
+
+# -----------------------------------------------------------------------------
+# 13. Pre-existing DB Override Unique Constraint Migration (B3)
+# -----------------------------------------------------------------------------
+
+def test_pre_existing_db_override_unique_constraint_migration():
+    """
+    B3: Pre-existing database with overrides table created without unique constraint
+    is automatically migrated by _init_schema to have idx_overrides_slot_week.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "old_schedule.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("""
+            CREATE TABLE overrides (
+                id TEXT PRIMARY KEY,
+                course_id TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                week_number INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                override_type TEXT NOT NULL,
+                new_classroom TEXT,
+                new_day_of_week INTEGER,
+                new_start_period INTEGER,
+                new_end_period INTEGER,
+                new_start_time TEXT,
+                new_end_time TEXT,
+                reason TEXT NOT NULL DEFAULT ''
+            );
+            """)
+            conn.commit()
+
+        storage = ScheduleStorage(db_path)
+
+        ov1 = CourseOverride(
+            id="ov_mig_1",
+            time_slot_id="ts_mig_slot",
+            course_id="crs_mig",
+            semester="2026-2027-1",
+            week_number=2,
+            day_of_week=1,
+            override_type="relocate",
+            new_classroom="Room A"
+        )
+        storage.add_override(ov1)
+
+        ov2 = CourseOverride(
+            id="ov_mig_2",
+            time_slot_id="ts_mig_slot",
+            course_id="crs_mig",
+            semester="2026-2027-1",
+            week_number=2,
+            day_of_week=1,
+            override_type="relocate",
+            new_classroom="Room B"
+        )
+        storage.add_override(ov2)
+
+        overrides = storage.list_overrides("2026-2027-1", week_number=2)
+        assert len(overrides) == 1
+        assert overrides[0].new_classroom == "Room B"
+
+        storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 14. Batch Save Courses Atomic Rollback on Failure (B4)
+# -----------------------------------------------------------------------------
+
+def test_batch_save_courses_atomic_rollback_on_failure():
+    """
+    B4: When batch saving courses, an error on any item rolls back the ENTIRE batch.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+        c1 = Course(id="crs_batch_1", name="课程1", semester="2026-2027-1")
+        c2 = Course(id="crs_batch_2", name="课程2", semester="2026-2027-1", time_slots=[
+            CourseTimeSlot(id="ts_bad", course_id="crs_batch_2", day_of_week=1, start_period=None, end_period=2, start_time="08:00", end_time="09:40")
+        ])
+
+        with pytest.raises(Exception):
+            storage.save_courses_batch([c1, c2])
+
+        courses = storage.list_courses("2026-2027-1")
+        assert len(courses) == 0
+
+        storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 15. Reminder Minutes Exact Threshold Window (B6)
+# -----------------------------------------------------------------------------
+
+def test_reminder_minutes_exact_threshold_window():
+    """
+    B6: A 5-minute reminder threshold must only trigger when 上课时间 - 当前时间 <= 5分钟,
+    and must NOT trigger 45 minutes early even if lookahead_minutes is 90.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+        c = Course(
+            id="crs_rem_window",
+            name="概率论",
+            semester="2026-2027-1",
+            reminder_minutes=5,
+            time_slots=[
+                CourseTimeSlot(
+                    id="ts_rem_w",
+                    course_id="crs_rem_window",
+                    day_of_week=1,
+                    start_period=3,
+                    end_period=4,
+                    start_time="10:00",
+                    end_time="11:40"
+                )
+            ]
+        )
+        storage.save_course(c)
+
+        # 09:15 is 45 minutes before class -> MUST NOT trigger!
+        rems_early = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 7, 9, 15), lookahead_minutes=90)
+        assert len(rems_early) == 0
+
+        # 09:56 is 4 minutes before class -> MUST trigger!
+        rems_on_time = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 7, 9, 56), lookahead_minutes=90)
+        assert len(rems_on_time) == 1
+        assert rems_on_time[0]["minutes_until_start"] == 4
+
+        storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 16. Repeat Import Preserves Slot IDs & Overrides (B8 & B9)
+# -----------------------------------------------------------------------------
+
+def test_repeat_import_preserves_slot_ids_and_overrides():
+    """
+    B8: Repeat importing the same schedule must produce deterministic time_slot_ids
+    so that user-configured single-week overrides are NOT orphaned or lost.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+
+        courses1 = parse_markdown_schedule_table(SAMPLE_SCHEDULE_MD, semester="2026-2027-1")
+        storage.save_courses_batch(courses1)
+
+        prob1 = next(c for c in courses1 if "概率论" in c.name)
+        slot1 = prob1.time_slots[0]
+
+        ov = CourseOverride(
+            id="ov_repeat_test",
+            time_slot_id=slot1.id,
+            course_id=prob1.id,
+            semester="2026-2027-1",
+            week_number=2,
+            day_of_week=slot1.day_of_week,
+            override_type="relocate",
+            new_classroom="15204",
+            reason="临时调换"
+        )
+        storage.add_override(ov)
+
+        w2_before = storage.get_effective_week_schedule(2, semester="2026-2027-1")
+        assert next(s for s in w2_before if s["course_id"] == prob1.id)["classroom"] == "15204"
+
+        # Re-import identical schedule
+        courses2 = parse_markdown_schedule_table(SAMPLE_SCHEDULE_MD, semester="2026-2027-1")
+        storage.save_courses_batch(courses2)
+
+        prob2 = next(c for c in courses2 if "概率论" in c.name)
+        slot2 = prob2.time_slots[0]
+        assert slot1.id == slot2.id
+
+        w2_after = storage.get_effective_week_schedule(2, semester="2026-2027-1")
+        prob_after = next(s for s in w2_after if s["course_id"] == prob1.id)
+        assert prob_after["classroom"] == "15204"
+        assert prob_after["status"] == "relocated"
+
+        storage.close()
