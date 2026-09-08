@@ -88,6 +88,10 @@
         <i data-lucide="message-square" class="w-3.5 h-3.5 mr-1.5 text-blue-400"></i>统一消息中心 (IM Hub)
         <span id="badge-im-unseen" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-blue-950 text-blue-300 rounded-full border border-blue-800/50">0</span>
       </button>
+      <button id="nav-mode-schedule" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
+        <i data-lucide="calendar-days" class="w-3.5 h-3.5 mr-1.5 text-amber-400"></i>课程与校历 (Schedule)
+        <span id="badge-schedule-week" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-amber-950 text-amber-300 rounded-full border border-amber-800/50">第2周</span>
+      </button>
     </div>
 
     <div class="flex items-center space-x-4 text-xs">
@@ -125,6 +129,18 @@
         <span id="im-stat-qq" class="flex items-center text-slate-400 text-[11px]"><span class="w-1.5 h-1.5 rounded-full bg-slate-500 mr-1"></span>QQ: 快照</span>
         <button id="btn-refresh-im" title="刷新消息" class="ml-2 bg-[#2c2c38] hover:bg-[#393948] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3e3e50] text-xs">
           <i data-lucide="refresh-cw" class="w-3 h-3 mr-1"></i>刷新
+        </button>
+      </div>
+
+      <!-- 课表模式下的顶栏统计与快捷操作 -->
+      <div id="schedule-header-stats" class="hidden flex items-center space-x-2.5 text-xs text-slate-400 shrink-0">
+        <span>当前: <b id="stat-schedule-week-badge" class="text-amber-300 font-mono">第 2 周 · 教学周</b></span>
+        <span>·</span>
+        <button id="btn-sync-obsidian-schedule" title="从 Obsidian 课表.md 快速同步" class="bg-[#242432] hover:bg-[#323244] text-amber-200 px-2.5 py-1 rounded flex items-center transition border border-amber-600/40 text-xs shadow-sm cursor-pointer">
+          <i data-lucide="file-down" class="w-3.5 h-3.5 mr-1 text-amber-400"></i>同步 Obsidian 课表
+        </button>
+        <button id="btn-open-add-course" class="bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 rounded flex items-center transition shadow-sm text-xs cursor-pointer">
+          <i data-lucide="plus" class="w-3.5 h-3.5 mr-1"></i>添加课程
         </button>
       </div>
     </div>
@@ -503,6 +519,337 @@
     </div>
   </div>
 
+
+  <!-- ======================== 工作区 4: 课程与校历 (Schedule & Academic Calendar) ======================== -->
+  <div id="workspace-schedule" class="flex-1 flex flex-col overflow-hidden hidden bg-[#141418]">
+    <!-- 课表顶部控制工具栏 -->
+    <div class="bg-[#1c1c24] border-b border-[#2b2b38] px-6 py-2.5 shrink-0 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+      <div class="flex items-center space-x-4">
+        <!-- 学期选择器 -->
+        <div class="flex items-center space-x-1.5 text-xs text-slate-300">
+          <i data-lucide="graduation-cap" class="w-4 h-4 text-amber-400"></i>
+          <select id="select-semester" class="bg-[#242430] border border-[#383848] rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-amber-500 font-medium">
+            <option value="2026-2027-1">2026-2027学年 第一学期 (大二上)</option>
+            <option value="2025-2026-2">2025-2026学年 第二学期 (大一下)</option>
+          </select>
+        </div>
+
+        <!-- 周次切换控制器 -->
+        <div class="flex items-center space-x-1.5 bg-[#22222c] px-2 py-0.5 rounded-lg border border-[#343444] text-xs">
+          <button id="btn-prev-week" class="p-1 text-slate-400 hover:text-white rounded transition cursor-pointer" title="上一周"><i data-lucide="chevron-left" class="w-3.5 h-3.5"></i></button>
+          <span id="label-week-display" class="font-bold text-amber-300 font-mono px-1">第 2 周 · 教学周</span>
+          <button id="btn-next-week" class="p-1 text-slate-400 hover:text-white rounded transition cursor-pointer" title="下一周"><i data-lucide="chevron-right" class="w-3.5 h-3.5"></i></button>
+          <button id="btn-current-week" class="ml-1 text-[10px] bg-amber-950 text-amber-300 px-2 py-0.5 rounded border border-amber-800/50 hover:bg-amber-900 transition font-medium cursor-pointer">回到本周</button>
+        </div>
+
+        <!-- 当前周日期范围 -->
+        <span id="label-week-date-range" class="text-[11px] text-slate-400 font-mono">2026-09-07 ~ 2026-09-13</span>
+      </div>
+
+      <!-- 上课提醒 Banner (动态显示) -->
+      <div id="schedule-reminder-banner" class="hidden flex items-center space-x-2 text-xs bg-amber-950/70 border border-amber-600/50 text-amber-200 px-3.5 py-1 rounded-lg shadow-sm">
+        <i data-lucide="bell-ring" class="w-3.5 h-3.5 text-amber-400 animate-bounce shrink-0"></i>
+        <span id="schedule-reminder-text" class="font-medium">即将上课: 深度学习 (11206教室 · 15分钟后)</span>
+      </div>
+
+      <!-- 快捷操作按钮 -->
+      <div class="flex items-center space-x-2 text-xs">
+        <button id="btn-open-import-modal" class="bg-[#242432] hover:bg-[#2e2e40] text-slate-200 px-2.5 py-1 rounded border border-[#3c3c50] transition flex items-center shadow-sm cursor-pointer">
+          <i data-lucide="upload" class="w-3.5 h-3.5 mr-1.5 text-amber-400"></i>导入课表
+        </button>
+        <button id="btn-open-add-event" class="bg-[#242432] hover:bg-[#2e2e40] text-slate-200 px-2.5 py-1 rounded border border-[#3c3c50] transition flex items-center shadow-sm cursor-pointer">
+          <i data-lucide="calendar-plus" class="w-3.5 h-3.5 mr-1.5 text-purple-400"></i>添加日程
+        </button>
+      </div>
+    </div>
+
+    <!-- 课表主体主视窗：左 周课表网格 · 右 校历与综合日程 -->
+    <div class="flex-1 flex overflow-hidden">
+      <!-- 7 天课表网格视图 -->
+      <div class="flex-1 flex flex-col overflow-y-auto bg-[#141418] p-4 min-w-0">
+        <div class="min-w-[820px] bg-[#1a1a22] border border-[#2c2c3c] rounded-xl overflow-hidden shadow-xl flex flex-col flex-1">
+          <!-- 星期表头 (7天) -->
+          <div id="schedule-grid-header" class="grid grid-cols-[80px_repeat(7,1fr)] bg-[#20202a] border-b border-[#2c2c3c] text-center text-xs font-semibold text-slate-300 divide-x divide-[#2c2c3c]">
+            <div class="py-2.5 text-slate-500 font-mono">节次\星期</div>
+            <div id="header-day-1" class="py-2.5">周一 <span class="text-[10px] text-slate-500 font-mono block">9/7</span></div>
+            <div id="header-day-2" class="py-2.5 bg-amber-950/20 text-amber-300">周二 <span class="text-[10px] text-amber-400 font-mono block">9/8 (今天)</span></div>
+            <div id="header-day-3" class="py-2.5">周三 <span class="text-[10px] text-slate-500 font-mono block">9/9</span></div>
+            <div id="header-day-4" class="py-2.5">周四 <span class="text-[10px] text-slate-500 font-mono block">9/10</span></div>
+            <div id="header-day-5" class="py-2.5">周五 <span class="text-[10px] text-slate-500 font-mono block">9/11</span></div>
+            <div id="header-day-6" class="py-2.5">周六 <span class="text-[10px] text-slate-500 font-mono block">9/12</span></div>
+            <div id="header-day-7" class="py-2.5">周日 <span class="text-[10px] text-slate-500 font-mono block">9/13</span></div>
+          </div>
+
+          <!-- 节次与课程卡片动态渲染容器 -->
+          <div id="schedule-grid-body" class="flex-1 grid grid-cols-[80px_repeat(7,1fr)] relative divide-x divide-[#252534] min-h-[640px]">
+            <!-- 动态渲染节次纵列与 7 天课程卡片 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 右栏：学期校历与综合日程 (320px) -->
+      <div class="w-80 bg-[#181820] border-l border-[#282834] flex flex-col shrink-0">
+        <!-- 校历进度卡片 -->
+        <div class="p-3.5 border-b border-[#242430] space-y-2.5">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-1.5">
+              <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+              <span class="text-xs font-bold text-slate-200">学期校历与进度</span>
+            </div>
+            <span id="schedule-semester-badge" class="text-[10px] bg-amber-950 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-mono font-semibold">2026 秋季</span>
+          </div>
+          
+          <div class="space-y-1">
+            <div class="flex justify-between text-[11px] text-slate-400">
+              <span>教学进度</span>
+              <span id="label-progress-text" class="font-mono text-amber-300">第 2 周 / 20 周 (10%)</span>
+            </div>
+            <div class="w-full h-1.5 bg-[#282834] rounded-full overflow-hidden">
+              <div id="bar-semester-progress" class="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full transition-all duration-300" style="width: 10%;"></div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 text-[10px] pt-1">
+            <div class="bg-[#20202a] p-2 rounded-lg border border-[#2e2e3e]">
+              <div class="text-slate-400">教学周</div>
+              <div class="font-bold text-slate-200 mt-0.5">第 1 ~ 16 周</div>
+            </div>
+            <div class="bg-[#20202a] p-2 rounded-lg border border-[#2e2e3e]">
+              <div class="text-slate-400">期末考试周</div>
+              <div class="font-bold text-purple-300 mt-0.5">第 17 ~ 18 周</div>
+            </div>
+          </div>
+
+          <div class="bg-[#20202a] p-2.5 rounded-lg border border-[#2e2e3e] text-[10px] space-y-1">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="flex items-center"><i data-lucide="flag" class="w-3 h-3 mr-1 text-rose-400"></i>临近节假日</span>
+              <span class="text-rose-300 font-semibold">中秋 (9.25 - 9.27)</span>
+            </div>
+            <div class="text-slate-500">国庆节: 10月1日 ~ 10月7日 (放假7天)</div>
+          </div>
+        </div>
+
+        <!-- 课程与综合日程 (作业 / 实验 / 考试 / 会议 / 活动) -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+          <div class="p-3 border-b border-[#242430] flex items-center justify-between text-xs">
+            <div class="flex items-center space-x-1.5 font-bold text-slate-200">
+              <i data-lucide="check-square" class="w-4 h-4 text-purple-400"></i>
+              <span>综合学术日程</span>
+            </div>
+            <div class="flex items-center space-x-1 text-[10px]">
+              <button data-event-tab="all" class="evt-tab-btn px-2 py-0.5 rounded-full bg-purple-600 text-white font-medium cursor-pointer">全部</button>
+              <button data-event-tab="assignment" class="evt-tab-btn px-2 py-0.5 rounded-full bg-[#252530] text-slate-400 hover:text-white cursor-pointer">作业</button>
+              <button data-event-tab="exam" class="evt-tab-btn px-2 py-0.5 rounded-full bg-[#252530] text-slate-400 hover:text-white cursor-pointer">考试</button>
+              <button data-event-tab="lab" class="evt-tab-btn px-2 py-0.5 rounded-full bg-[#252530] text-slate-400 hover:text-white cursor-pointer">实验</button>
+            </div>
+          </div>
+
+          <div id="schedule-events-list" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
+            <div class="text-slate-500 text-center py-10">正在加载日程...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 课程详情与单周临时调整 Modal -->
+  <div id="modal-course-detail" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-[#22222a] border border-[#383848] w-full max-w-lg rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div class="p-4 bg-[#1b1b22] border-b border-[#303040] flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span id="detail-course-color-badge" class="w-3 h-3 rounded-full bg-blue-500"></span>
+          <h3 id="detail-course-name" class="text-sm font-bold text-slate-100">课程详情</h3>
+        </div>
+        <button id="btn-close-course-detail" class="text-slate-400 hover:text-slate-200 cursor-pointer"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+
+      <div class="p-5 space-y-4 overflow-y-auto flex-1 text-xs">
+        <!-- 基础元数据网格 -->
+        <div class="grid grid-cols-2 gap-2.5 bg-[#1a1a20] p-3 rounded-lg border border-[#2a2a36]">
+          <div><span class="text-slate-400">任课教师:</span> <span id="detail-teacher" class="text-slate-200 font-semibold">-</span></div>
+          <div><span class="text-slate-400">默认教室:</span> <span id="detail-classroom" class="text-amber-300 font-mono font-semibold">-</span></div>
+          <div><span class="text-slate-400">上课时间:</span> <span id="detail-time-span" class="text-slate-200 font-mono">-</span></div>
+          <div><span class="text-slate-400">课程学分:</span> <span id="detail-credits" class="text-slate-200 font-mono">-</span></div>
+          <div class="col-span-2"><span class="text-slate-400">周次分布:</span> <span id="detail-week-pattern" class="text-slate-300 font-mono">-</span></div>
+        </div>
+
+        <!-- 关联入口：课程群 & 腾讯会议链接 -->
+        <div class="flex items-center space-x-2">
+          <button id="btn-jump-course-group" class="flex-1 py-1.5 px-3 rounded bg-blue-950/60 hover:bg-blue-900/60 text-blue-300 border border-blue-800/40 flex items-center justify-center space-x-1.5 transition cursor-pointer">
+            <i data-lucide="message-circle" class="w-3.5 h-3.5"></i><span>打开关联课程群 (IM Hub)</span>
+          </button>
+          <button id="btn-open-meeting-link" class="flex-1 py-1.5 px-3 rounded bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/40 flex items-center justify-center space-x-1.5 transition cursor-pointer">
+            <i data-lucide="video" class="w-3.5 h-3.5"></i><span>腾讯会议 / 线上课堂</span>
+          </button>
+        </div>
+
+        <!-- 上课提醒配置 -->
+        <div class="bg-[#1a1a20] p-3 rounded-lg border border-[#2a2a36] space-y-2">
+          <div class="font-semibold text-slate-300 flex items-center space-x-1.5">
+            <i data-lucide="bell" class="w-3.5 h-3.5 text-amber-400"></i><span>上课提前提醒</span>
+          </div>
+          <div class="flex items-center space-x-3">
+            <label class="text-slate-400">提醒时间:</label>
+            <select id="select-reminder-minutes" class="bg-[#242430] border border-[#383848] rounded px-2 py-1 text-slate-200 outline-none">
+              <option value="5">提前 5 分钟</option>
+              <option value="10">提前 10 分钟</option>
+              <option value="15">提前 15 分钟 (推荐)</option>
+              <option value="30">提前 30 分钟</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 单周临时变动 (单周独立 Override, 不改整学期) -->
+        <div class="bg-[#1e1e26] p-3.5 rounded-lg border border-amber-800/40 space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="font-bold text-amber-300 flex items-center space-x-1.5">
+              <i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-amber-400"></i>
+              <span>单周临时调整 (仅对当前选中周生效)</span>
+            </div>
+            <span id="badge-override-active-week" class="text-[10px] bg-amber-950 text-amber-200 px-2 py-0.5 rounded border border-amber-700/50 font-mono font-semibold">仅第 2 周</span>
+          </div>
+          
+          <div class="space-y-2.5">
+            <div class="flex items-center space-x-3">
+              <label class="text-slate-400 w-16 shrink-0">变动类型:</label>
+              <select id="select-override-type" class="flex-1 bg-[#282834] border border-[#3e3e52] rounded px-2.5 py-1 text-slate-200 outline-none">
+                <option value="cancel">停课 (本周不上此课)</option>
+                <option value="relocate">调换教室 (临时换教室)</option>
+                <option value="reschedule">调课 (调至其他时间)</option>
+              </select>
+            </div>
+
+            <div id="row-override-classroom" class="hidden flex items-center space-x-3">
+              <label class="text-slate-400 w-16 shrink-0">新教室:</label>
+              <input id="input-override-classroom" type="text" placeholder="例如: 15204 或 S090101" class="flex-1 bg-[#282834] border border-[#3e3e52] rounded px-2.5 py-1 text-slate-200 outline-none font-mono">
+            </div>
+
+            <div id="row-override-time" class="hidden flex items-center space-x-3">
+              <label class="text-slate-400 w-16 shrink-0">新时间:</label>
+              <select id="select-override-day" class="bg-[#282834] border border-[#3e3e52] rounded px-2 py-1 text-slate-200 outline-none">
+                <option value="1">周一</option><option value="2">周二</option><option value="3">周三</option>
+                <option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
+              </select>
+              <select id="select-override-start-period" class="bg-[#282834] border border-[#3e3e52] rounded px-2 py-1 text-slate-200 outline-none">
+                <option value="1">第1节 (08:00)</option><option value="3">第3节 (10:00)</option>
+                <option value="5">第5节 (14:10)</option><option value="7">第7节 (16:00)</option><option value="9">第9节 (18:40)</option>
+              </select>
+            </div>
+
+            <div class="flex items-center space-x-3">
+              <label class="text-slate-400 w-16 shrink-0">原因备注:</label>
+              <input id="input-override-reason" type="text" placeholder="例如: 老师出差停课一次 / 借用多媒体" class="flex-1 bg-[#282834] border border-[#3e3e52] rounded px-2.5 py-1 text-slate-200 outline-none">
+            </div>
+
+            <div class="flex items-center justify-end space-x-2 pt-1">
+              <button id="btn-save-override" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1 rounded font-medium transition cursor-pointer">
+                应用单周变动
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入课表 Modal -->
+  <div id="modal-import-schedule" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-xl shadow-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between border-b border-[#333342] pb-3">
+        <h3 class="text-sm font-bold text-slate-100 flex items-center">
+          <i data-lucide="upload" class="w-4 h-4 mr-2 text-amber-400"></i>导入课表
+        </h3>
+        <button id="btn-close-import-modal" class="text-slate-400 hover:text-slate-200 cursor-pointer"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-300 leading-relaxed">
+          支持从 Obsidian 知识库直接一键同步，或粘贴 Markdown 课表文本/标准课表数据：
+        </p>
+        <button id="btn-do-import-obsidian" class="w-full py-2 px-3 rounded-lg bg-purple-950/70 hover:bg-purple-900/70 text-purple-200 border border-purple-800/40 flex items-center justify-center space-x-2 transition cursor-pointer font-medium">
+          <i data-lucide="sparkles" class="w-4 h-4 text-purple-400"></i><span>从当前 Vault 的「07.学习笔记/大二上/课表.md」一键同步</span>
+        </button>
+
+        <div class="relative flex py-1 items-center">
+          <div class="flex-grow border-t border-slate-700"></div>
+          <span class="flex-shrink mx-2 text-[10px] text-slate-500">或手动粘贴 Markdown 课表格</span>
+          <div class="flex-grow border-t border-slate-700"></div>
+        </div>
+
+        <textarea id="textarea-import-markdown" rows="6" placeholder="| 星期 | 节次 | 课程 | 教师 | 教室 | 周次 |" class="w-full bg-[#181820] border border-[#343444] rounded-lg p-2.5 font-mono text-slate-200 outline-none focus:border-amber-500 text-[11px]"></textarea>
+
+        <div class="flex justify-end space-x-2 pt-2 border-t border-[#343442]">
+          <button id="btn-submit-import-markdown" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded-lg font-medium transition cursor-pointer">
+            解析并导入
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加学术日程/作业 Modal -->
+  <div id="modal-add-event" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-[#24242c] border border-[#383848] w-full max-w-md rounded-xl shadow-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between border-b border-[#333342] pb-3">
+        <h3 class="text-sm font-bold text-slate-100 flex items-center">
+          <i data-lucide="calendar-plus" class="w-4 h-4 mr-2 text-purple-400"></i>添加课程与学术日程
+        </h3>
+        <button id="btn-close-event-modal" class="text-slate-400 hover:text-slate-200 cursor-pointer"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1">日程标题 *</label>
+          <input id="input-event-title" type="text" placeholder="例如: 深度学习大作业初稿提交" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-3 py-1.5 text-slate-200 outline-none focus:border-purple-500">
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1">类型</label>
+            <select id="select-event-type" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-2.5 py-1.5 text-slate-200 outline-none">
+              <option value="assignment">作业截止 (Assignment)</option>
+              <option value="exam">期末/阶段考试 (Exam)</option>
+              <option value="lab">上机实验 (Lab)</option>
+              <option value="meeting">学术会议/组会 (Meeting)</option>
+              <option value="activity">社团/竞赛活动 (Activity)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">优先级</label>
+            <select id="select-event-priority" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-2.5 py-1.5 text-slate-200 outline-none">
+              <option value="medium">中等</option>
+              <option value="high">高优先级</option>
+              <option value="urgent">紧急 (Urgent)</option>
+              <option value="low">低优先级</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1">截止日期 *</label>
+            <input id="input-event-date" type="date" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-3 py-1.5 text-slate-200 outline-none">
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">截止时间</label>
+            <input id="input-event-time" type="time" value="23:59" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-3 py-1.5 text-slate-200 outline-none font-mono">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">地点 / 平台</label>
+          <input id="input-event-location" type="text" placeholder="例如: 学习通平台 / S090204实验室" class="w-full bg-[#181820] border border-[#383848] rounded-lg px-3 py-1.5 text-slate-200 outline-none">
+        </div>
+
+        <div class="flex justify-end space-x-2 pt-2 border-t border-[#343442]">
+          <button id="btn-submit-event" class="bg-purple-600 hover:bg-purple-500 text-white px-4 py-1.5 rounded-lg font-medium transition cursor-pointer">
+            保存日程
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 新建笔记 Modal 弹窗 -->
   <div id="modal-new-file" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-lg shadow-2xl p-5 space-y-4">
@@ -601,6 +948,10 @@
       navModeObsidian: document.getElementById('nav-mode-obsidian'),
       navModeAgentsview: document.getElementById('nav-mode-agentsview'),
       navModeIm: document.getElementById('nav-mode-im'),
+      navModeSchedule: document.getElementById('nav-mode-schedule'),
+      workspaceSchedule: document.getElementById('workspace-schedule'),
+      scheduleHeaderStats: document.getElementById('schedule-header-stats'),
+      badgeScheduleWeek: document.getElementById('badge-schedule-week'),
       workspaceObsidian: document.getElementById('workspace-obsidian'),
       workspaceAgentsview: document.getElementById('workspace-agentsview'),
       workspaceIm: document.getElementById('workspace-im'),
@@ -847,6 +1198,9 @@
       el.obsidianHeaderStats.classList.add('hidden');
       el.agentsviewHeaderStats.classList.add('hidden');
       el.imHeaderStats.classList.add('hidden');
+      if (el.scheduleHeaderStats) el.scheduleHeaderStats.classList.add('hidden');
+      if (el.workspaceSchedule) el.workspaceSchedule.classList.add('hidden');
+      if (el.navModeSchedule) el.navModeSchedule.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
 
       if (mode === 'obsidian') {
         el.navModeObsidian.className = 'px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm';
@@ -862,6 +1216,11 @@
         el.workspaceIm.classList.remove('hidden');
         el.imHeaderStats.classList.remove('hidden');
         loadImHubData();
+      } else if (mode === 'schedule') {
+        if (el.navModeSchedule) el.navModeSchedule.className = 'px-3 py-1 rounded bg-amber-600 text-white font-medium flex items-center transition shadow-sm';
+        if (el.workspaceSchedule) el.workspaceSchedule.classList.remove('hidden');
+        if (el.scheduleHeaderStats) el.scheduleHeaderStats.classList.remove('hidden');
+        if (typeof loadScheduleData === 'function') loadScheduleData();
       }
       lucide.createIcons();
     }
@@ -869,6 +1228,7 @@
     el.navModeObsidian.addEventListener('click', () => setWorkspaceMode('obsidian'));
     el.navModeAgentsview.addEventListener('click', () => setWorkspaceMode('agentsview'));
     el.navModeIm.addEventListener('click', () => setWorkspaceMode('im'));
+    if (el.navModeSchedule) el.navModeSchedule.addEventListener('click', () => setWorkspaceMode('schedule'));
 
     // ======================== Obsidian 核心逻辑 ========================
     async function loadConfig() {
@@ -2557,6 +2917,555 @@
     }
 
     init();
+
+    // ======================== 课表与校历 (Schedule) 逻辑 ========================
+    state.schedule = {
+      semester: '2026-2027-1',
+      currentWeek: 2,
+      selectedWeek: 2,
+      weekInfo: null,
+      courses: [],
+      weekSlots: [],
+      events: [],
+      eventTab: 'all',
+      activeCourseDetail: null,
+    };
+
+    const scheduleEl = {
+      navModeSchedule: document.getElementById('nav-mode-schedule'),
+      workspaceSchedule: document.getElementById('workspace-schedule'),
+      scheduleHeaderStats: document.getElementById('schedule-header-stats'),
+      badgeScheduleWeek: document.getElementById('badge-schedule-week'),
+      statScheduleWeekBadge: document.getElementById('stat-schedule-week-badge'),
+      selectSemester: document.getElementById('select-semester'),
+      btnPrevWeek: document.getElementById('btn-prev-week'),
+      btnNextWeek: document.getElementById('btn-next-week'),
+      btnCurrentWeek: document.getElementById('btn-current-week'),
+      labelWeekDisplay: document.getElementById('label-week-display'),
+      labelWeekDateRange: document.getElementById('label-week-date-range'),
+      scheduleReminderBanner: document.getElementById('schedule-reminder-banner'),
+      scheduleReminderText: document.getElementById('schedule-reminder-text'),
+      scheduleGridHeader: document.getElementById('schedule-grid-header'),
+      scheduleGridBody: document.getElementById('schedule-grid-body'),
+      scheduleEventsList: document.getElementById('schedule-events-list'),
+      labelProgressText: document.getElementById('label-progress-text'),
+      barSemesterProgress: document.getElementById('bar-semester-progress'),
+      btnSyncObsidianSchedule: document.getElementById('btn-sync-obsidian-schedule'),
+      btnOpenAddCourse: document.getElementById('btn-open-add-course'),
+      btnOpenImportModal: document.getElementById('btn-open-import-modal'),
+      btnOpenAddEvent: document.getElementById('btn-open-add-event'),
+      // Modals
+      modalCourseDetail: document.getElementById('modal-course-detail'),
+      btnCloseCourseDetail: document.getElementById('btn-close-course-detail'),
+      detailCourseName: document.getElementById('detail-course-name'),
+      detailCourseColorBadge: document.getElementById('detail-course-color-badge'),
+      detailTeacher: document.getElementById('detail-teacher'),
+      detailClassroom: document.getElementById('detail-classroom'),
+      detailTimeSpan: document.getElementById('detail-time-span'),
+      detailCredits: document.getElementById('detail-credits'),
+      detailWeekPattern: document.getElementById('detail-week-pattern'),
+      btnJumpCourseGroup: document.getElementById('btn-jump-course-group'),
+      btnOpenMeetingLink: document.getElementById('btn-open-meeting-link'),
+      selectReminderMinutes: document.getElementById('select-reminder-minutes'),
+      badgeOverrideActiveWeek: document.getElementById('badge-override-active-week'),
+      selectOverrideType: document.getElementById('select-override-type'),
+      rowOverrideClassroom: document.getElementById('row-override-classroom'),
+      inputOverrideClassroom: document.getElementById('input-override-classroom'),
+      rowOverrideTime: document.getElementById('row-override-time'),
+      selectOverrideDay: document.getElementById('select-override-day'),
+      selectOverrideStartPeriod: document.getElementById('select-override-start-period'),
+      inputOverrideReason: document.getElementById('input-override-reason'),
+      btnSaveOverride: document.getElementById('btn-save-override'),
+      modalImportSchedule: document.getElementById('modal-import-schedule'),
+      btnCloseImportModal: document.getElementById('btn-close-import-modal'),
+      btnDoImportObsidian: document.getElementById('btn-do-import-obsidian'),
+      textareaImportMarkdown: document.getElementById('textarea-import-markdown'),
+      btnSubmitImportMarkdown: document.getElementById('btn-submit-import-markdown'),
+      modalAddEvent: document.getElementById('modal-add-event'),
+      btnCloseEventModal: document.getElementById('btn-close-event-modal'),
+      inputEventTitle: document.getElementById('input-event-title'),
+      selectEventType: document.getElementById('select-event-type'),
+      selectEventPriority: document.getElementById('select-event-priority'),
+      inputEventDate: document.getElementById('input-event-date'),
+      inputEventTime: document.getElementById('input-event-time'),
+      inputEventLocation: document.getElementById('input-event-location'),
+      btnSubmitEvent: document.getElementById('btn-submit-event'),
+    };
+
+    async function loadScheduleData() {
+      try {
+        await Promise.all([
+          loadCurrentWeekInfo(),
+          loadWeekSchedule(state.schedule.selectedWeek),
+          loadAcademicEvents(),
+          loadUpcomingReminders()
+        ]);
+      } catch (err) {
+        console.error('加载课表数据失败:', err);
+      }
+    }
+
+    async function loadCurrentWeekInfo() {
+      try {
+        const res = await api(`/schedule/current-week?semester=${encodeURIComponent(state.schedule.semester)}`);
+        state.schedule.weekInfo = res;
+        state.schedule.currentWeek = res.current_week || 2;
+        if (!state.schedule.selectedWeek) {
+          state.schedule.selectedWeek = state.schedule.currentWeek;
+        }
+
+        // Update header & badges
+        scheduleEl.badgeScheduleWeek.textContent = `第${state.schedule.currentWeek}周`;
+        scheduleEl.statScheduleWeekBadge.textContent = res.phase_label || `第 ${state.schedule.currentWeek} 周`;
+        
+        // Progress bar
+        const totalW = res.total_weeks || 20;
+        const pct = Math.min(100, Math.round((state.schedule.selectedWeek / totalW) * 100));
+        scheduleEl.labelProgressText.textContent = `第 ${state.schedule.selectedWeek} 周 / ${totalW} 周 (${pct}%)`;
+        scheduleEl.barSemesterProgress.style.width = `${pct}%`;
+
+        // Display labels
+        updateWeekDisplay();
+      } catch (err) {
+        console.error('拉取周次信息失败:', err);
+      }
+    }
+
+    function updateWeekDisplay() {
+      const sw = state.schedule.selectedWeek;
+      const isCur = (sw === state.schedule.currentWeek);
+      scheduleEl.labelWeekDisplay.textContent = `第 ${sw} 周 · ${isCur ? '本周' : '浏览中'}`;
+      scheduleEl.btnCurrentWeek.style.display = isCur ? 'none' : 'inline-block';
+      scheduleEl.badgeOverrideActiveWeek.textContent = `仅第 ${sw} 周生效`;
+    }
+
+    async function loadWeekSchedule(weekNum) {
+      try {
+        const res = await api(`/schedule/week/${weekNum}?semester=${encodeURIComponent(state.schedule.semester)}`);
+        state.schedule.weekSlots = res.slots || [];
+        renderScheduleGrid(state.schedule.weekSlots);
+      } catch (err) {
+        scheduleEl.scheduleGridBody.innerHTML = `<div class="col-span-8 p-10 text-center text-rose-400">加载课表失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    const PERIOD_DEFS = [
+      { p: 1, label: '08:00', end: '08:45', name: '第1节' },
+      { p: 2, label: '08:55', end: '09:40', name: '第2节' },
+      { p: 3, label: '10:00', end: '10:45', name: '第3节' },
+      { p: 4, label: '10:55', end: '11:40', name: '第4节' },
+      { p: 5, label: '14:10', end: '14:55', name: '第5节' },
+      { p: 6, label: '15:05', end: '15:50', name: '第6节' },
+      { p: 7, label: '16:00', end: '16:45', name: '第7节' },
+      { p: 8, label: '16:55', end: '17:40', name: '第8节' },
+      { p: 9, label: '18:40', end: '19:25', name: '第9节' },
+      { p: 10, label: '19:30', end: '20:15', name: '第10节' },
+      { p: 11, label: '20:20', end: '21:05', name: '第11节' }
+    ];
+
+    function renderScheduleGrid(slots) {
+      const container = scheduleEl.scheduleGridBody;
+      container.innerHTML = '';
+
+      // 1. Render Left Period Column (80px wide)
+      const periodCol = document.createElement('div');
+      periodCol.className = 'flex flex-col divide-y divide-[#252534] bg-[#1a1a24] text-[10px] text-slate-400 font-mono select-none';
+      PERIOD_DEFS.forEach(p => {
+        const cell = document.createElement('div');
+        cell.className = 'h-14 flex flex-col justify-center items-center p-1 leading-tight text-center';
+        cell.innerHTML = `
+          <span class="font-bold text-slate-300">${p.p}</span>
+          <span class="text-[9px] text-slate-500">${p.label}</span>
+        `;
+        periodCol.appendChild(cell);
+      });
+      container.appendChild(periodCol);
+
+      // 2. Map slots by day_of_week
+      const daySlots = { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [] };
+      slots.forEach(s => {
+        if (daySlots[s.day_of_week]) {
+          daySlots[s.day_of_week].push(s);
+        }
+      });
+
+      // 3. Render 7 Day Columns
+      const todayDayOfWeek = (state.schedule.weekInfo ? state.schedule.weekInfo.day_of_week : new Date().getDay()) || 7;
+      const isCurWeek = (state.schedule.selectedWeek === state.schedule.currentWeek);
+
+      for (let day = 1; day <= 7; day++) {
+        const dayCol = document.createElement('div');
+        const isToday = (isCurWeek && day === todayDayOfWeek);
+        dayCol.className = `flex flex-col relative h-[616px] ${isToday ? 'bg-amber-950/10' : ''}`;
+
+        // Empty background grid cells for alignment
+        for (let i = 1; i <= 11; i++) {
+          const bgCell = document.createElement('div');
+          bgCell.className = 'h-14 border-b border-[#222230]/50';
+          dayCol.appendChild(bgCell);
+        }
+
+        // Overlay Course Cards
+        const coursesInDay = daySlots[day] || [];
+        coursesInDay.forEach(slot => {
+          const startP = Math.max(1, Math.min(11, slot.start_period));
+          const endP = Math.max(startP, Math.min(11, slot.end_period));
+          const span = (endP - startP + 1);
+
+          const topPx = (startP - 1) * 56 + 2;
+          const heightPx = span * 56 - 4;
+
+          const card = document.createElement('div');
+          const isCancelled = (slot.status === 'cancelled');
+          const isRelocated = (slot.status === 'relocated');
+          const isRescheduled = (slot.status === 'rescheduled');
+
+          let cardStyle = `top: ${topPx}px; height: ${heightPx}px; border-left: 3px solid ${slot.color || '#3b82f6'};`;
+          card.style = cardStyle;
+
+          card.className = `absolute left-1 right-1 rounded-lg p-2 text-xs flex flex-col justify-between transition cursor-pointer shadow-md overflow-hidden select-none ${
+            isCancelled 
+              ? 'bg-rose-950/70 border border-rose-800/60 text-rose-300 opacity-60 line-through' 
+              : 'bg-[#22222e]/95 hover:bg-[#2a2a3a] hover:scale-[1.01] border border-white/10 text-slate-100 hover:shadow-lg'
+          }`;
+
+          let badgeHtml = '';
+          if (isCancelled) badgeHtml = '<span class="text-[9px] bg-rose-900 text-rose-200 px-1 rounded font-bold">停课</span>';
+          else if (isRelocated) badgeHtml = `<span class="text-[9px] bg-amber-900 text-amber-200 px-1 rounded font-bold" title="${escapeHtml(slot.override_reason)}">换教室</span>`;
+          else if (isRescheduled) badgeHtml = `<span class="text-[9px] bg-purple-900 text-purple-200 px-1 rounded font-bold">调课</span>`;
+
+          card.innerHTML = `
+            <div class="space-y-0.5">
+              <div class="flex items-start justify-between gap-1">
+                <span class="font-bold text-[11px] leading-tight text-white line-clamp-2">${escapeHtml(slot.course_name)}</span>
+                ${badgeHtml}
+              </div>
+              <div class="text-[10px] text-amber-300 font-mono font-semibold flex items-center">
+                <i data-lucide="map-pin" class="w-2.5 h-2.5 mr-0.5 inline"></i>
+                <span class="truncate">${escapeHtml(slot.classroom || '未定教室')}</span>
+              </div>
+            </div>
+            <div class="flex items-center justify-between text-[9px] text-slate-400 font-mono pt-1">
+              <span class="truncate text-slate-300">${escapeHtml(slot.teacher || '')}</span>
+              <span>${escapeHtml(slot.start_time || '')}</span>
+            </div>
+          `;
+
+          card.addEventListener('click', () => {
+            openCourseDetailModal(slot);
+          });
+
+          dayCol.appendChild(card);
+        });
+
+        container.appendChild(dayCol);
+      }
+
+      lucide.createIcons();
+    }
+
+    function openCourseDetailModal(slot) {
+      state.schedule.activeCourseDetail = slot;
+      scheduleEl.detailCourseName.textContent = slot.course_name;
+      scheduleEl.detailCourseColorBadge.style.backgroundColor = slot.color || '#3b82f6';
+      scheduleEl.detailTeacher.textContent = slot.teacher || '任课老师未登记';
+      scheduleEl.detailClassroom.textContent = slot.classroom || '未指定教室';
+      scheduleEl.detailTimeSpan.textContent = `周${['一','二','三','四','五','六','日'][slot.day_of_week - 1]} 第${slot.start_period}–${slot.end_period}节 (${slot.start_time}–${slot.end_time})`;
+      scheduleEl.detailCredits.textContent = `${slot.credits || 2} 学分`;
+      scheduleEl.detailWeekPattern.textContent = `第 ${slot.start_week || 1}–${slot.end_week || 16} 周 · ${slot.week_pattern === 'odd' ? '单周' : (slot.week_pattern === 'even' ? '双周' : '全周')}`;
+      scheduleEl.selectReminderMinutes.value = String(slot.reminder_minutes || 15);
+
+      // Reset override form
+      scheduleEl.selectOverrideType.value = 'cancel';
+      scheduleEl.rowOverrideClassroom.classList.add('hidden');
+      scheduleEl.rowOverrideTime.classList.add('hidden');
+      scheduleEl.inputOverrideClassroom.value = slot.classroom || '';
+      scheduleEl.inputOverrideReason.value = '';
+
+      // Linked IM group jump button
+      scheduleEl.btnJumpCourseGroup.onclick = () => {
+        scheduleEl.modalCourseDetail.classList.add('hidden');
+        scheduleEl.modalCourseDetail.classList.remove('flex');
+        setWorkspaceMode('im');
+        // Find channel matching course name
+        const match = state.im.channels.find(c => c.name.includes(slot.course_name) || slot.course_name.includes(c.name));
+        if (match) {
+          state.im.activeChannelId = match.id;
+          el.imChatTitle.textContent = match.name;
+          if (el.btnBackGlobalTimeline) el.btnBackGlobalTimeline.classList.remove('hidden');
+          renderImChannels(state.im.channels);
+          loadImTimeline();
+        }
+      };
+
+      // Meeting URL button
+      scheduleEl.btnOpenMeetingLink.onclick = () => {
+        if (slot.meeting_url) {
+          window.open(slot.meeting_url, '_blank');
+        } else {
+          const url = prompt('请输入该课程的腾讯会议或线上课堂链接:');
+          if (url) {
+            slot.meeting_url = url;
+            alert('线上会议链接已保存');
+          }
+        }
+      };
+
+      scheduleEl.modalCourseDetail.classList.remove('hidden');
+      scheduleEl.modalCourseDetail.classList.add('flex');
+      lucide.createIcons();
+    }
+
+    async function loadUpcomingReminders() {
+      try {
+        const res = await api(`/schedule/reminders/upcoming?lookahead_minutes=90&semester=${encodeURIComponent(state.schedule.semester)}`);
+        const rems = res.reminders || [];
+        if (rems.length > 0) {
+          const first = rems[0];
+          scheduleEl.scheduleReminderBanner.classList.remove('hidden');
+          scheduleEl.scheduleReminderText.textContent = `即将上课: ${first.course_name} (${first.classroom}教室 · ${first.minutes_until_start}分钟后)`;
+        } else {
+          scheduleEl.scheduleReminderBanner.classList.add('hidden');
+        }
+      } catch (err) {
+        scheduleEl.scheduleReminderBanner.classList.add('hidden');
+      }
+    }
+
+    async function loadAcademicEvents() {
+      try {
+        const res = await api(`/schedule/events?semester=${encodeURIComponent(state.schedule.semester)}`);
+        state.schedule.events = res.events || [];
+        renderAcademicEvents(state.schedule.events);
+      } catch (err) {
+        scheduleEl.scheduleEventsList.innerHTML = `<div class="text-rose-400 text-center py-4">加载日程失败</div>`;
+      }
+    }
+
+    function renderAcademicEvents(events) {
+      scheduleEl.scheduleEventsList.innerHTML = '';
+      let filtered = events;
+      if (state.schedule.eventTab !== 'all') {
+        filtered = filtered.filter(e => e.event_type === state.schedule.eventTab);
+      }
+
+      if (!filtered || filtered.length === 0) {
+        scheduleEl.scheduleEventsList.innerHTML = '<div class="text-slate-500 text-center py-8">暂无该分类日程待办</div>';
+        return;
+      }
+
+      filtered.forEach(e => {
+        const item = document.createElement('div');
+        const isDone = e.is_completed;
+        item.className = `p-2.5 rounded-lg border transition space-y-1.5 ${
+          isDone 
+            ? 'bg-[#1a1a20]/60 border-[#262632] opacity-60 text-slate-400' 
+            : 'bg-[#202028] hover:bg-[#262632] border-[#2e2e3e] text-slate-200'
+        }`;
+
+        let typeBadge = 'bg-slate-800 text-slate-300';
+        if (e.event_type === 'assignment') typeBadge = 'bg-purple-950 text-purple-300 border border-purple-800/40';
+        if (e.event_type === 'exam') typeBadge = 'bg-rose-950 text-rose-300 border border-rose-800/40 font-bold';
+        if (e.event_type === 'lab') typeBadge = 'bg-blue-950 text-blue-300 border border-blue-800/40';
+        if (e.event_type === 'meeting') typeBadge = 'bg-amber-950 text-amber-300 border border-amber-800/40';
+
+        const typeLabels = { assignment: '作业', exam: '考试', lab: '实验', meeting: '会议', activity: '社团', other: '日常' };
+
+        item.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex items-center space-x-2 min-w-0">
+              <input type="checkbox" ${isDone ? 'checked' : ''} class="w-3.5 h-3.5 rounded bg-[#181820] border-slate-600 text-purple-600 cursor-pointer shrink-0">
+              <span class="font-semibold text-xs truncate ${isDone ? 'line-through text-slate-500' : 'text-slate-100'}">${escapeHtml(e.title)}</span>
+            </div>
+            <span class="px-1.5 py-0.2 rounded text-[9px] ${typeBadge} shrink-0">${typeLabels[e.event_type] || e.event_type}</span>
+          </div>
+          <div class="flex items-center justify-between text-[10px] text-slate-500 font-mono">
+            <span>截止: ${escapeHtml(e.due_date)} ${escapeHtml(e.due_time || '')}</span>
+            <span class="truncate max-w-[120px]">${escapeHtml(e.location || '')}</span>
+          </div>
+        `;
+
+        // Checkbox click
+        const chk = item.querySelector('input[type="checkbox"]');
+        chk.addEventListener('change', async () => {
+          await api(`/schedule/event/${encodeURIComponent(e.id)}/toggle`, { method: 'PUT' });
+          loadAcademicEvents();
+        });
+
+        scheduleEl.scheduleEventsList.appendChild(item);
+      });
+    }
+
+    // 周次导航切换
+    scheduleEl.btnPrevWeek.addEventListener('click', () => {
+      if (state.schedule.selectedWeek > 1) {
+        state.schedule.selectedWeek -= 1;
+        updateWeekDisplay();
+        loadWeekSchedule(state.schedule.selectedWeek);
+      }
+    });
+
+    scheduleEl.btnNextWeek.addEventListener('click', () => {
+      if (state.schedule.selectedWeek < 25) {
+        state.schedule.selectedWeek += 1;
+        updateWeekDisplay();
+        loadWeekSchedule(state.schedule.selectedWeek);
+      }
+    });
+
+    scheduleEl.btnCurrentWeek.addEventListener('click', () => {
+      state.schedule.selectedWeek = state.schedule.currentWeek;
+      updateWeekDisplay();
+      loadWeekSchedule(state.schedule.selectedWeek);
+    });
+
+    // 学期切换
+    scheduleEl.selectSemester.addEventListener('change', (e) => {
+      state.schedule.semester = e.target.value;
+      loadScheduleData();
+    });
+
+    // 单周变动类型切换
+    scheduleEl.selectOverrideType.addEventListener('change', (e) => {
+      const v = e.target.value;
+      scheduleEl.rowOverrideClassroom.classList.toggle('hidden', v !== 'relocate');
+      scheduleEl.rowOverrideTime.classList.toggle('hidden', v !== 'reschedule');
+    });
+
+    // 保存单周变动
+    scheduleEl.btnSaveOverride.addEventListener('click', async () => {
+      const slot = state.schedule.activeCourseDetail;
+      if (!slot) return;
+      const ovType = scheduleEl.selectOverrideType.value;
+      const payload = {
+        course_id: slot.course_id,
+        semester: state.schedule.semester,
+        week_number: state.schedule.selectedWeek,
+        day_of_week: slot.day_of_week,
+        override_type: ovType,
+        new_classroom: ovType === 'relocate' ? scheduleEl.inputOverrideClassroom.value.trim() : null,
+        new_day_of_week: ovType === 'reschedule' ? parseInt(scheduleEl.selectOverrideDay.value, 10) : null,
+        new_start_period: ovType === 'reschedule' ? parseInt(scheduleEl.selectOverrideStartPeriod.value, 10) : null,
+        new_end_period: ovType === 'reschedule' ? parseInt(scheduleEl.selectOverrideStartPeriod.value, 10) + 1 : null,
+        reason: scheduleEl.inputOverrideReason.value.trim() || (ovType === 'cancel' ? '停课' : '单周调整')
+      };
+
+      try {
+        await api('/schedule/override', { method: 'POST', body: JSON.stringify(payload) });
+        scheduleEl.modalCourseDetail.classList.add('hidden');
+        scheduleEl.modalCourseDetail.classList.remove('flex');
+        alert(`第 ${state.schedule.selectedWeek} 周单周课程变动已生效！`);
+        loadWeekSchedule(state.schedule.selectedWeek);
+        loadUpcomingReminders();
+      } catch (err) {
+        alert('保存单周变动失败: ' + err.message);
+      }
+    });
+
+    scheduleEl.btnCloseCourseDetail.addEventListener('click', () => {
+      scheduleEl.modalCourseDetail.classList.add('hidden');
+      scheduleEl.modalCourseDetail.classList.remove('flex');
+    });
+
+    // 导入模态框
+    scheduleEl.btnOpenImportModal.addEventListener('click', () => {
+      scheduleEl.modalImportSchedule.classList.remove('hidden');
+      scheduleEl.modalImportSchedule.classList.add('flex');
+    });
+
+    scheduleEl.btnCloseImportModal.addEventListener('click', () => {
+      scheduleEl.modalImportSchedule.classList.add('hidden');
+      scheduleEl.modalImportSchedule.classList.remove('flex');
+    });
+
+    scheduleEl.btnSyncObsidianSchedule.addEventListener('click', async () => {
+      if (!confirm('确定从 Obsidian Vault 的「07.学习笔记/大二上/课表.md」同步课表吗？')) return;
+      try {
+        const res = await api(`/schedule/import/obsidian?semester=${encodeURIComponent(state.schedule.semester)}`, { method: 'POST' });
+        alert(`同步成功！已成功导入 ${res.imported_courses} 门课程。`);
+        loadScheduleData();
+      } catch (err) {
+        alert('同步课表失败: ' + err.message);
+      }
+    });
+
+    scheduleEl.btnDoImportObsidian.addEventListener('click', async () => {
+      try {
+        const res = await api(`/schedule/import/obsidian?semester=${encodeURIComponent(state.schedule.semester)}`, { method: 'POST' });
+        scheduleEl.modalImportSchedule.classList.add('hidden');
+        scheduleEl.modalImportSchedule.classList.remove('flex');
+        alert(`一键同步成功！已导入 ${res.imported_courses} 门课程。`);
+        loadScheduleData();
+      } catch (err) {
+        alert('导入失败: ' + err.message);
+      }
+    });
+
+    scheduleEl.btnSubmitImportMarkdown.addEventListener('click', async () => {
+      const text = scheduleEl.textareaImportMarkdown.value.trim();
+      if (!text) { alert('请先粘贴课表内容'); return; }
+      try {
+        const res = await api('/schedule/import/markdown', {
+          method: 'POST',
+          body: JSON.stringify({ markdown: text, semester: state.schedule.semester })
+        });
+        scheduleEl.modalImportSchedule.classList.add('hidden');
+        scheduleEl.modalImportSchedule.classList.remove('flex');
+        alert(`导入成功！解析并保存了 ${res.imported_courses} 门课程。`);
+        loadScheduleData();
+      } catch (err) {
+        alert('导入解析失败: ' + err.message);
+      }
+    });
+
+    // 添加日程
+    scheduleEl.btnOpenAddEvent.addEventListener('click', () => {
+      scheduleEl.inputEventDate.value = new Date().toISOString().slice(0, 10);
+      scheduleEl.modalAddEvent.classList.remove('hidden');
+      scheduleEl.modalAddEvent.classList.add('flex');
+    });
+
+    scheduleEl.btnCloseEventModal.addEventListener('click', () => {
+      scheduleEl.modalAddEvent.classList.add('hidden');
+      scheduleEl.modalAddEvent.classList.remove('flex');
+    });
+
+    scheduleEl.btnSubmitEvent.addEventListener('click', async () => {
+      const title = scheduleEl.inputEventTitle.value.trim();
+      if (!title) { alert('请输入日程标题'); return; }
+      const payload = {
+        semester: state.schedule.semester,
+        title: title,
+        event_type: scheduleEl.selectEventType.value,
+        priority: scheduleEl.selectEventPriority.value,
+        due_date: scheduleEl.inputEventDate.value,
+        due_time: scheduleEl.inputEventTime.value || '23:59',
+        location: scheduleEl.inputEventLocation.value.trim(),
+        week_number: state.schedule.selectedWeek,
+      };
+      try {
+        await api('/schedule/event', { method: 'POST', body: JSON.stringify(payload) });
+        scheduleEl.modalAddEvent.classList.add('hidden');
+        scheduleEl.modalAddEvent.classList.remove('flex');
+        scheduleEl.inputEventTitle.value = '';
+        loadAcademicEvents();
+      } catch (err) {
+        alert('保存日程失败: ' + err.message);
+      }
+    });
+
+    // 日程类型切换
+    document.querySelectorAll('.evt-tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.evt-tab-btn').forEach(b => {
+          b.className = 'evt-tab-btn px-2 py-0.5 rounded-full bg-[#252530] text-slate-400 hover:text-white cursor-pointer';
+        });
+        btn.className = 'evt-tab-btn px-2 py-0.5 rounded-full bg-purple-600 text-white font-medium cursor-pointer';
+        state.schedule.eventTab = btn.getAttribute('data-event-tab') || 'all';
+        renderAcademicEvents(state.schedule.events);
+      });
+    });
+
   </script>
 </body>
 </html>

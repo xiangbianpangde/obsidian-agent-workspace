@@ -380,6 +380,10 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
             text=text,
             message_type=message_type,
             mentions=mentions,
+            source="wechat",
+            sender_name=sender_name,
+            sender_id=sender_id,
+            is_self=is_self,
         )
 
         attachments: List[IMAttachment] = []

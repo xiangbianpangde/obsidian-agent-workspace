@@ -13,6 +13,7 @@ from .api import tags as tags_api
 from .api import templates as templates_api
 from .api import agentsview as agentsview_api
 from .api import im as im_api
+from .api import schedule as schedule_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import get_cfg, init_state
@@ -64,6 +65,7 @@ app.include_router(tags_api.router, prefix="/api", tags=["tags"])
 app.include_router(templates_api.router, prefix="/api", tags=["templates"])
 app.include_router(agentsview_api.router, prefix="/api/agentsview", tags=["agentsview"])
 app.include_router(im_api.router)
+app.include_router(schedule_api.router)
 
 
 @app.get("/api/health")

@@ -493,6 +493,10 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
             text=text,
             message_type=message_type,
             mentions=mentions,
+            source="wecom",
+            sender_name=sender_name,
+            sender_id=sender_id,
+            is_self=is_self,
         )
 
         attachments: List[IMAttachment] = []

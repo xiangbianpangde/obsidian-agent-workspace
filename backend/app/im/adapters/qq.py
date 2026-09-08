@@ -514,6 +514,10 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
             text=decoded["text"],
             message_type=message_type,
             mentions=[],
+            source="qq",
+            sender_name=sender_name,
+            sender_id=sender_id,
+            is_self=None,
         )
         message = IMMessageItem(
             id=_opaque_message_id(self._account_id, locator),
