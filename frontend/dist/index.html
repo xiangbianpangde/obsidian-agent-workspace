@@ -1926,23 +1926,29 @@
         const data = await api('/im/status');
         const sources = data.sources || {};
         
-        // WeChat status
+        // WeChat status — only report online after wx-cli health succeeds.
         const wx = sources.wechat || {};
         const wxLive = wx.connectivity === 'live';
-        el.imStatWechat.innerHTML = `<span class="w-2 h-2 rounded-full ${wxLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>微信: ${wxLive ? '在线' : '离线'}`;
+        const wxLabel = wxLive ? '在线' : (wx.connectivity === 'catching_up' ? '连接中' : (wx.connectivity === 'degraded' ? '连接异常' : '离线'));
+        el.imStatWechat.innerHTML = `<span class="w-2 h-2 rounded-full ${wxLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>微信: ${wxLabel}`;
         el.imStatWechat.className = wxLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-400';
+        el.imStatWechat.title = wx.detail || '';
 
-        // WeCom status
+        // WeCom status — a configured/readable snapshot is required for live.
         const wecom = sources.wecom || {};
         const wecomLive = wecom.connectivity === 'live';
-        el.imStatWecom.innerHTML = `<span class="w-2 h-2 rounded-full ${wecomLive ? 'bg-blue-500' : 'bg-slate-500'} mr-1"></span>企微: ${wecom.coverage?.kind || '快照'}`;
+        const wecomLabel = wecomLive ? '在线' : (wecom.connectivity === 'degraded' ? '需配置快照读取器' : '未接入');
+        el.imStatWecom.innerHTML = `<span class="w-2 h-2 rounded-full ${wecomLive ? 'bg-blue-500' : 'bg-slate-500'} mr-1"></span>企微: ${wecomLabel}`;
         el.imStatWecom.className = wecomLive ? 'flex items-center text-blue-400' : 'flex items-center text-slate-400';
+        el.imStatWecom.title = wecom.detail || '';
 
-        // QQ status
+        // QQ status — "等待推送" is not the same as an online QQ account.
         const qq = sources.qq || {};
         const qqLive = qq.connectivity === 'live';
-        el.imStatQq.innerHTML = `<span class="w-2 h-2 rounded-full ${qqLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>QQ: ${qqLive ? '在线 (Push)' : '就绪'}`;
+        const qqLabel = qqLive ? '在线 (Push)' : (qq.connectivity === 'catching_up' ? '等待推送' : '离线');
+        el.imStatQq.innerHTML = `<span class="w-2 h-2 rounded-full ${qqLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'} mr-1"></span>QQ: ${qqLabel}`;
         el.imStatQq.className = qqLive ? 'flex items-center text-emerald-400' : 'flex items-center text-slate-300';
+        el.imStatQq.title = qq.detail || '';
 
         state.im.headSeq = data.head_seq || 0;
       } catch (err) {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -45,11 +46,17 @@ class IngestionCoordinator(IMIngestSink):
         self._ring: Deque[IMMessageItem] = deque(maxlen=ring_buffer_capacity)
         self._subscribers: Set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
+        self._started = False
 
         # Initialize adapters and bind default sink
-        self.wechat_adapter = WxCliAdapter()
-        self.wecom_adapter = WeComSnapshotAdapter()
-        self.qq_adapter = ZhinQQAdapter()
+        wx_account = os.environ.get("WECHAT_ACCOUNT_ID", "wxid_hxwpag2k3qi122")
+        wx_base = os.environ.get("WX_CLI_BASE_URL", "http://127.0.0.1:9100")
+        wecom_account = os.environ.get("WECOM_ACCOUNT_ID", "wecom_primary")
+        qq_account = os.environ.get("QQ_ACCOUNT_ID", "qq_primary")
+
+        self.wechat_adapter = WxCliAdapter(account_id=wx_account, base_url=wx_base)
+        self.wecom_adapter = WeComSnapshotAdapter(account_id=wecom_account)
+        self.qq_adapter = ZhinQQAdapter(account_id=qq_account)
 
         self.wechat_adapter._sink = self
         self.wecom_adapter._sink = self
@@ -62,16 +69,26 @@ class IngestionCoordinator(IMIngestSink):
         }
 
     async def start(self) -> None:
-        """Starts all background ingest drivers."""
+        """Start all background ingest drivers exactly once."""
+        if self._started:
+            return
+        self._started = True
         for adapter in self._adapters.values():
             if isinstance(adapter, IMIngestDriver):
                 await adapter.start(self)
 
+    async def ensure_started(self) -> None:
+        """Alias for start(), used for lazy boot on first API access."""
+        await self.start()
+
     async def stop(self) -> None:
-        """Stops all background ingest drivers."""
+        """Stop all background ingest drivers."""
+        if not self._started:
+            return
         for adapter in self._adapters.values():
             if isinstance(adapter, IMIngestDriver):
                 await adapter.stop()
+        self._started = False
 
     def get_adapter(self, source: str) -> Optional[IMSourceAdapter]:
         return self._adapters.get(source)

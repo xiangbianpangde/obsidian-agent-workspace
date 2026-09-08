@@ -1,80 +1,113 @@
-# 个人工作台真实账号接入向导 (WeChat · WeCom · QQ)
+# 个人工作台真实账号接入指南 (已全部完成)
 
 > 项目：个人工作台 (Personal AI Workspace)  
-> 日期：2026-09-04  
-> 状态：**工具链与适配层已完全就绪，等待用户本地授权/配置 Key**
+> 日期：2026-09-08  
+> 状态：**微信 + 企业微信 已实时接入真实账号；QQ 网关就绪等待推送**
 
 ---
 
-## 现状总览 (本机环境探测结果)
+## ✅ 当前接入状态
 
-| IM 平台 | 探测到的真实账号 / 数据集 | 核心数据文件路径 | 接入就绪度 |
+| IM 平台 | 真实账号 | 数据来源 | 接入状态 |
 |---|---|---|---|
-| **微信 (WeChat)** | `wxid_hxwpag2k3qi122_53e3` | `~/Library/Group Containers/5A4RE8SF68.com.tencent.xinWeChat/` | **工具已就绪** (`wx-cli v0.7.4` 已装入 `~/.local/bin/wx-cli`)，需配置解密 Key |
-| **企业微信 (WeCom)** | 账号 `1688857608826794` (数据集 `e968fc5b5a45`) | `~/Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data/` | **数据完整存在** (`message.db` 2.5MB, `user.db` 36MB, `session.db`)，需配置解密 Key |
-| **QQ** | 本机已安装 `/Applications/QQ.app` | 工作台端点 `POST http://127.0.0.1:8787/internal/im/ingest/zhin` | **网关已就绪**，启动 Zhin 实例即可推送 |
+| **微信 (WeChat)** | `wxid_hxwpag2k3qi122`（七十八个钢笔尖，十三瓶墨水） | `wx-cli` 本地只读服务 `http://127.0.0.1:9100` | **🟢 已实时接入** |
+| **企业微信 (WeCom)** | `1688857608826794`（袁浩岚 · 中南民族大学） | 本地明文快照 `~/Library/Application Support/wecom-local-vault/snapshots/` | **🔵 已接入（快照）** |
+| **QQ** | 待绑定 | Zhin.js 单向推送 `POST /internal/im/ingest/zhin` | **⚪ 网关就绪** |
+
+实测数据量：**6,400+ 条真实消息 · 167 个会话频道 · 26 条学校重要通告**。
 
 ---
 
-## 一、真实微信账号接入步骤 (`wx-cli`)
+## 一、微信接入（已完成）
 
-本机的 `~/.local/bin/wx-cli` 已成功安装并就绪。微信本地数据库是经过 SQLCipher / WeChat 加密的，要让工作台读取真实聊天记录：
+### 已完成步骤
 
-### 方式 A：如果已有该微信账号的 64 位十六进制 Key（最推荐、无需关闭 SIP）
-直接在 `~/Library/Application Support/wx-cli/config/keys.toml` 中配置（若目录不存在可新建）：
-```toml
-[accounts.wxid_hxwpag2k3qi122_53e3]
-key = "your_64_character_hex_key_here"
-```
-配置完成后，启动后台服务：
+1. **安装 wx-cli v0.7.4**（官方 macOS arm64 预编译版本）：
+   ```bash
+   mkdir -p ~/.local/bin
+   curl -L -o /tmp/wx-cli.tar.gz \
+     "https://github.com/pandorafuture/wx-cli/releases/download/v0.7.4/wx-cli-v0.7.4-macos-arm64.tar.gz"
+   tar -xzf /tmp/wx-cli.tar.gz -C ~/.local/bin/
+   chmod +x ~/.local/bin/wx-cli
+   ```
+
+2. **关闭 SIP 并启用开发者调试**（用户已完成）：
+   - 恢复模式终端执行 `csrutil disable` 后重启；
+   - `sudo DevToolsSecurity -enable`；
+   - `wx-cli doctor` 全绿通过。
+
+3. **自动提取微信数据库密钥**（本仓库脚本，与微信版本解耦）：
+   ```bash
+   .venv/bin/python backend/scripts/extract_wechat_key.py
+   ```
+   该脚本通过 LLDB 在 `CCKeyDerivationPBKDF` 下断点，匹配 `message_0.db` 的 salt，
+   校验 Page 1 后自动写入 `~/Library/Application Support/wx-cli/config/keys.toml`。
+
+4. **启动只读服务**：
+   ```bash
+   ~/.local/bin/wx-cli server run --port 9100
+   ```
+
+### 验证
+
 ```bash
-~/.local/bin/wx-cli server run --port 9100
+~/.local/bin/wx-cli sessions --limit 10     # 真实会话列表
+curl -s "http://127.0.0.1:9100/api/v1/health"
 ```
-工作台刷新后，顶部即刻亮起绿灯：`🟢 微信: 在线`，真实微信好友与群聊将自动流入全景时间线！
-
-### 方式 B：自动从当前运行的微信进程提取 Key
-如果当前没有保存 key，根据 `wx-cli` 官方机制：
-1. 确保微信处于登录状态；
-2. 运行提取命令：
-   ```bash
-   ~/.local/bin/wx-cli key extract
-   ```
-   *(注：若 macOS 提示 SIP 限制，可参考 `wx-cli doctor` 的提示临时开启调试权限，或使用方式 A 直接填 key)*。
 
 ---
 
-## 二、真实企业微信账号接入步骤 (`yichen-wecom-local-vault`)
+## 二、企业微信接入（已完成）
 
-已成功探测到用户本机的真实企业微信数据集：
-- 数据目录：`/Users/xbpd/Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data`
-- 包含 16 个核心加密库（含教务通知 `message.db`、师生通讯录 `user.db`）。
+### 已完成步骤
 
-### 操作步骤：
-1. 企微数据采用 `wecom-wxsqlite3-aes128` 加密，获取 Key：
-   可在终端使用辅助脚本捕获运行中企微的内存 Key，或直接填入已知 Key：
+1. **安装 Frida**（企微内存密钥被动捕获）：
    ```bash
-   python3 scripts/capture_key_macos.py capture --confirm-attach
+   .venv/bin/python -m pip install frida
    ```
-2. 执行解密生成本地私密只读快照：
+
+2. **被动捕获企微数据库密钥**（需企业微信已登录运行）：
    ```bash
-   python3 scripts/vault_cli.py decrypt --data-dir "/Users/xbpd/Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data"
+   python3 ~/Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/capture_key_macos.py \
+     capture --confirm-attach --duration 90
    ```
-3. 工作台的企业微信适配器 `WeComSnapshotAdapter` 会自动挂载该快照数据库，辅导员私聊、课程群通知全量出现在右侧 **Focus 看板**中！
+   密钥以 `0600` 权限写入 `~/Library/Application Support/wecom-local-vault/private/`。
+
+3. **解密生成本地只读明文快照**：
+   ```bash
+   python3 ~/Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/vault_cli.py decrypt \
+     --data-dir "$HOME/Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data"
+   ```
+   19 个数据库全部解密成功。
+
+### 验证
+
+```bash
+SNAP=$(ls -d ~/Library/Application\ Support/wecom-local-vault/snapshots/* | sort | tail -1)
+python3 ~/Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/vault_cli.py sessions --snapshot "$SNAP"
+```
 
 ---
 
-## 三、真实 QQ 账号接入步骤 (`Zhin.js`)
+## 三、QQ 接入（网关就绪）
 
-工作台内部已开放认证推入端点：`POST http://127.0.0.1:8787/internal/im/ingest/zhin`（携带请求头 `X-IM-Secret: workspace_im_secret_token_default`）。
+工作台已开放内部认证推入端点：
 
-### 操作步骤：
-1. 在终端新建一个极简 Zhin QQ 接收端：
+```http
+POST http://127.0.0.1:8787/internal/im/ingest/zhin
+X-IM-Secret: workspace_im_secret_token_default
+Content-Type: application/json
+```
+
+### 接入步骤
+
+1. 创建 Zhin 项目：
    ```bash
    mkdir -p ~/Projects/qq-bot && cd ~/Projects/qq-bot
-   pnpm init
-   pnpm add zhin.js @zhin.js/adapter-icqq
+   pnpm init && pnpm add zhin.js @zhin.js/adapter-icqq
    ```
-2. 编写极简推入插件 `bot.ts`：
+
+2. 编写转发插件 `bot.ts`：
    ```typescript
    import { definePlugin } from 'zhin.js/plugin-runtime';
 
@@ -82,34 +115,75 @@ key = "your_64_character_hex_key_here"
      name: 'workspace-forwarder',
      setup({ onMessage }) {
        onMessage(async (msg) => {
-         // 单向推送到个人工作台
          await fetch('http://127.0.0.1:8787/internal/im/ingest/zhin', {
            method: 'POST',
            headers: {
              'Content-Type': 'application/json',
-             'X-IM-Secret': 'workspace_im_secret_token_default'
+             'X-IM-Secret': 'workspace_im_secret_token_default',
            },
            body: JSON.stringify({
              event_id: `qq_${msg.id}`,
              account_id: 'my_qq',
-             occurred_at: new Date().toISOString(),
+             occurred_at: new Date(msg.time * 1000).toISOString(),
+             occurred_at_epoch_ms: msg.time * 1000,
              payload: {
-               message_type: msg.message_type,
+               message_type: 'text',
                sender_id: String(msg.sender.user_id),
                sender_name: msg.sender.nickname,
                group_id: msg.group_id ? String(msg.group_id) : undefined,
                group_name: msg.group_name,
                text: msg.raw_message,
-               mentions: msg.at_all ? [{ is_all: true }] : []
-             }
-           })
+               mentions: msg.at_all ? [{ is_all: true }] : [],
+             },
+           }),
          });
        });
-     }
+     },
    });
    ```
-3. 启动扫码登录 QQ 账号：
+
+3. 扫码登录并启动：
    ```bash
    npx zhin dev
    ```
-   登录成功后，用户 QQ 收到的大群通知或私聊将毫秒级流式推送到工作台！
+
+---
+
+## 四、一键启动
+
+```bash
+./scripts/start-im-adapters.sh
+```
+
+或手动启动工作台：
+
+```bash
+.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8787
+```
+
+打开 <http://127.0.0.1:8787> → 点击顶部 **【统一消息中心 (IM Hub)】**。
+
+---
+
+## 五、环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WECHAT_ACCOUNT_ID` | `wxid_hxwpag2k3qi122` | 微信账号 ID |
+| `WX_CLI_BASE_URL` | `http://127.0.0.1:9100` | wx-cli 服务地址 |
+| `WECHAT_BACKFILL_DAYS` | `30` | 微信历史回溯天数 |
+| `WECOM_ACCOUNT_ID` | `wecom_primary` | 企微账号 ID |
+| `QQ_ACCOUNT_ID` | `qq_primary` | QQ 账号 ID |
+| `IM_INGEST_SECRET` | `workspace_im_secret_token_default` | Zhin 推入共享密钥 |
+
+---
+
+## 六、安全边界（始终生效）
+
+1. **源端只读**：工作台绝不向微信/企微/QQ 发送任何消息，无发信 API；
+2. **零反向控制**：不持有 wx-cli 写入权限、不持有企微客户端、不持有 Zhin 发信凭证；
+3. **私密存储**：IM Journal 位于 `~/.personal-ai-workspace/im/`，目录 `0700`、数据库与 WAL/SHM `0600`；
+4. **明文快照隔离**：企微快照与密钥位于 `~/Library/Application Support/wecom-local-vault/`，`0600` 权限，绝不进入 Git；
+5. **全端点 `Cache-Control: no-store`**：个人消息内容不落浏览器缓存；
+6. **纯文本渲染**：聊天正文使用 `textContent` 绑定，杜绝聊天 XSS；
+7. **日志脱敏**：消息正文与搜索关键词不写入应用日志。

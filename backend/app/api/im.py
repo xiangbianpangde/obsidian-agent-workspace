@@ -40,6 +40,13 @@ def get_im_coordinator() -> IngestionCoordinator:
     return _global_coordinator
 
 
+async def ensure_im_coordinator_started() -> IngestionCoordinator:
+    """Lazily boot the ingestion drivers on first API access."""
+    coordinator = get_im_coordinator()
+    await coordinator.ensure_started()
+    return coordinator
+
+
 def apply_no_store(response: Response) -> None:
     """Security invariant: Cache-Control: no-store for all personal IM data."""
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -53,7 +60,7 @@ def apply_no_store(response: Response) -> None:
 @router.get("/api/im/status")
 async def get_im_status(response: Response) -> Dict[str, Any]:
     apply_no_store(response)
-    coordinator = get_im_coordinator()
+    coordinator = await ensure_im_coordinator_started()
     statuses = await coordinator.get_all_statuses()
     return {
         "status": "ok",
@@ -65,6 +72,7 @@ async def get_im_status(response: Response) -> Dict[str, Any]:
 @router.get("/api/im/overview")
 async def get_im_overview(response: Response) -> Dict[str, Any]:
     apply_no_store(response)
+    await ensure_im_coordinator_started()
     journal = get_im_journal()
     channels = journal.list_channels()
 
@@ -184,7 +192,7 @@ async def get_im_events(
     """
     Unified SSE Event Bus with dual-cursor precedence and Resync Fence (P1-IM-7).
     """
-    coordinator = get_im_coordinator()
+    coordinator = await ensure_im_coordinator_started()
     gen = coordinator.subscribe_events(
         query_after_seq=after_seq,
         header_last_event_id=last_event_id
@@ -227,7 +235,7 @@ async def ingest_from_zhin(
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body")
 
-    coordinator = get_im_coordinator()
+    coordinator = await ensure_im_coordinator_started()
     qq_adapter = coordinator.qq_adapter
 
     try:

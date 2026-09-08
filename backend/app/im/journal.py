@@ -127,6 +127,7 @@ class IMJournal:
                 source TEXT NOT NULL,
                 account_id TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
+                channel_name TEXT NOT NULL DEFAULT '',
                 dedupe_key TEXT NOT NULL,
                 dedupe_basis TEXT NOT NULL,
                 payload_digest TEXT NOT NULL,
@@ -153,6 +154,12 @@ class IMJournal:
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_timeline ON messages (occurred_at_epoch_ms DESC, ingest_seq DESC);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel_id, ingest_seq ASC);")
+
+            # Lightweight forward migration: add channel_name to pre-existing journals.
+            cur.execute("PRAGMA table_info(messages);")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            if "channel_name" not in existing_cols:
+                cur.execute("ALTER TABLE messages ADD COLUMN channel_name TEXT NOT NULL DEFAULT '';")
 
             # Watermarks table
             cur.execute("""
@@ -240,20 +247,20 @@ class IMJournal:
 
                     cur.execute("""
                     INSERT INTO messages (
-                        id, source, account_id, channel_id, dedupe_key, dedupe_basis,
+                        id, source, account_id, channel_id, channel_name, dedupe_key, dedupe_basis,
                         payload_digest, source_message_id, source_id_quality, sender_id,
                         sender_name, sender_role, is_self, reply_to, text, message_type,
                         mentions_json, attachments_json, occurred_at, occurred_at_epoch_ms,
                         observed_at, provenance_json, focus_tags_json, focus_reasons_json
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?
                     );
                     """, (
-                        rec.message.id, rec.source, rec.account_id, rec.message.channel_id, rec.dedupe_key, rec.dedupe_basis,
+                        rec.message.id, rec.source, rec.account_id, rec.message.channel_id, rec.message.channel_name, rec.dedupe_key, rec.dedupe_basis,
                         server_digest, rec.message.source_message_id, rec.message.source_id_quality, rec.message.sender_id,
                         rec.message.sender_name, rec.message.sender_role, is_self_int, rec.message.reply_to, rec.message.text, rec.message.message_type,
                         mentions_str, attachments_str, rec.message.occurred_at, rec.message.occurred_at_epoch_ms,
@@ -310,7 +317,7 @@ class IMJournal:
 
         if row is None:
             # Create channel entry
-            name = msg.channel_id.split(":", 1)[-1]
+            name = msg.channel_name or msg.channel_id.split(":", 1)[-1]
             unseen = 0 if is_self else 1
             cur.execute("""
             INSERT INTO channels (
@@ -521,6 +528,7 @@ class IMJournal:
             source=r["source"],
             account_id=r["account_id"],
             channel_id=r["channel_id"],
+            channel_name=(r["channel_name"] if "channel_name" in r.keys() else "") or r["channel_id"],
             source_id_quality=r["source_id_quality"],
             sender_id=r["sender_id"],
             sender_name=r["sender_name"],

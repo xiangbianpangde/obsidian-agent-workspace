@@ -29,6 +29,8 @@ async def lifespan(app: FastAPI):
         cfg = load_config()
         init_state(cfg)
     watchdog_conn = None
+    im_coordinator = im_api.get_im_coordinator()
+    await im_coordinator.start()
     if cfg.watchdog_enabled:
         from .watch.watcher import ScanCoordinator, start_watcher
 
@@ -41,6 +43,7 @@ async def lifespan(app: FastAPI):
         observer.join()
     if watchdog_conn is not None:
         watchdog_conn.close()
+    await im_coordinator.stop()
 
 
 app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lifespan)

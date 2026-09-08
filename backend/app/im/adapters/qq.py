@@ -33,6 +33,7 @@ class ZhinQQAdapter(IMIngestDriver):
         self._account_id = account_id
         self._sink: Optional[IMIngestSink] = None
         self._running = False
+        self._connectivity: str = "offline"
         self._last_observed_at: Optional[str] = None
 
     @property
@@ -55,13 +56,13 @@ class ZhinQQAdapter(IMIngestDriver):
     async def get_status(self) -> IMSourceStatus:
         return IMSourceStatus(
             source="qq",
-            connectivity="live" if self._running else "offline",
+            connectivity=self._connectivity,
             coverage=IMCoverage(
                 kind="realtime_only",
                 gaps=[]
             ),
             freshness=IMFreshness(
-                stale=False,
+                stale=self._connectivity != "live",
                 last_observed_at=self._last_observed_at
             ),
             watermark=IMWatermark(
@@ -69,15 +70,18 @@ class ZhinQQAdapter(IMIngestDriver):
                 value=self._last_observed_at,
                 committed_at=self._last_observed_at
             ),
-            rebuildability="none"
+            rebuildability="none",
+            detail=(None if self._connectivity == "live" else "QQ ingress is ready; waiting for a Zhin push event"),
         )
 
     async def start(self, sink: IMIngestSink) -> None:
         self._sink = sink
         self._running = True
+        self._connectivity = "catching_up"
 
     async def stop(self) -> None:
         self._running = False
+        self._connectivity = "offline"
         self._sink = None
 
     async def ingest_inbound_event(self, event_data: Dict[str, Any]) -> Any:
@@ -122,6 +126,7 @@ class ZhinQQAdapter(IMIngestDriver):
             source="qq",
             account_id=account_id,
             channel_id=channel_id,
+            channel_name=channel_name,
             source_id_quality="native",
             source_message_id=event_id,
             sender_id=payload.get("sender_id"),
@@ -158,4 +163,5 @@ class ZhinQQAdapter(IMIngestDriver):
 
         receipt = await self._sink.commit(batch)
         self._last_observed_at = msg_item.observed_at
+        self._connectivity = "live"
         return receipt

@@ -57,6 +57,7 @@ def make_sample_message(
         source=source,
         account_id=account_id,
         channel_id=channel_id,
+        channel_name="Test Channel",
         source_id_quality="synthetic",
         source_message_id=msg_id,
         sender_id="u123",
@@ -98,42 +99,37 @@ def test_at1_capability_decoupling():
 
 def test_at2_cross_path_canonical_digest_and_reply_to():
     """
-    AT-2 Positive: Same WeChat reply message via SSE and Timeline produces
-    identical canonical bytes and server digest -> triggers idempotent skip.
-    AT-2 Negative: Changing reply_to under same dedupe_key alters digest -> IdentityConflictError.
+    AT-2 Positive: Same physical WeChat message observed through two ingestion paths
+    produces byte-identical canonical bytes and server digest -> idempotent skip.
+    AT-2 Negative: Same dedupe_key but different objective fact -> IdentityConflictError.
     """
     with tempfile.TemporaryDirectory() as td:
         journal = IMJournal(Path(td) / "im_test.db")
         wx_adp = WxCliAdapter(account_id="wx_primary")
 
-        raw_sse = {
-            "id": "10001",
-            "msg_svr_id": "999888777",
+        # Native wx-cli timeline payload (real transport shape).
+        native = {
+            "sort_seq": 1788516000000,
+            "server_id": 999888777,
+            "msg_type": 1,
+            "sub_type": 0,
+            "sender": "wxid_friend",
             "talker": "course_group@chatroom",
-            "talker_name": "高等数学课程群",
-            "content": "作业已提交",
-            "type_name": "text",
-            "create_time_iso": "2026-09-04T10:00:00Z",
-            "create_time_epoch_ms": 1788516000000,
-            "reply_to_svr_id": "888777666"  # Physical reply target locator
+            "talker_display_name": "高等数学课程群",
+            "sender_display_name": "学习委员",
+            "direction": "incoming",
+            "snippet": "作业已提交",
+            "create_time": 1788516000,
+            "status": 3,
         }
 
-        raw_timeline = {
-            "id": "10001",
-            "msg_svr_id": "999888777",
-            "talker": "course_group@chatroom",
-            "talker_name": "高等数学课程群",
-            "content": "作业已提交",
-            "type_name": "text",
-            "create_time_iso": "2026-09-04T10:00:00Z",
-            "create_time_epoch_ms": 1788516000000,
-            "reply_to": "888777666"  # Slightly different input representation, same locator
-        }
+        # Path 1: live SSE-style ingestion.
+        rec_sse = wx_adp.normalize_wx_item(native, provenance_mode="sse")
+        # Path 2: historical timeline catch-up. The only difference is provenance mode
+        # (a workspace-local field excluded from the canonical payload).
+        rec_timeline = wx_adp.normalize_wx_item(native, provenance_mode="timeline")
 
-        rec_sse = wx_adp.normalize_wx_payload(raw_sse, provenance_mode="sse")
-        rec_timeline = wx_adp.normalize_wx_payload(raw_timeline, provenance_mode="timeline")
-
-        # 1. Verify byte-for-byte canonical equality
+        # 1. Canonical payload must be byte-for-byte identical across paths.
         bytes_sse = canonical_bytes_v1(rec_sse.message)
         bytes_timeline = canonical_bytes_v1(rec_timeline.message)
         assert bytes_sse == bytes_timeline
@@ -142,6 +138,7 @@ def test_at2_cross_path_canonical_digest_and_reply_to():
         digest_timeline = compute_server_digest(rec_timeline.message)
         assert digest_sse == digest_timeline
         assert rec_sse.dedupe_key == rec_timeline.dedupe_key
+        assert rec_sse.dedupe_key == "wx_locator:wx_primary:999888777"
 
         # 2. Commit SSE batch first
         batch_1 = IMIngestBatch(source="wechat", account_id="wx_primary", records=[rec_sse])
@@ -155,10 +152,11 @@ def test_at2_cross_path_canonical_digest_and_reply_to():
         assert receipt_2.inserted_count == 0
         assert receipt_2.skipped_count == 1
 
-        # 4. Negative test: Same dedupe_key but different reply_to
-        raw_conflict = dict(raw_sse)
-        raw_conflict["reply_to_svr_id"] = "different_target_999"
-        rec_conflict = wx_adp.normalize_wx_payload(raw_conflict)
+        # 4. Negative test: same dedupe_key but a different objective fact (edited text).
+        conflicting = dict(native)
+        conflicting["snippet"] = "作业已撤回"
+        rec_conflict = wx_adp.normalize_wx_item(conflicting)
+        assert rec_conflict.dedupe_key == rec_sse.dedupe_key
         assert compute_server_digest(rec_conflict.message) != digest_sse
 
         batch_conflict = IMIngestBatch(source="wechat", account_id="wx_primary", records=[rec_conflict])
@@ -409,6 +407,57 @@ def test_at9_permission_hardening_existing_files():
 
 
 # -----------------------------------------------------------------------------
+# Real wx-cli transport regression tests
+# -----------------------------------------------------------------------------
+
+def test_wx_cli_native_timeline_payload_normalization():
+    """Native wx-cli fields must map to a stable workspace record."""
+    adapter = WxCliAdapter(account_id="wxid_me")
+    record = adapter.normalize_wx_item(
+        {
+            "sort_seq": 998,
+            "server_id": 123456,
+            "msg_type": 1,
+            "sub_type": 0,
+            "sender": "wxid_friend",
+            "talker": "class_group@chatroom",
+            "talker_display_name": "课程通知群",
+            "sender_display_name": "班长",
+            "direction": "incoming",
+            "snippet": "明天换教室",
+            "create_time": 1788516000,
+            "status": 0,
+        },
+        provenance_mode="timeline",
+    )
+
+    assert record.dedupe_key == "wx_locator:wxid_me:123456"
+    assert record.message.channel_id == "wechat:class_group@chatroom"
+    assert record.message.channel_name == "课程通知群"
+    assert record.message.sender_name == "班长"
+    assert record.message.text == "明天换教室"
+    assert record.message.message_type == "text"
+    assert record.message.is_self is False
+    assert record.message.occurred_at_epoch_ms == 1788516000000
+
+
+def test_wx_cli_unreachable_is_not_reported_live():
+    """Starting the adapter must not fabricate a live source status."""
+    async def scenario():
+        adapter = WxCliAdapter(base_url="http://127.0.0.1:9", poll_interval_secs=60)
+        journal = IMJournal(Path(tempfile.mkdtemp()) / "im_test.db")
+        coordinator = IngestionCoordinator(journal)
+        await adapter.start(coordinator)
+        await asyncio.sleep(0.05)
+        source_status = await adapter.get_status()
+        await adapter.stop()
+        journal.close()
+        assert source_status.connectivity != "live"
+
+    asyncio.run(scenario())
+
+
+# -----------------------------------------------------------------------------
 # End-to-End API Integration & Zhin Push Loopback
 # -----------------------------------------------------------------------------
 
@@ -459,12 +508,16 @@ def test_api_zhin_push_and_cache_control():
     assert res2_repeat.json()["receipt"]["skipped_count"] == 1
 
     # 3. Test timeline endpoint and Cache-Control: no-store
-    res3 = client.get("/api/im/timeline")
+    res3 = client.get("/api/im/timeline?platform=qq")
     assert res3.status_code == 200
     assert "no-store" in res3.headers.get("Cache-Control", "")
     data3 = res3.json()
     assert len(data3["items"]) >= 1
-    first_item = data3["items"][0]
+    qq_items = [i for i in data3["items"] if i["source"] == "qq"]
+    assert qq_items, "expected at least one QQ message in the QQ-filtered timeline"
+    pushed = [i for i in qq_items if i["text"] == event_payload["payload"]["text"]]
+    assert pushed, "expected the just-pushed QQ message"
+    first_item = pushed[0]
     assert first_item["source"] == "qq"
     assert "mention_all" in first_item["focus_tags"]
     assert len(first_item["focus_reasons"]) >= 1

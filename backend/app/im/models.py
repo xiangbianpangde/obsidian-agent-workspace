@@ -69,6 +69,7 @@ class IMSourceStatus:
     freshness: IMFreshness
     watermark: IMWatermark
     rebuildability: Literal["full", "snapshot_bounded", "none"]
+    detail: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
@@ -92,6 +93,7 @@ class IMMessageItem:
     source: Literal["wechat", "wecom", "qq"]
     account_id: str
     channel_id: str
+    channel_name: str
     source_id_quality: Literal["native", "synthetic"]
     sender_id: Optional[str]
     sender_name: str
