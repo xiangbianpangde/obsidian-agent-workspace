@@ -1,4 +1,11 @@
-"""Local-first SQLite storage for Course Schedule & Academic Calendar."""
+"""Local-first SQLite storage for Course Schedule & Academic Calendar (v0.2.8 / R6-R10).
+
+Implements:
+- Slot-occurrence exact binding for CourseOverride (time_slot_id)
+- Zero Delete compliance (soft deletes: is_deleted, is_revoked)
+- Atomic transactions (BEGIN TRANSACTION / COMMIT / ROLLBACK)
+- Synchronized period-to-time derivation for rescheduled courses
+"""
 
 from __future__ import annotations
 
@@ -69,6 +76,7 @@ class ScheduleStorage:
             );
             """)
 
+            # Courses table with soft delete (Zero Delete compliance)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS courses (
                 id TEXT PRIMARY KEY,
@@ -82,10 +90,13 @@ class ScheduleStorage:
                 notes TEXT NOT NULL DEFAULT '',
                 course_group_id TEXT,
                 meeting_url TEXT,
-                reminder_minutes INTEGER NOT NULL DEFAULT 15
+                reminder_minutes INTEGER NOT NULL DEFAULT 15,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT
             );
             """)
 
+            # Time slots table with soft delete
             cur.execute("""
             CREATE TABLE IF NOT EXISTS time_slots (
                 id TEXT PRIMARY KEY,
@@ -100,13 +111,16 @@ class ScheduleStorage:
                 end_week INTEGER NOT NULL DEFAULT 16,
                 custom_weeks_json TEXT NOT NULL DEFAULT '[]',
                 classroom TEXT NOT NULL DEFAULT '',
-                FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(course_id) REFERENCES courses(id)
             );
             """)
 
+            # Overrides table with exact time_slot_id occurrence binding and soft revocation
             cur.execute("""
             CREATE TABLE IF NOT EXISTS overrides (
                 id TEXT PRIMARY KEY,
+                time_slot_id TEXT NOT NULL,
                 course_id TEXT NOT NULL,
                 semester TEXT NOT NULL,
                 week_number INTEGER NOT NULL,
@@ -119,10 +133,13 @@ class ScheduleStorage:
                 new_start_time TEXT,
                 new_end_time TEXT,
                 reason TEXT NOT NULL DEFAULT '',
-                FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+                is_revoked INTEGER NOT NULL DEFAULT 0,
+                revoked_at TEXT,
+                UNIQUE(time_slot_id, week_number)
             );
             """)
 
+            # Academic events table with soft delete
             cur.execute("""
             CREATE TABLE IF NOT EXISTS academic_events (
                 id TEXT PRIMARY KEY,
@@ -136,9 +153,28 @@ class ScheduleStorage:
                 location TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 is_completed INTEGER NOT NULL DEFAULT 0,
-                priority TEXT NOT NULL DEFAULT 'medium'
+                priority TEXT NOT NULL DEFAULT 'medium',
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT
             );
             """)
+
+            # Automatic forward migration for pre-existing databases (R8 / R10)
+            def _ensure_col(table: str, col: str, col_type: str) -> None:
+                cur.execute(f"PRAGMA table_info({table});")
+                cols = {row[1] for row in cur.fetchall()}
+                if col not in cols:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
+
+            _ensure_col("courses", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_col("courses", "deleted_at", "TEXT")
+            _ensure_col("time_slots", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_col("overrides", "time_slot_id", "TEXT NOT NULL DEFAULT ''")
+            _ensure_col("overrides", "is_revoked", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_col("overrides", "revoked_at", "TEXT")
+            _ensure_col("academic_events", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_col("academic_events", "deleted_at", "TEXT")
+
             cur.close()
             secure_harden_path(self.db_path)
 
@@ -158,7 +194,6 @@ class ScheduleStorage:
             row = cur.fetchone()
             cur.close()
             if row is None:
-                # Default Fall 2026 academic calendar for Central South University for Nationalities
                 default_cal = AcademicCalendar(
                     semester=semester,
                     start_date="2026-08-31",
@@ -241,7 +276,7 @@ class ScheduleStorage:
 
         days_diff = (cur_date - start_d).days
         if days_diff < 0:
-            week_num = 0  # Pre-semester
+            week_num = 0
             phase = "pre_semester"
         else:
             week_num = (days_diff // 7) + 1
@@ -254,11 +289,9 @@ class ScheduleStorage:
             else:
                 phase = "vacation"
 
-        # Calculate week's Monday and Sunday dates
         monday = cur_date - timedelta(days=cur_date.weekday())
         sunday = monday + timedelta(days=6)
 
-        # Check for holiday on cur_date
         cur_iso = cur_date.isoformat()
         current_holiday = None
         for h in cal.holidays:
@@ -269,7 +302,7 @@ class ScheduleStorage:
         return {
             "semester": semester,
             "target_date": cur_iso,
-            "day_of_week": cur_date.weekday() + 1,  # 1..7
+            "day_of_week": cur_date.weekday() + 1,
             "current_week": week_num,
             "phase": phase,
             "phase_label": {
@@ -288,20 +321,19 @@ class ScheduleStorage:
         }
 
     # -------------------------------------------------------------------------
-    # Course CRUD
+    # Course CRUD (Atomic Transactions & Soft Delete Compliance)
     # -------------------------------------------------------------------------
 
     def list_courses(self, semester: str = "2026-2027-1") -> List[Course]:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("""
-            SELECT * FROM courses WHERE semester = ? ORDER BY name ASC;
+            SELECT * FROM courses WHERE semester = ? AND is_deleted = 0 ORDER BY name ASC;
             """, (semester,))
             rows = cur.fetchall()
             courses = []
             for r in rows:
                 c = self._row_to_course(r)
-                # Load time slots
                 c.time_slots = self._get_time_slots(c.id)
                 courses.append(c)
             cur.close()
@@ -310,7 +342,7 @@ class ScheduleStorage:
     def get_course(self, course_id: str) -> Optional[Course]:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("SELECT * FROM courses WHERE id = ?;", (course_id,))
+            cur.execute("SELECT * FROM courses WHERE id = ? AND is_deleted = 0;", (course_id,))
             row = cur.fetchone()
             cur.close()
             if row is None:
@@ -320,62 +352,86 @@ class ScheduleStorage:
             return c
 
     def save_course(self, course: Course) -> None:
+        """Saves course and slots in an atomic transaction. Soft-deletes superseded slots."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
-            INSERT INTO courses (
-                id, name, code, teacher, classroom, credits, semester,
-                color, notes, course_group_id, meeting_url, reminder_minutes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                code = excluded.code,
-                teacher = excluded.teacher,
-                classroom = excluded.classroom,
-                credits = excluded.credits,
-                semester = excluded.semester,
-                color = excluded.color,
-                notes = excluded.notes,
-                course_group_id = excluded.course_group_id,
-                meeting_url = excluded.meeting_url,
-                reminder_minutes = excluded.reminder_minutes;
-            """, (
-                course.id, course.name, course.code, course.teacher, course.classroom,
-                course.credits, course.semester, course.color, course.notes,
-                course.course_group_id, course.meeting_url, course.reminder_minutes
-            ))
+            try:
+                cur.execute("BEGIN TRANSACTION;")
 
-            # Replace time slots
-            cur.execute("DELETE FROM time_slots WHERE course_id = ?;", (course.id,))
-            for ts in course.time_slots:
-                cw_json = json.dumps(ts.custom_weeks)
                 cur.execute("""
-                INSERT INTO time_slots (
-                    id, course_id, day_of_week, start_period, end_period,
-                    start_time, end_time, week_pattern, start_week, end_week,
-                    custom_weeks_json, classroom
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO courses (
+                    id, name, code, teacher, classroom, credits, semester,
+                    color, notes, course_group_id, meeting_url, reminder_minutes,
+                    is_deleted, deleted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    code = excluded.code,
+                    teacher = excluded.teacher,
+                    classroom = excluded.classroom,
+                    credits = excluded.credits,
+                    semester = excluded.semester,
+                    color = excluded.color,
+                    notes = excluded.notes,
+                    course_group_id = excluded.course_group_id,
+                    meeting_url = excluded.meeting_url,
+                    reminder_minutes = excluded.reminder_minutes,
+                    is_deleted = 0,
+                    deleted_at = NULL;
                 """, (
-                    ts.id or f"ts_{uuid.uuid4().hex[:8]}", course.id, ts.day_of_week,
-                    ts.start_period, ts.end_period, ts.start_time, ts.end_time,
-                    ts.week_pattern, ts.start_week, ts.end_week, cw_json,
-                    ts.classroom or course.classroom
+                    course.id, course.name, course.code, course.teacher, course.classroom,
+                    course.credits, course.semester, course.color, course.notes,
+                    course.course_group_id, course.meeting_url, course.reminder_minutes
                 ))
-            cur.close()
+
+                # Soft delete existing slots instead of physical deletion (Zero Delete)
+                cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course.id,))
+
+                # Insert active slots
+                for ts in course.time_slots:
+                    cw_json = json.dumps(ts.custom_weeks)
+                    cur.execute("""
+                    INSERT INTO time_slots (
+                        id, course_id, day_of_week, start_period, end_period,
+                        start_time, end_time, week_pattern, start_week, end_week,
+                        custom_weeks_json, classroom, is_deleted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+                    """, (
+                        ts.id or f"ts_{uuid.uuid4().hex[:8]}", course.id, ts.day_of_week,
+                        ts.start_period, ts.end_period, ts.start_time, ts.end_time,
+                        ts.week_pattern, ts.start_week, ts.end_week, cw_json,
+                        ts.classroom or course.classroom
+                    ))
+
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def delete_course(self, course_id: str) -> None:
+        """Soft delete (Zero Delete compliance). Never physically drops rows."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("DELETE FROM time_slots WHERE course_id = ?;", (course_id,))
-            cur.execute("DELETE FROM overrides WHERE course_id = ?;", (course_id,))
-            cur.execute("DELETE FROM courses WHERE id = ?;", (course_id,))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                now_iso = datetime.now(timezone.utc).isoformat()
+                cur.execute("UPDATE courses SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, course_id))
+                cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course_id,))
+                cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE course_id = ?;", (now_iso, course_id))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def _get_time_slots(self, course_id: str) -> List[CourseTimeSlot]:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("""
-            SELECT * FROM time_slots WHERE course_id = ? ORDER BY day_of_week, start_period;
+            SELECT * FROM time_slots WHERE course_id = ? AND is_deleted = 0 ORDER BY day_of_week, start_period;
             """, (course_id,))
             rows = cur.fetchall()
             cur.close()
@@ -393,6 +449,7 @@ class ScheduleStorage:
                     end_week=int(r["end_week"]),
                     custom_weeks=json.loads(r["custom_weeks_json"]),
                     classroom=r["classroom"],
+                    is_deleted=bool(r["is_deleted"]),
                 )
                 for r in rows
             ]
@@ -411,56 +468,88 @@ class ScheduleStorage:
             course_group_id=r["course_group_id"],
             meeting_url=r["meeting_url"],
             reminder_minutes=int(r["reminder_minutes"]),
+            is_deleted=bool(r["is_deleted"]),
+            deleted_at=r["deleted_at"],
         )
 
     # -------------------------------------------------------------------------
-    # Overrides (Week-Specific Temporary Adjustments)
+    # Overrides (Occurrence-Level Binding via time_slot_id & Soft Revocation)
     # -------------------------------------------------------------------------
 
     def add_override(self, override: CourseOverride) -> None:
+        """
+        Stores an occurrence-level override bound to `time_slot_id`.
+        Synchronously derives exact start and end times if periods are rescheduled.
+        """
+        # R7: Synchronize period and absolute time derivation
+        new_s_time = override.new_start_time
+        new_e_time = override.new_end_time
+        if override.new_start_period is not None:
+            end_p = override.new_end_period or (override.new_start_period + 1)
+            derived_s, derived_e = period_range_to_time(override.new_start_period, end_p)
+            new_s_time = new_s_time or derived_s
+            new_e_time = new_e_time or derived_e
+
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
-            INSERT INTO overrides (
-                id, course_id, semester, week_number, day_of_week,
-                override_type, new_classroom, new_day_of_week,
-                new_start_period, new_end_period, new_start_time, new_end_time, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                override_type = excluded.override_type,
-                new_classroom = excluded.new_classroom,
-                new_day_of_week = excluded.new_day_of_week,
-                new_start_period = excluded.new_start_period,
-                new_end_period = excluded.new_end_period,
-                new_start_time = excluded.new_start_time,
-                new_end_time = excluded.new_end_time,
-                reason = excluded.reason;
-            """, (
-                override.id, override.course_id, override.semester, override.week_number,
-                override.day_of_week, override.override_type, override.new_classroom,
-                override.new_day_of_week, override.new_start_period, override.new_end_period,
-                override.new_start_time, override.new_end_time, override.reason
-            ))
-            cur.close()
+            try:
+                cur.execute("BEGIN TRANSACTION;")
+                cur.execute("""
+                INSERT INTO overrides (
+                    id, time_slot_id, course_id, semester, week_number, day_of_week,
+                    override_type, new_classroom, new_day_of_week,
+                    new_start_period, new_end_period, new_start_time, new_end_time,
+                    reason, is_revoked, revoked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                ON CONFLICT(time_slot_id, week_number) DO UPDATE SET
+                    override_type = excluded.override_type,
+                    new_classroom = excluded.new_classroom,
+                    new_day_of_week = excluded.new_day_of_week,
+                    new_start_period = excluded.new_start_period,
+                    new_end_period = excluded.new_end_period,
+                    new_start_time = excluded.new_start_time,
+                    new_end_time = excluded.new_end_time,
+                    reason = excluded.reason,
+                    is_revoked = 0,
+                    revoked_at = NULL;
+                """, (
+                    override.id, override.time_slot_id, override.course_id, override.semester,
+                    override.week_number, override.day_of_week, override.override_type,
+                    override.new_classroom, override.new_day_of_week, override.new_start_period,
+                    override.new_end_period, new_s_time, new_e_time, override.reason
+                ))
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+            finally:
+                cur.close()
 
     def delete_override(self, override_id: str) -> None:
+        """Soft revocation (Zero Delete compliance)."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("DELETE FROM overrides WHERE id = ?;", (override_id,))
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE id = ?;", (now_iso, override_id))
             cur.close()
 
     def list_overrides(self, semester: str = "2026-2027-1", week_number: Optional[int] = None) -> List[CourseOverride]:
         with self._lock:
             cur = self._conn.cursor()
             if week_number is not None:
-                cur.execute("SELECT * FROM overrides WHERE semester = ? AND week_number = ?;", (semester, week_number))
+                cur.execute("""
+                SELECT * FROM overrides WHERE semester = ? AND week_number = ? AND is_revoked = 0;
+                """, (semester, week_number))
             else:
-                cur.execute("SELECT * FROM overrides WHERE semester = ?;", (semester,))
+                cur.execute("""
+                SELECT * FROM overrides WHERE semester = ? AND is_revoked = 0;
+                """, (semester,))
             rows = cur.fetchall()
             cur.close()
             return [
                 CourseOverride(
                     id=r["id"],
+                    time_slot_id=r["time_slot_id"],
                     course_id=r["course_id"],
                     semester=r["semester"],
                     week_number=int(r["week_number"]),
@@ -473,12 +562,14 @@ class ScheduleStorage:
                     new_start_time=r["new_start_time"],
                     new_end_time=r["new_end_time"],
                     reason=r["reason"],
+                    is_revoked=bool(r["is_revoked"]),
+                    revoked_at=r["revoked_at"],
                 )
                 for r in rows
             ]
 
     # -------------------------------------------------------------------------
-    # Effective Week Schedule Resolution
+    # Effective Week Schedule Resolution (Exact Slot-Occurrence Key)
     # -------------------------------------------------------------------------
 
     def get_effective_week_schedule(
@@ -488,23 +579,22 @@ class ScheduleStorage:
     ) -> List[Dict[str, Any]]:
         """
         Calculates the active courses for a given week.
-        Merges base schedules with week-specific overrides:
-        - Filters by week range and odd/even pattern
-        - Replaces classrooms on 'relocate'
-        - Replaces day/time on 'reschedule'
-        - Suppresses course on 'cancel'
-        - Inserts extra slots on 'makeup'
+        Keyed on exact `time_slot_id` so other slots on the same day are never contaminated.
         """
         courses = self.list_courses(semester)
         overrides = self.list_overrides(semester, week_number)
-        override_map: Dict[Tuple[str, int], CourseOverride] = {
-            (o.course_id, o.day_of_week): o for o in overrides
+        # Occurrence-level map: time_slot_id -> override
+        slot_override_map: Dict[str, CourseOverride] = {
+            o.time_slot_id: o for o in overrides
         }
 
         active_slots: List[Dict[str, Any]] = []
 
         for c in courses:
             for ts in c.time_slots:
+                if ts.is_deleted:
+                    continue
+
                 # 1. Check week range
                 if not (ts.start_week <= week_number <= ts.end_week):
                     continue
@@ -518,8 +608,8 @@ class ScheduleStorage:
                 if ts.week_pattern == "custom" and ts.custom_weeks and week_number not in ts.custom_weeks:
                     continue
 
-                # 3. Check overrides
-                ov = override_map.get((c.id, ts.day_of_week))
+                # 3. Check overrides strictly by time_slot_id (R6)
+                ov = slot_override_map.get(ts.id)
                 status = "normal"
                 effective_day = ts.day_of_week
                 effective_start_p = ts.start_period
@@ -539,9 +629,9 @@ class ScheduleStorage:
                         override_reason = ov.reason or f"调换教室至 {effective_room}"
                     elif ov.override_type == "reschedule":
                         status = "rescheduled"
-                        effective_day = ov.new_day_of_week or effective_day
-                        effective_start_p = ov.new_start_period or effective_start_p
-                        effective_end_p = ov.new_end_period or effective_end_p
+                        effective_day = ov.new_day_of_week if ov.new_day_of_week is not None else effective_day
+                        effective_start_p = ov.new_start_period if ov.new_start_period is not None else effective_start_p
+                        effective_end_p = ov.new_end_period if ov.new_end_period is not None else effective_end_p
                         effective_start_t = ov.new_start_time or effective_start_t
                         effective_end_t = ov.new_end_time or effective_end_t
                         if ov.new_classroom:
@@ -549,6 +639,7 @@ class ScheduleStorage:
                         override_reason = ov.reason or "调课"
 
                 active_slots.append({
+                    "time_slot_id": ts.id,
                     "course_id": c.id,
                     "course_name": c.name,
                     "code": c.code,
@@ -577,7 +668,11 @@ class ScheduleStorage:
             if ov.override_type == "makeup":
                 matched_course = next((c for c in courses if c.id == ov.course_id), None)
                 if matched_course:
+                    start_p = ov.new_start_period or 1
+                    end_p = ov.new_end_period or 2
+                    s_time, e_time = period_range_to_time(start_p, end_p)
                     active_slots.append({
+                        "time_slot_id": ov.time_slot_id,
                         "course_id": matched_course.id,
                         "course_name": matched_course.name,
                         "code": matched_course.code,
@@ -589,10 +684,10 @@ class ScheduleStorage:
                         "meeting_url": matched_course.meeting_url,
                         "reminder_minutes": matched_course.reminder_minutes,
                         "day_of_week": ov.new_day_of_week or ov.day_of_week,
-                        "start_period": ov.new_start_period or 1,
-                        "end_period": ov.new_end_period or 2,
-                        "start_time": ov.new_start_time or "08:00",
-                        "end_time": ov.new_end_time or "09:40",
+                        "start_period": start_p,
+                        "end_period": end_p,
+                        "start_time": ov.new_start_time or s_time,
+                        "end_time": ov.new_end_time or e_time,
                         "classroom": ov.new_classroom or matched_course.classroom,
                         "original_classroom": matched_course.classroom,
                         "week_pattern": "all",
@@ -601,12 +696,11 @@ class ScheduleStorage:
                         "override_id": ov.id,
                     })
 
-        # Sort by day_of_week ASC, start_period ASC
         active_slots.sort(key=lambda s: (s["day_of_week"], s["start_period"]))
         return active_slots
 
     # -------------------------------------------------------------------------
-    # Academic Events & Integrated Deadlines
+    # Academic Events (Soft Delete Compliance)
     # -------------------------------------------------------------------------
 
     def list_events(
@@ -617,7 +711,7 @@ class ScheduleStorage:
     ) -> List[AcademicEvent]:
         with self._lock:
             cur = self._conn.cursor()
-            query = "SELECT * FROM academic_events WHERE semester = ?"
+            query = "SELECT * FROM academic_events WHERE semester = ? AND is_deleted = 0"
             params: list[Any] = [semester]
             if week_number is not None:
                 query += " AND week_number = ?"
@@ -643,6 +737,8 @@ class ScheduleStorage:
                     notes=r["notes"],
                     is_completed=bool(r["is_completed"]),
                     priority=r["priority"],
+                    is_deleted=bool(r["is_deleted"]),
+                    deleted_at=r["deleted_at"],
                 )
                 for r in rows
             ]
@@ -653,8 +749,9 @@ class ScheduleStorage:
             cur.execute("""
             INSERT INTO academic_events (
                 id, semester, title, event_type, due_date, due_time,
-                week_number, related_course_id, location, notes, is_completed, priority
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                week_number, related_course_id, location, notes, is_completed,
+                priority, is_deleted, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 event_type = excluded.event_type,
@@ -665,7 +762,9 @@ class ScheduleStorage:
                 location = excluded.location,
                 notes = excluded.notes,
                 is_completed = excluded.is_completed,
-                priority = excluded.priority;
+                priority = excluded.priority,
+                is_deleted = 0,
+                deleted_at = NULL;
             """, (
                 event.id, event.semester, event.title, event.event_type,
                 event.due_date, event.due_time, event.week_number,
@@ -677,7 +776,7 @@ class ScheduleStorage:
     def toggle_event_completed(self, event_id: str) -> bool:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("SELECT is_completed FROM academic_events WHERE id = ?;", (event_id,))
+            cur.execute("SELECT is_completed FROM academic_events WHERE id = ? AND is_deleted = 0;", (event_id,))
             row = cur.fetchone()
             if not row:
                 cur.close()
@@ -688,9 +787,11 @@ class ScheduleStorage:
             return bool(new_val)
 
     def delete_event(self, event_id: str) -> None:
+        """Soft delete (Zero Delete compliance)."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("DELETE FROM academic_events WHERE id = ?;", (event_id,))
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute("UPDATE academic_events SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, event_id))
             cur.close()
 
     # -------------------------------------------------------------------------
@@ -698,7 +799,6 @@ class ScheduleStorage:
     # -------------------------------------------------------------------------
 
     def get_course_teachers(self, semester: str = "2026-2027-1") -> List[str]:
-        """Returns the distinct list of active teacher names for the semester."""
         courses = self.list_courses(semester)
         teachers = set()
         for c in courses:

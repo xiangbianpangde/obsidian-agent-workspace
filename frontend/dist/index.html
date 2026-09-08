@@ -1092,7 +1092,12 @@
 
     // API 请求封装
     async function api(path, opts = {}) {
-      const res = await fetch('/api' + path, opts);
+      const options = { ...opts };
+      options.headers = { ...(options.headers || {}) };
+      if (options.body && typeof options.body === 'string' && !options.headers['Content-Type']) {
+        options.headers['Content-Type'] = 'application/json';
+      }
+      const res = await fetch('/api' + path, options);
       if (!res.ok) {
         let errData = {};
         try { errData = await res.json(); } catch(e) {}
@@ -2738,7 +2743,7 @@
 
     function renderImFocusFeed(allMessages) {
       el.imFocusFeedList.innerHTML = '';
-      const focusMsgs = (allMessages || []).filter(m => m.focus_tags && m.focus_tags.length > 0);
+      const focusMsgs = (allMessages || []).filter(m => m.focus_tags && m.focus_tags.length > 0 && !m.focus_tags.includes('folded_group'));
       el.imStatFocusCount.textContent = focusMsgs.length;
 
       if (focusMsgs.length === 0) {
@@ -3198,16 +3203,39 @@
         }
       };
 
-      // Meeting URL button
-      scheduleEl.btnOpenMeetingLink.onclick = () => {
+      // Meeting URL button with backend persistence (R12)
+      scheduleEl.btnOpenMeetingLink.onclick = async () => {
         if (slot.meeting_url) {
           window.open(slot.meeting_url, '_blank');
         } else {
           const url = prompt('请输入该课程的腾讯会议或线上课堂链接:');
-          if (url) {
-            slot.meeting_url = url;
-            alert('线上会议链接已保存');
+          if (url && url.trim()) {
+            try {
+              await api(`/schedule/course/${encodeURIComponent(slot.course_id)}/meeting`, {
+                method: 'PUT',
+                body: JSON.stringify({ meeting_url: url.trim() })
+              });
+              slot.meeting_url = url.trim();
+              alert('线上会议链接已成功保存！');
+            } catch (err) {
+              alert('保存会议链接失败: ' + err.message);
+            }
           }
+        }
+      };
+
+      // Reminder dropdown persistence (R12)
+      scheduleEl.selectReminderMinutes.onchange = async (e) => {
+        const mins = parseInt(e.target.value, 10);
+        try {
+          await api(`/schedule/course/${encodeURIComponent(slot.course_id)}/reminder`, {
+            method: 'PUT',
+            body: JSON.stringify({ reminder_minutes: mins })
+          });
+          slot.reminder_minutes = mins;
+          loadUpcomingReminders();
+        } catch (err) {
+          alert('保存提醒设置失败: ' + err.message);
         }
       };
 
@@ -3338,6 +3366,7 @@
       if (!slot) return;
       const ovType = scheduleEl.selectOverrideType.value;
       const payload = {
+        time_slot_id: slot.time_slot_id,
         course_id: slot.course_id,
         semester: state.schedule.semester,
         week_number: state.schedule.selectedWeek,

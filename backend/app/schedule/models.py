@@ -1,4 +1,10 @@
-"""Schedule & Academic Calendar Data Models."""
+"""Schedule & Academic Calendar Data Models (v0.2.8 / R6-R10).
+
+Implements:
+- Slot-level occurrence binding for CourseOverride (time_slot_id)
+- Zero Delete compliance via soft delete (is_deleted, is_revoked)
+- Consistent period-to-time derivation
+"""
 
 from __future__ import annotations
 
@@ -22,6 +28,7 @@ class CourseTimeSlot:
     end_week: int = 16
     custom_weeks: List[int] = field(default_factory=list)
     classroom: str = ""
+    is_deleted: bool = False
 
 
 @dataclass
@@ -40,15 +47,20 @@ class Course:
     meeting_url: Optional[str] = None      # Tencent Meeting or Zoom link
     reminder_minutes: int = 15             # Default 15 mins before class
     time_slots: List[CourseTimeSlot] = field(default_factory=list)
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
 
 
 @dataclass
 class CourseOverride:
     """
-    Week-specific temporary change.
+    Occurrence-level temporary change.
+    Explicitly binds to `time_slot_id` so other slots on the same day are unaffected.
     Does NOT modify the base semester schedule.
+    Zero Delete: revoked overrides are preserved with is_revoked=True.
     """
     id: str
+    time_slot_id: str  # Precise slot occurrence binding
     course_id: str
     semester: str
     week_number: int
@@ -61,6 +73,8 @@ class CourseOverride:
     new_start_time: Optional[str] = None
     new_end_time: Optional[str] = None
     reason: str = ""
+    is_revoked: bool = False
+    revoked_at: Optional[str] = None
 
 
 @dataclass
@@ -69,7 +83,7 @@ class HolidayRule:
     start_date: str  # "YYYY-MM-DD"
     end_date: str    # "YYYY-MM-DD"
     is_off: bool = True
-    makeup_days: List[Dict[str, str]] = field(default_factory=list)  # [{"work_date": "...", "take_day": "..."}]
+    makeup_days: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -99,6 +113,8 @@ class AcademicEvent:
     notes: str = ""
     is_completed: bool = False
     priority: Literal["low", "medium", "high", "urgent"] = "medium"
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
 
 
 # Standard Period Times (Central South University for Nationalities / 中南民族大学通用作息时间)
@@ -118,6 +134,7 @@ STANDARD_PERIODS = [
 
 
 def period_range_to_time(start_p: int, end_p: int) -> tuple[str, str]:
+    """Derives exact start and end times from start and end period numbers."""
     start_time = "08:00"
     end_time = "09:40"
     for p in STANDARD_PERIODS:

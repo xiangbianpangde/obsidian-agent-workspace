@@ -52,9 +52,13 @@ app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lif
 
 @app.middleware("http")
 async def im_no_store_middleware(request: Request, call_next):
-    """Keep all personal IM success/error responses out of browser/proxy caches."""
+    """Keep all personal IM & Schedule success/error responses out of browser/proxy caches."""
     response = await call_next(request)
-    if request.url.path.startswith("/api/im") or request.url.path.startswith("/internal/im"):
+    if (
+        request.url.path.startswith("/api/im")
+        or request.url.path.startswith("/internal/im")
+        or request.url.path.startswith("/api/schedule")
+    ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
     return response

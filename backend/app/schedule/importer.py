@@ -1,4 +1,4 @@
-"""Schedule Parsers & Importers (Markdown Table, JSON, Image Extraction)."""
+"""Schedule Parsers & Importers (v0.2.8 / R9 Multi-semester Isolation)."""
 
 from __future__ import annotations
 
@@ -46,7 +46,6 @@ def parse_day_of_week(raw: str) -> int:
 
 
 def parse_period_range(raw: str) -> Tuple[int, int]:
-    # e.g. "第1–2节", "1-2", "第9-11节", "3-4节"
     nums = [int(n) for n in re.findall(r"\d+", raw)]
     if len(nums) == 1:
         return nums[0], nums[0]
@@ -55,8 +54,7 @@ def parse_period_range(raw: str) -> Tuple[int, int]:
     return 1, 2
 
 
-def parse_week_pattern(raw: str) -> Tuple[int, int, str]:
-    # e.g. "2–16周（双）", "1–14周", "9–15周（单）", "1-16周"
+def parse_week_pattern(raw: str) -> Tuple[int, int, str, List[int]]:
     pattern = "all"
     if "单" in raw:
         pattern = "odd"
@@ -65,16 +63,17 @@ def parse_week_pattern(raw: str) -> Tuple[int, int, str]:
 
     nums = [int(n) for n in re.findall(r"\d+", raw)]
     if len(nums) == 1:
-        return nums[0], nums[0], pattern
+        return nums[0], nums[0], pattern, [nums[0]]
     if len(nums) >= 2:
-        return nums[0], nums[1], pattern
-    return 1, 16, pattern
+        return nums[0], nums[1], pattern, []
+    return 1, 16, pattern, []
 
 
 def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027-1") -> List[Course]:
     """
     Parses a standard markdown course table into structured Course objects.
-    Directly handles the user's Obsidian 课表.md structure.
+    Enforces multi-semester isolation: course IDs incorporate `semester`
+    so different semesters never collide or overwrite each other.
     """
     lines = markdown_text.splitlines()
     in_table = False
@@ -106,17 +105,19 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
                     "classroom": cols[7] if len(cols) >= 8 else (cols[5] if len(cols) >= 6 else ""),
                 })
 
-    # Group by course name + code + teacher
+    # Group by semester + course name + teacher
     course_map: Dict[str, Course] = {}
 
     for row in raw_rows:
         name = row["name"]
         if not name:
             continue
-        course_key = f"{name}::{row.get('teacher', '')}"
+        # Multi-semester isolation: key includes semester!
+        course_key = f"{semester}::{name}::{row.get('teacher', '')}"
 
         if course_key not in course_map:
-            cid = f"crs_{hashlib.md5(course_key.encode()).hexdigest()[:10]}"
+            sem_clean = semester.replace("-", "_")
+            cid = f"crs_{sem_clean}_{hashlib.md5(course_key.encode()).hexdigest()[:10]}"
             course_map[course_key] = Course(
                 id=cid,
                 name=name,
@@ -132,7 +133,7 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
         day = parse_day_of_week(row["day"])
         start_p, end_p = parse_period_range(row["period"])
         start_t, end_t = period_range_to_time(start_p, end_p)
-        start_w, end_w, pattern = parse_week_pattern(row["weeks"])
+        start_w, end_w, pattern, custom_w = parse_week_pattern(row["weeks"])
         room = row.get("classroom") or course.classroom
 
         slot = CourseTimeSlot(
@@ -146,6 +147,7 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
             week_pattern=pattern,
             start_week=start_w,
             end_week=end_w,
+            custom_weeks=custom_w,
             classroom=room,
         )
         course.time_slots.append(slot)
@@ -155,12 +157,19 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
 
 def import_schedule_from_obsidian_vault(
     vault_path: Path,
-    semester: str = "2026-2027-1"
+    semester: str = "2026-2027-1",
+    relative_path: str = "07.学习笔记/大二上/课表.md"
 ) -> List[Course]:
-    """Finds and parses 课表.md inside the user's Obsidian Vault."""
-    candidates = list(vault_path.glob("**/课表.md"))
-    if not candidates:
-        raise FileNotFoundError("未在 Obsidian 知识库中找到 课表.md 文件")
-    target = candidates[0]
+    """
+    Finds and parses 课表.md inside the user's Obsidian Vault.
+    Prefers the canonical `07.学习笔记/大二上/课表.md` path.
+    """
+    target = vault_path / relative_path
+    if not target.is_file():
+        candidates = list(vault_path.glob("**/课表.md"))
+        if not candidates:
+            raise FileNotFoundError(f"未在 Obsidian 知识库中找到课表文件 ({relative_path})")
+        target = candidates[0]
+
     content = target.read_text(encoding="utf-8")
-    return parse_markdown_schedule_table(content, semester)
+    return parse_markdown_schedule_table(content, semester=semester)

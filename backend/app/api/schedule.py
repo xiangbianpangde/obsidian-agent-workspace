@@ -1,4 +1,4 @@
-"""FastAPI Router for Course Schedule & Academic Calendar."""
+"""FastAPI Router for Course Schedule & Academic Calendar (v0.2.8 / R6-R10)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from backend.app.schedule.models import (
     CourseOverride,
     CourseTimeSlot,
     HolidayRule,
+    period_range_to_time,
 )
 from backend.app.schedule.reminders import get_upcoming_reminders
 from backend.app.schedule.storage import ScheduleStorage
@@ -34,7 +35,6 @@ def get_schedule_storage() -> ScheduleStorage:
     global _storage
     if _storage is None:
         _storage = ScheduleStorage()
-        # Seed initial courses from Obsidian vault if empty
         if len(_storage.list_courses()) == 0:
             try:
                 cfg = load_config()
@@ -81,6 +81,7 @@ class CourseIn(BaseModel):
 
 
 class OverrideIn(BaseModel):
+    time_slot_id: str  # R6: Exact slot occurrence binding
     course_id: str
     semester: str = "2026-2027-1"
     week_number: int
@@ -125,13 +126,20 @@ class MarkdownImportIn(BaseModel):
     semester: str = "2026-2027-1"
 
 
+class MeetingUrlIn(BaseModel):
+    meeting_url: str
+
+
+class ReminderMinutesIn(BaseModel):
+    reminder_minutes: int = Field(..., ge=5, le=120)
+
+
 # -----------------------------------------------------------------------------
 # Endpoints
 # -----------------------------------------------------------------------------
 
 @router.get("/current-week")
 def get_current_week_info(semester: str = Query("2026-2027-1")) -> Dict[str, Any]:
-    """Returns dynamic week calculation based on academic calendar start date."""
     storage = get_schedule_storage()
     return storage.compute_current_week(semester=semester)
 
@@ -141,7 +149,6 @@ def get_week_schedule(
     week_number: int,
     semester: str = Query("2026-2027-1")
 ) -> Dict[str, Any]:
-    """Returns effective course slots for a given week (with single-week overrides merged)."""
     storage = get_schedule_storage()
     slots = storage.get_effective_week_schedule(week_number=week_number, semester=semester)
     week_info = storage.compute_current_week(semester=semester)
@@ -176,7 +183,7 @@ def get_course(course_id: str) -> Dict[str, Any]:
 @router.post("/course")
 def create_course(payload: CourseIn) -> Dict[str, Any]:
     storage = get_schedule_storage()
-    cid = payload.id or f"crs_{uuid.uuid4().hex[:10]}"
+    cid = payload.id or f"crs_{payload.semester.replace('-', '_')}_{uuid.uuid4().hex[:8]}"
     slots = [
         CourseTimeSlot(
             id=ts.id or f"ts_{uuid.uuid4().hex[:8]}",
@@ -219,20 +226,44 @@ def update_course(course_id: str, payload: CourseIn) -> Dict[str, Any]:
     return create_course(payload)
 
 
+@router.put("/course/{course_id}/meeting")
+def update_course_meeting(course_id: str, payload: MeetingUrlIn) -> Dict[str, Any]:
+    storage = get_schedule_storage()
+    course = storage.get_course(course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    course.meeting_url = payload.meeting_url
+    storage.save_course(course)
+    return {"status": "ok", "course_id": course_id, "meeting_url": course.meeting_url}
+
+
+@router.put("/course/{course_id}/reminder")
+def update_course_reminder(course_id: str, payload: ReminderMinutesIn) -> Dict[str, Any]:
+    storage = get_schedule_storage()
+    course = storage.get_course(course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    course.reminder_minutes = payload.reminder_minutes
+    storage.save_course(course)
+    return {"status": "ok", "course_id": course_id, "reminder_minutes": course.reminder_minutes}
+
+
 @router.delete("/course/{course_id}")
 def delete_course(course_id: str) -> Dict[str, Any]:
+    """Soft delete course (Zero Delete compliance)."""
     storage = get_schedule_storage()
     storage.delete_course(course_id)
-    return {"status": "ok", "deleted": course_id}
+    return {"status": "ok", "soft_deleted": course_id}
 
 
 @router.post("/override")
 def add_override(payload: OverrideIn) -> Dict[str, Any]:
-    """Single-week temporary schedule change (cancel, relocate, reschedule, makeup)."""
+    """Occurrence-level temporary override (cancel, relocate, reschedule, makeup)."""
     storage = get_schedule_storage()
     oid = f"ov_{uuid.uuid4().hex[:10]}"
     override = CourseOverride(
         id=oid,
+        time_slot_id=payload.time_slot_id,
         course_id=payload.course_id,
         semester=payload.semester,
         week_number=payload.week_number,
@@ -252,9 +283,10 @@ def add_override(payload: OverrideIn) -> Dict[str, Any]:
 
 @router.delete("/override/{override_id}")
 def delete_override(override_id: str) -> Dict[str, Any]:
+    """Soft revocation of override (Zero Delete compliance)."""
     storage = get_schedule_storage()
     storage.delete_override(override_id)
-    return {"status": "ok", "deleted": override_id}
+    return {"status": "ok", "soft_revoked": override_id}
 
 
 @router.get("/calendar")
@@ -324,9 +356,10 @@ def toggle_event(event_id: str) -> Dict[str, Any]:
 
 @router.delete("/event/{event_id}")
 def delete_event(event_id: str) -> Dict[str, Any]:
+    """Soft delete event (Zero Delete compliance)."""
     storage = get_schedule_storage()
     storage.delete_event(event_id)
-    return {"status": "ok", "deleted": event_id}
+    return {"status": "ok", "soft_deleted": event_id}
 
 
 @router.get("/reminders/upcoming")

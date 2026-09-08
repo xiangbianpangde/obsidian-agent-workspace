@@ -1,6 +1,7 @@
 """Comprehensive Test Suite for Schedule, Academic Calendar & Focus Rules."""
 
 import json
+import sqlite3
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
@@ -138,6 +139,7 @@ def test_single_week_overrides_isolation():
         # Relocate Week 2's classroom to 15204
         ov = CourseOverride(
             id="ov_week2_relocate",
+            time_slot_id=prob_course.time_slots[0].id,
             course_id=prob_course.id,
             semester="2026-2027-1",
             week_number=2,
@@ -189,6 +191,7 @@ def test_upcoming_reminders_and_override_synchronization():
         prob_course = next(c for c in courses if "概率论" in c.name)
         storage.add_override(CourseOverride(
             id="ov_cancel_prob",
+            time_slot_id=prob_course.time_slots[0].id,
             course_id=prob_course.id,
             semester="2026-2027-1",
             week_number=2,
@@ -278,6 +281,17 @@ def test_user_specific_focus_rules_matrix():
     assert "leader_urgent_todo" in tags
     assert "康老师" in reasons[0]
 
+    # 6.3B QQ: 康老师在班级群发言 -> 必须依然是最高优先级 leader_urgent_todo！(R3)
+    tags_kang_class, reasons_kang_class = evaluate_focus_rules(
+        channel_name="人工2502班通知群",
+        channel_type="group",
+        source="qq",
+        sender_name="康老师",
+        text="大家下午好，关于选课有一点说明"
+    )
+    assert "leader_urgent_todo" in tags_kang_class
+    assert "康老师" in reasons_kang_class[0]
+
     # 6.4 QQ: 2026新思路中高层群 (工作群重点)
     tags, reasons = evaluate_focus_rules(
         channel_name="2026新思路中高层群",
@@ -289,7 +303,7 @@ def test_user_specific_focus_rules_matrix():
     assert "work_group_focus" in tags
     assert "新思路" in reasons[0]
 
-    # 6.5 QQ: 普通群聊 (默认折叠)
+    # 6.5 QQ: 普通群聊 (默认折叠，不打入 focus 标签) (R4)
     tags, reasons = evaluate_focus_rules(
         channel_name="王者荣耀开黑群",
         channel_type="group",
@@ -297,17 +311,17 @@ def test_user_specific_focus_rules_matrix():
         sender_name="张三",
         text="今晚来一把"
     )
-    assert "folded_group" in tags
+    assert tags == []  # Folded groups must have EMPTY tags so they are excluded from focus feed!
 
-    # 6.6 微信: 未处理消息正常登记待办
-    tags, reasons = evaluate_focus_rules(
-        channel_name="张同学",
-        channel_type="direct",
+    # 6.6 微信: 普通群聊未处理消息全量登记待办 (R4)
+    tags_wx_grp, reasons_wx_grp = evaluate_focus_rules(
+        channel_name="骑行爱好者俱乐部",
+        channel_type="group",
         source="wechat",
-        sender_name="张同学",
-        text="明天一起去图书馆吗"
+        sender_name="李四",
+        text="周六环湖骑行报名"
     )
-    assert "wechat_todo" in tags
+    assert "wechat_todo" in tags_wx_grp
 
     # 6.7 企微: 课程群内仅关注任课老师
     # Case A: 老师发言 -> 登记为 course_teacher_notice
@@ -321,15 +335,17 @@ def test_user_specific_focus_rules_matrix():
     assert "course_teacher_notice" in tags_t
     assert "谢金翠" in reasons_t[0]
 
-    # Case B: 同学发言 -> 不登记！
+    # Case B: 同学发言 -> 不登记！即使携带 @本人 也不得穿透泄露！(R5)
     tags_s, reasons_s = evaluate_focus_rules(
         channel_name="大学物理B(2)-2026-2027-1",
         channel_type="group",
         source="wecom",
         sender_name="李同学",
-        text="收到老师"
+        text="收到老师 @袁浩岚",
+        mentions=[{"is_self": True}]
     )
     assert "course_teacher_notice" not in tags_s
+    assert "mention_self" not in tags_s
     assert len(tags_s) == 0
 
     # 6.8 企微: 个人私聊必须登记待处理
@@ -393,6 +409,199 @@ def test_schedule_api_endpoints():
     assert r6.status_code == 200
     assert r6.json()["is_completed"] is True
 
-    # 6. DELETE event
+    # 6. DELETE event (Soft Delete compliance)
     r7 = client.delete(f"/api/schedule/event/{eid}")
     assert r7.status_code == 200
+    assert r7.json()["status"] == "ok"
+
+
+# -----------------------------------------------------------------------------
+# 8. Same-Day Multiple Slots Override Isolation (R6)
+# -----------------------------------------------------------------------------
+
+def test_same_day_multiple_slots_override_isolation():
+    """
+    R6: A course with two slots on the same day (e.g. slot 1 in morning,
+    slot 2 in evening). Applying an override to slot 1 MUST NOT affect slot 2!
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+        course = Course(
+            id="crs_multi_slot",
+            name="数字电子技术(B)",
+            semester="2026-2027-1",
+            classroom="15110",
+            time_slots=[
+                CourseTimeSlot(
+                    id="ts_morning_1",
+                    course_id="crs_multi_slot",
+                    day_of_week=1,
+                    start_period=1,
+                    end_period=2,
+                    start_time="08:00",
+                    end_time="09:40",
+                    start_week=1,
+                    end_week=16,
+                    classroom="15110"
+                ),
+                CourseTimeSlot(
+                    id="ts_evening_2",
+                    course_id="crs_multi_slot",
+                    day_of_week=1,
+                    start_period=9,
+                    end_period=11,
+                    start_time="18:40",
+                    end_time="21:05",
+                    start_week=1,
+                    end_week=16,
+                    classroom="S090307"
+                ),
+            ]
+        )
+        storage.save_course(course)
+
+        # Relocate ONLY the morning slot (ts_morning_1) for Week 2
+        ov = CourseOverride(
+            id="ov_morning_only",
+            time_slot_id="ts_morning_1",
+            course_id="crs_multi_slot",
+            semester="2026-2027-1",
+            week_number=2,
+            day_of_week=1,
+            override_type="relocate",
+            new_classroom="15204",
+            reason="上午改至15204"
+        )
+        storage.add_override(ov)
+
+        slots = storage.get_effective_week_schedule(2, semester="2026-2027-1")
+        morning_slot = next(s for s in slots if s["time_slot_id"] == "ts_morning_1")
+        evening_slot = next(s for s in slots if s["time_slot_id"] == "ts_evening_2")
+
+        # Morning slot is relocated
+        assert morning_slot["classroom"] == "15204"
+        assert morning_slot["status"] == "relocated"
+
+        # Evening slot MUST RETAIN its original classroom S090307!
+        assert evening_slot["classroom"] == "S090307"
+        assert evening_slot["status"] == "normal"
+
+        storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 9. Period & Absolute Time Synchronization in Reschedule (R7)
+# -----------------------------------------------------------------------------
+
+def test_reschedule_period_and_time_synchronization():
+    """
+    R7: Rescheduling a class to Period 5-6 must automatically derive start_time='14:10'
+    and end_time='15:50', and upcoming reminder must trigger at 14:10, NOT original 08:00!
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+        course = Course(
+            id="crs_resched_test",
+            name="数据结构与算法",
+            semester="2026-2027-1",
+            classroom="11413",
+            time_slots=[
+                CourseTimeSlot(
+                    id="ts_resched_1",
+                    course_id="crs_resched_test",
+                    day_of_week=2,
+                    start_period=1,
+                    end_period=2,
+                    start_time="08:00",
+                    end_time="09:40",
+                    start_week=1,
+                    end_week=16,
+                    classroom="11413"
+                )
+            ]
+        )
+        storage.save_course(course)
+
+        # Reschedule to Period 5-6 (afternoon)
+        ov = CourseOverride(
+            id="ov_resched_1",
+            time_slot_id="ts_resched_1",
+            course_id="crs_resched_test",
+            semester="2026-2027-1",
+            week_number=2,
+            day_of_week=2,
+            override_type="reschedule",
+            new_day_of_week=2,
+            new_start_period=5,
+            new_end_period=6,
+            reason="调至下午第5-6节"
+        )
+        storage.add_override(ov)
+
+        slots = storage.get_effective_week_schedule(2, semester="2026-2027-1")
+        resched_slot = slots[0]
+        assert resched_slot["start_period"] == 5
+        assert resched_slot["end_period"] == 6
+        assert resched_slot["start_time"] == "14:10"  # Derived synchronously!
+        assert resched_slot["end_time"] == "15:50"
+
+        # Reminders check: at 07:50 (morning), NO reminder should trigger!
+        rem_morning = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 8, 7, 50), lookahead_minutes=30)
+        assert len(rem_morning) == 0
+
+        # At 13:55 (15 mins before 14:10), reminder MUST trigger!
+        rem_afternoon = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 8, 13, 55), lookahead_minutes=30)
+        assert len(rem_afternoon) == 1
+        assert rem_afternoon[0]["start_time"] == "14:10"
+
+        storage.close()
+
+
+# -----------------------------------------------------------------------------
+# 10. Multi-Semester Course ID Isolation (R9)
+# -----------------------------------------------------------------------------
+
+def test_multi_semester_course_id_isolation():
+    """
+    R9: Same course name and teacher in two different semesters must generate
+    different course IDs and NEVER overwrite each other.
+    """
+    c1 = parse_markdown_schedule_table(SAMPLE_SCHEDULE_MD, semester="2026-2027-1")
+    c2 = parse_markdown_schedule_table(SAMPLE_SCHEDULE_MD, semester="2025-2026-2")
+
+    c1_map = {c.name: c.id for c in c1}
+    c2_map = {c.name: c.id for c in c2}
+
+    for name in c1_map:
+        assert c1_map[name] != c2_map[name], f"course {name} ID collision across semesters!"
+
+
+# -----------------------------------------------------------------------------
+# 11. Zero Delete Soft Delete Compliance (R10)
+# -----------------------------------------------------------------------------
+
+def test_zero_delete_soft_delete_compliance():
+    """
+    R10: Calling delete_course or delete_event soft-deletes the item (is_deleted=1)
+    and retains the row in SQLite for auditability.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        storage = ScheduleStorage(Path(td) / "schedule.db")
+        course = Course(id="crs_soft_del", name="测试课程", semester="2026-2027-1")
+        storage.save_course(course)
+
+        # Soft delete
+        storage.delete_course("crs_soft_del")
+
+        # Query via normal API returns 0 active courses
+        active = storage.list_courses("2026-2027-1")
+        assert len(active) == 0
+
+        # Physical row STILL EXISTS in SQLite with is_deleted=1 (Zero Delete compliance)!
+        with sqlite3.connect(str(storage.db_path)) as conn:
+            row = conn.execute("SELECT id, is_deleted, deleted_at FROM courses WHERE id='crs_soft_del';").fetchone()
+            assert row is not None
+            assert row[1] == 1
+            assert row[2] is not None  # Timestamp preserved for audit!
+
+        storage.close()
