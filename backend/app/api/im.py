@@ -120,6 +120,7 @@ async def list_im_channels(
 async def get_im_timeline(
     response: Response,
     platform: Optional[str] = Query(None),
+    channel_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     cursor: Optional[str] = Query(None),
     snapshot_seq: Optional[int] = Query(None),
@@ -129,6 +130,7 @@ async def get_im_timeline(
     journal = get_im_journal()
     items, next_cursor = journal.query_timeline(
         platform=platform,
+        channel_id=channel_id,
         limit=limit,
         cursor=cursor,
         snapshot_seq=snapshot_seq,

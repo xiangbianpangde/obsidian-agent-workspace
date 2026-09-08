@@ -404,6 +404,7 @@ class IMJournal:
     def query_timeline(
         self,
         platform: Optional[str] = None,
+        channel_id: Optional[str] = None,
         limit: int = 50,
         cursor: Optional[str] = None,
         snapshot_seq: Optional[int] = None,
@@ -422,6 +423,9 @@ class IMJournal:
             if platform:
                 query += " AND source = ?"
                 params.append(platform)
+            if channel_id:
+                query += " AND channel_id = ?"
+                params.append(channel_id)
             if snapshot_seq is not None:
                 query += " AND ingest_seq <= ?"
                 params.append(snapshot_seq)

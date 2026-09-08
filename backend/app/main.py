@@ -88,5 +88,8 @@ if dist_dir.exists():
 def serve_index():
     index_file = dist_dir / "index.html"
     if index_file.is_file():
-        return FileResponse(index_file)
+        return FileResponse(
+            index_file,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"},
+        )
     return {"message": "Obsidian Agent Workspace API Running"}

@@ -460,6 +460,9 @@
           <div class="flex items-center space-x-2.5 overflow-hidden">
             <span id="im-chat-platform-badge" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-950 text-blue-300 border border-blue-800/40 shrink-0">全平台</span>
             <span id="im-chat-title" class="text-xs font-semibold text-slate-200 truncate">跨平台聚合时间线流 (Timeline Feed)</span>
+            <button id="btn-back-global-timeline" title="返回全平台聚合时间线" class="hidden text-[10px] bg-[#282836] hover:bg-[#343448] text-slate-300 px-2 py-0.5 rounded border border-[#3e3e52] shrink-0 transition flex items-center space-x-1 cursor-pointer">
+              <i data-lucide="arrow-left" class="w-3 h-3"></i><span>返回全局流</span>
+            </button>
           </div>
           <div class="flex items-center space-x-2">
             <button id="btn-mark-seen" class="text-xs bg-[#262632] hover:bg-[#323242] text-slate-300 px-2.5 py-1 rounded flex items-center transition border border-[#3a3a4c]">
@@ -612,6 +615,7 @@
       imFocusFeedList: document.getElementById('im-focus-feed-list'),
       imChatPlatformBadge: document.getElementById('im-chat-platform-badge'),
       imChatTitle: document.getElementById('im-chat-title'),
+      btnBackGlobalTimeline: document.getElementById('btn-back-global-timeline'),
       btnMarkSeen: document.getElementById('btn-mark-seen'),
       btnShowAllTimeline: document.getElementById('btn-show-all-timeline'),
       imPlatformPills: document.getElementById('im-platform-pills'),
@@ -1987,15 +1991,36 @@
       }
     }
 
-    async function loadImTimeline() {
+    function formatBytes(bytes) {
+      if (!bytes || bytes <= 0) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    async function loadImTimeline(append = false) {
       try {
-        let url = '/im/timeline?limit=60&';
-        if (state.im.platform !== 'all') url += `platform=${encodeURIComponent(state.im.platform)}&`;
-        if (state.im.focusOnly) url += 'focus_only=true&';
+        let url = '/im/timeline?limit=50&';
+        if (state.im.activeChannelId) {
+          url += `channel_id=${encodeURIComponent(state.im.activeChannelId)}&`;
+        } else {
+          if (state.im.platform !== 'all') url += `platform=${encodeURIComponent(state.im.platform)}&`;
+          if (state.im.focusOnly) url += 'focus_only=true&';
+        }
+        if (append && state.im.nextCursor) {
+          url += `cursor=${encodeURIComponent(state.im.nextCursor)}&`;
+        }
 
         const data = await api(url);
-        state.im.messages = data.items || [];
-        
+        const newItems = data.items || [];
+        state.im.nextCursor = data.next_cursor || null;
+
+        if (append) {
+          state.im.messages = [...state.im.messages, ...newItems];
+        } else {
+          state.im.messages = newItems;
+        }
+
         // Filter by search query if any
         let filtered = state.im.messages;
         if (state.im.search) {
@@ -2006,13 +2031,10 @@
           );
         }
 
-        // If an active channel is selected, filter by it
-        if (state.im.activeChannelId) {
-          filtered = filtered.filter(m => m.channel_id === state.im.activeChannelId);
+        renderImMessages(filtered, append);
+        if (!state.im.activeChannelId) {
+          renderImFocusFeed(state.im.messages);
         }
-
-        renderImMessages(filtered);
-        renderImFocusFeed(state.im.messages);
       } catch (err) {
         el.imMessagesStream.innerHTML = `<div class="text-rose-400 p-4">拉取消息流失败: ${escapeHtml(err.message)}</div>`;
       }
@@ -2034,17 +2056,14 @@
         
         item.className = `p-2.5 rounded-lg border transition cursor-pointer select-none space-y-1.5 ${baseClass}`;
 
-        // Platform icon & tag
-        let platIcon = '💬';
         let platBadge = 'bg-slate-700 text-slate-300';
-        if (ch.platform === 'wechat') { platIcon = '🟢'; platBadge = 'bg-emerald-950 text-emerald-300 border border-emerald-800/40'; }
-        if (ch.platform === 'wecom') { platIcon = '🔵'; platBadge = 'bg-blue-950 text-blue-300 border border-blue-800/40'; }
-        if (ch.platform === 'qq') { platIcon = '🔴'; platBadge = 'bg-red-950 text-red-300 border border-red-800/40'; }
+        if (ch.platform === 'wechat') { platBadge = 'bg-emerald-950 text-emerald-300 border border-emerald-800/40'; }
+        if (ch.platform === 'wecom') { platBadge = 'bg-blue-950 text-blue-300 border border-blue-800/40'; }
+        if (ch.platform === 'qq') { platBadge = 'bg-red-950 text-red-300 border border-red-800/40'; }
 
         item.innerHTML = `
           <div class="flex items-center justify-between">
             <div class="flex items-center space-x-1.5 overflow-hidden">
-              <span class="text-xs shrink-0">${platIcon}</span>
               <span class="font-semibold text-xs text-slate-100 truncate">${escapeHtml(ch.name)}</span>
             </div>
             ${ch.local_unseen_count > 0 ? `<span class="px-1.5 py-0.2 rounded-full bg-blue-600 text-white font-mono text-[10px] font-bold">${ch.local_unseen_count}</span>` : ''}
@@ -2058,8 +2077,10 @@
 
         item.addEventListener('click', () => {
           state.im.activeChannelId = ch.id;
+          state.im.nextCursor = null;
           el.imChatTitle.textContent = ch.name;
           el.imChatPlatformBadge.textContent = ch.platform.toUpperCase();
+          if (el.btnBackGlobalTimeline) el.btnBackGlobalTimeline.classList.remove('hidden');
           renderImChannels(state.im.channels);
           loadImTimeline();
         });
@@ -2068,14 +2089,32 @@
       });
     }
 
-    function renderImMessages(messages) {
+    function renderImMessages(messages, isAppendingEarlier = false) {
+      const prevScrollHeight = el.imMessagesStream.scrollHeight;
+      const prevScrollTop = el.imMessagesStream.scrollTop;
+
       el.imMessagesStream.innerHTML = '';
       if (!messages || messages.length === 0) {
         el.imMessagesStream.innerHTML = '<div class="text-slate-500 text-center py-20">暂无消息记录</div>';
         return;
       }
 
-      messages.forEach(msg => {
+      // 1. Pagination button at top if there are more earlier messages
+      if (state.im.nextCursor) {
+        const loadMoreBox = document.createElement('div');
+        loadMoreBox.className = 'flex justify-center pb-2';
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.className = 'px-3 py-1 text-xs rounded-full bg-[#242432] hover:bg-[#2e2e42] text-slate-300 border border-[#3e3e52] transition shadow-sm flex items-center space-x-1.5 cursor-pointer';
+        loadMoreBtn.innerHTML = '<i data-lucide="arrow-up" class="w-3.5 h-3.5 text-blue-400"></i><span>加载更早的历史消息</span>';
+        loadMoreBtn.onclick = () => loadImTimeline(true);
+        loadMoreBox.appendChild(loadMoreBtn);
+        el.imMessagesStream.appendChild(loadMoreBox);
+      }
+
+      // 2. Chronological order: oldest messages at top, newest at bottom (fixes inverted display)
+      const chronological = [...messages].reverse();
+
+      chronological.forEach(msg => {
         const wrapper = document.createElement('div');
         const isSelf = msg.is_self === true;
         wrapper.className = `flex flex-col ${isSelf ? 'items-end' : 'items-start'} space-y-1`;
@@ -2084,14 +2123,17 @@
         const header = document.createElement('div');
         header.className = 'flex items-center space-x-2 text-[10px] text-slate-400 px-1';
 
-        let platBadge = 'bg-slate-800 text-slate-300';
+        let platBadge = 'text-slate-400 font-semibold';
         if (msg.source === 'wechat') platBadge = 'text-emerald-400 font-semibold';
         if (msg.source === 'wecom') platBadge = 'text-blue-400 font-semibold';
         if (msg.source === 'qq') platBadge = 'text-red-400 font-semibold';
 
         const timeStr = msg.occurred_at ? msg.occurred_at.slice(11, 19) : '';
+        const channelTag = (!state.im.activeChannelId && msg.channel_name) ? `<span class="text-slate-500 max-w-[130px] truncate">#${escapeHtml(msg.channel_name)}</span>` : '';
+
         header.innerHTML = `
           <span class="${platBadge}">[${escapeHtml(msg.source.toUpperCase())}]</span>
+          ${channelTag}
           <span class="font-medium text-slate-300">${escapeHtml(msg.sender_name)}</span>
           <span class="font-mono text-slate-500">${escapeHtml(timeStr)}</span>
         `;
@@ -2109,7 +2151,7 @@
         if (msg.focus_tags && msg.focus_tags.length > 0) {
           const tagBar = document.createElement('div');
           tagBar.className = 'flex flex-wrap gap-1 mb-1.5 pb-1 border-b border-white/10';
-          msg.focus_reasons.forEach(r => {
+          (msg.focus_reasons || []).forEach(r => {
             const pill = document.createElement('span');
             pill.className = 'text-[9px] bg-purple-950/80 text-purple-300 px-1.5 py-0.2 rounded border border-purple-800/40 font-medium';
             pill.textContent = r;
@@ -2118,7 +2160,7 @@
           bubble.appendChild(tagBar);
         }
 
-        // Reply quote indicator if any (P1-IM-6-R4)
+        // Reply quote indicator if any
         if (msg.reply_to) {
           const replyBox = document.createElement('div');
           replyBox.className = 'bg-black/30 border-l-2 border-blue-400 px-2 py-1 mb-1.5 rounded text-[10px] text-slate-400 font-mono';
@@ -2126,18 +2168,98 @@
           bubble.appendChild(replyBox);
         }
 
-        // Text content (Strict textContent binding: zero risk of XSS)
-        const textContent = document.createElement('div');
-        textContent.className = 'text-xs whitespace-pre-wrap break-words leading-relaxed';
-        textContent.textContent = msg.text;
-        bubble.appendChild(textContent);
+        // Determine if message has attachments or is image/sticker
+        const hasAttachments = msg.attachments && msg.attachments.length > 0;
+        const isImageOnly = msg.message_type === 'image' || (msg.text === '[图片]' && hasAttachments);
+        const isSticker = (msg.text.startsWith('[') && (msg.text.includes('表情') || msg.text.includes('我想开了') || msg.text.includes('菜汪') || msg.text.includes('崇拜') || msg.text.includes('睁眼'))) || msg.text.startsWith('/');
+
+        // 1. Text rendering
+        if (!isImageOnly || (msg.text && msg.text !== '[图片]')) {
+          if (isSticker && (!hasAttachments || msg.attachments.length === 0)) {
+            // Sticker / Expression capsule
+            const stickerBox = document.createElement('div');
+            stickerBox.className = 'inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-950/50 border border-amber-600/40 text-amber-200 text-xs font-medium shadow-sm';
+            stickerBox.innerHTML = `<i data-lucide="smile" class="w-4 h-4 text-amber-400 shrink-0"></i><span>${escapeHtml(msg.text)}</span>`;
+            bubble.appendChild(stickerBox);
+          } else {
+            const textContent = document.createElement('div');
+            textContent.className = 'text-xs whitespace-pre-wrap break-words leading-relaxed';
+            textContent.textContent = msg.text;
+            bubble.appendChild(textContent);
+          }
+        }
+
+        // 2. Attachments / Media Cards rendering
+        if (hasAttachments) {
+          msg.attachments.forEach(att => {
+            const card = document.createElement('div');
+            card.className = 'flex items-center space-x-2.5 p-2 bg-black/30 rounded-lg border border-white/10 mt-1.5 shadow-sm';
+            
+            const sizeStr = formatBytes(att.size);
+            if (att.type === 'image') {
+              card.innerHTML = `
+                <div class="w-9 h-9 rounded-lg bg-blue-950/70 border border-blue-700/50 flex items-center justify-center shrink-0">
+                  <i data-lucide="image" class="w-4 h-4 text-blue-400"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-[11px] font-medium text-slate-200 truncate">${escapeHtml(att.name || '图片')}</div>
+                  <div class="flex items-center space-x-2 text-[10px] text-slate-400 mt-0.5">
+                    ${sizeStr ? `<span>${sizeStr}</span><span>•</span>` : ''}
+                    <span class="text-blue-300/80">图片已索引</span>
+                  </div>
+                </div>
+              `;
+            } else if (att.type === 'file') {
+              card.innerHTML = `
+                <div class="w-9 h-9 rounded-lg bg-purple-950/70 border border-purple-700/50 flex items-center justify-center shrink-0">
+                  <i data-lucide="file-text" class="w-4 h-4 text-purple-400"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-[11px] font-medium text-slate-200 truncate">${escapeHtml(att.name || '文件')}</div>
+                  <div class="flex items-center space-x-2 text-[10px] text-slate-400 mt-0.5">
+                    ${sizeStr ? `<span>${sizeStr}</span><span>•</span>` : ''}
+                    <span class="text-purple-300/80">文件附件</span>
+                  </div>
+                </div>
+              `;
+            } else if (att.type === 'voice') {
+              card.innerHTML = `
+                <div class="w-9 h-9 rounded-lg bg-emerald-950/70 border border-emerald-700/50 flex items-center justify-center shrink-0">
+                  <i data-lucide="mic" class="w-4 h-4 text-emerald-400"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-[11px] font-medium text-slate-200 truncate">语音消息</div>
+                  <div class="text-[10px] text-emerald-300/80 mt-0.5">语音留言</div>
+                </div>
+              `;
+            } else if (att.type === 'video') {
+              card.innerHTML = `
+                <div class="w-9 h-9 rounded-lg bg-rose-950/70 border border-rose-700/50 flex items-center justify-center shrink-0">
+                  <i data-lucide="video" class="w-4 h-4 text-rose-400"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-[11px] font-medium text-slate-200 truncate">${escapeHtml(att.name || '视频')}</div>
+                  <div class="text-[10px] text-rose-300/80 mt-0.5">视频片段</div>
+                </div>
+              `;
+            }
+            bubble.appendChild(card);
+          });
+        }
 
         wrapper.appendChild(bubble);
         el.imMessagesStream.appendChild(wrapper);
       });
 
-      // Scroll to bottom
-      el.imMessagesStream.scrollTop = el.imMessagesStream.scrollHeight;
+      lucide.createIcons();
+
+      // Scroll position handling
+      if (isAppendingEarlier) {
+        const newScrollHeight = el.imMessagesStream.scrollHeight;
+        el.imMessagesStream.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
+      } else {
+        el.imMessagesStream.scrollTop = el.imMessagesStream.scrollHeight;
+      }
     }
 
     function renderImFocusFeed(allMessages) {
@@ -2237,11 +2359,25 @@
     // IM 交互事件监听绑定
     el.btnShowAllTimeline.addEventListener('click', () => {
       state.im.activeChannelId = null;
+      state.im.nextCursor = null;
       el.imChatTitle.textContent = '跨平台聚合时间线流 (Timeline Feed)';
       el.imChatPlatformBadge.textContent = '全平台';
+      if (el.btnBackGlobalTimeline) el.btnBackGlobalTimeline.classList.add('hidden');
       renderImChannels(state.im.channels);
       loadImTimeline();
     });
+
+    if (el.btnBackGlobalTimeline) {
+      el.btnBackGlobalTimeline.addEventListener('click', () => {
+        state.im.activeChannelId = null;
+        state.im.nextCursor = null;
+        el.imChatTitle.textContent = '跨平台聚合时间线流 (Timeline Feed)';
+        el.imChatPlatformBadge.textContent = '全平台';
+        el.btnBackGlobalTimeline.classList.add('hidden');
+        renderImChannels(state.im.channels);
+        loadImTimeline();
+      });
+    }
 
     el.btnMarkSeen.addEventListener('click', async () => {
       if (state.im.activeChannelId) {

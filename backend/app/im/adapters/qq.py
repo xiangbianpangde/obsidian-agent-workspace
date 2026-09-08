@@ -301,7 +301,7 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
             ),
             watermark=IMWatermark(
                 kind="snapshot_version",
-                value=self._last_snapshot_id,
+                value=self._last_snapshot_id or (manifest.get("snapshot_id") if manifest else None),
                 committed_at=self._committed_at,
             ),
             rebuildability="snapshot_bounded",
