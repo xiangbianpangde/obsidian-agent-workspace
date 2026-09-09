@@ -208,8 +208,15 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
 
     async def _poll_loop(self) -> None:
         """Hybrid ingestion: initial catch-up then incremental polling."""
-        # Initial catch-up window
-        await self._ingest_window(days_back=self._history_window_days)
+        # Initial catch-up must stay inside an error boundary, otherwise a
+        # sink failure (e.g. IdentityConflictError) kills the whole ingest
+        # task and WeChat sync stops silently forever (Sol P1).
+        try:
+            await self._ingest_window(days_back=self._history_window_days)
+        except Exception as e:
+            self._last_error = str(e)
+            self._connectivity = "degraded"
+            logger.warning("WeChat initial backfill failed: %s", e)
 
         while self._running:
             try:

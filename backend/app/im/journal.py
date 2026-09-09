@@ -40,31 +40,50 @@ class InvalidIngestEnvelopeError(ValueError):
     pass
 
 
+def infer_channel_type(source: str, channel_id: str) -> str:
+    """统一从 opaque channel_id 推断 direct/group。
+
+    Sol P1 修复：原实现 `"direct" in channel_id` 对 wechat:<wxid> 恒为 False，
+    微信私聊被持久化成 group，list_channels(type=...) 过滤全错。
+    """
+    if channel_id.startswith("qq:"):
+        return "direct" if ":direct:" in channel_id else "group"
+    if channel_id.startswith("wecom:"):
+        conv = channel_id.split(":", 1)[1] if ":" in channel_id else ""
+        return "group" if conv.startswith(("R:", "S:")) else "direct"
+    if channel_id.startswith("wechat:"):
+        return "group" if channel_id.endswith("@chatroom") else "direct"
+    return "direct" if "direct" in channel_id else "group"
+
+
 def secure_harden_directory_and_files(db_path: Path) -> None:
     """
     Security invariant (P1-IM-4 & AT-9):
-    1. Active umask(0077)
+    1. Temporarily set umask(0077) (saved/restored — Sol P1: 不污染全局进程 umask)
     2. Chmod directory to 0700
     3. Chmod existing db, -wal, -shm to 0600
     4. Assert no group or world read/write/exec bits remain. Fail closed if not secured.
     """
-    os.umask(0o077)
-    db_dir = db_path.parent
-    db_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Secure directory
-    os.chmod(db_dir, 0o700)
-    dir_stat = os.stat(db_dir)
-    if dir_stat.st_mode & 0o077 != 0:
-        raise PermissionError(f"Security invariant violated: directory {db_dir} has broad permissions {oct(dir_stat.st_mode)}")
+    old_umask = os.umask(0o077)
+    try:
+        db_dir = db_path.parent
+        db_dir.mkdir(parents=True, exist_ok=True)
 
-    # Secure database file and WAL/SHM if they exist
-    for target in [db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]:
-        if target.exists():
-            os.chmod(target, 0o600)
-            f_stat = os.stat(target)
-            if f_stat.st_mode & 0o077 != 0:
-                raise PermissionError(f"Security invariant violated: file {target} has broad permissions {oct(f_stat.st_mode)}")
+        # Secure directory
+        os.chmod(db_dir, 0o700)
+        dir_stat = os.stat(db_dir)
+        if dir_stat.st_mode & 0o077 != 0:
+            raise PermissionError(f"Security invariant violated: directory {db_dir} has broad permissions {oct(dir_stat.st_mode)}")
+
+        # Secure database file and WAL/SHM if they exist
+        for target in [db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]:
+            if target.exists():
+                os.chmod(target, 0o600)
+                f_stat = os.stat(target)
+                if f_stat.st_mode & 0o077 != 0:
+                    raise PermissionError(f"Security invariant violated: file {target} has broad permissions {oct(f_stat.st_mode)}")
+    finally:
+        os.umask(old_umask)
 
 
 class IMJournal:
@@ -85,14 +104,20 @@ class IMJournal:
         secure_harden_directory_and_files(self.db_path)
 
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=30.0,
-            check_same_thread=False,
-            isolation_level=None  # Explicit transaction management
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        # 仅在 DB/WAL/SHM 创建窗口内收紧 umask（Sol P1：不再永久污染进程全局 umask）
+        old_umask = os.umask(0o077)
+        try:
+            self._conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=30.0,
+                check_same_thread=False,
+                isolation_level=None  # Explicit transaction management
+            )
+            self._conn.row_factory = sqlite3.Row
+            self._init_schema()
+        finally:
+            os.umask(old_umask)
+            secure_harden_directory_and_files(self.db_path)
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -175,9 +200,6 @@ class IMJournal:
             );
             """)
             cur.close()
-
-            # Ensure newly created WAL/SHM are also hardened
-            secure_harden_directory_and_files(self.db_path)
 
     def close(self) -> None:
         with self._lock:
@@ -328,30 +350,42 @@ class IMJournal:
                 last_occurred_at_epoch_ms, local_unseen_count, is_focus
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (
-                msg.channel_id, msg.source, msg.account_id, "direct" if "direct" in msg.channel_id else "group",
+                msg.channel_id, msg.source, msg.account_id,
+                infer_channel_type(msg.source, msg.channel_id),
                 name, "placeholder", msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms,
                 unseen, 1 if ("通知" in name or "班" in name) else 0
             ))
         else:
             unseen = row["local_unseen_count"] + (0 if is_self else 1)
-            name_update = ""
-            params = [msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen]
             if msg.channel_name and msg.channel_name not in ("QQ群聊", "QQ好友", "未知会话"):
-                name_update = ", name = ?, is_focus = ?"
-                params.extend([
+                # 两条完整静态语句替代 f-string 拼接（值全部走 ? 占位符）
+                cur.execute("""
+                UPDATE channels SET
+                    last_message = ?,
+                    last_time = ?,
+                    last_occurred_at_epoch_ms = MAX(last_occurred_at_epoch_ms, ?),
+                    local_unseen_count = ?,
+                    name = ?,
+                    is_focus = ?
+                WHERE id = ?;
+                """, (
+                    msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen,
                     msg.channel_name,
                     1 if any(kw in msg.channel_name for kw in ("通知", "班", "课程", "学院", "实验室", "科研", "导师")) else 0,
-                ])
-            params.append(msg.channel_id)
-            cur.execute(f"""
-            UPDATE channels SET
-                last_message = ?,
-                last_time = ?,
-                last_occurred_at_epoch_ms = MAX(last_occurred_at_epoch_ms, ?),
-                local_unseen_count = ?
-                {name_update}
-            WHERE id = ?;
-            """, params)
+                    msg.channel_id,
+                ))
+            else:
+                cur.execute("""
+                UPDATE channels SET
+                    last_message = ?,
+                    last_time = ?,
+                    last_occurred_at_epoch_ms = MAX(last_occurred_at_epoch_ms, ?),
+                    local_unseen_count = ?
+                WHERE id = ?;
+                """, (
+                    msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen,
+                    msg.channel_id,
+                ))
 
     # -------------------------------------------------------------------------
     # Channel & Timeline Query APIs

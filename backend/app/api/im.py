@@ -4,6 +4,7 @@ Conforms strictly to docs/03-im-integration-v0.2.7.md
 Implements Cache-Control: no-store, loopback secret auth, and SSE endpoint.
 """
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Header, Query, Request, Response
@@ -140,7 +141,7 @@ async def get_im_timeline(
     return {
         "items": [asdict_message(m) for m in items],
         "next_cursor": next_cursor,
-        "snapshot_head_seq": snapshot_seq or journal.get_current_head_seq()
+        "snapshot_head_seq": snapshot_seq if snapshot_seq is not None else journal.get_current_head_seq()
     }
 
 
@@ -181,12 +182,22 @@ async def mark_channel_seen(channel_id: str, response: Response) -> Dict[str, An
 @router.post("/api/im/sync")
 async def trigger_im_sync(response: Response) -> Dict[str, Any]:
     """Request an on-demand snapshot sync via loopback trigger file."""
+    import os
+    import tempfile
     import time
-    from pathlib import Path
     apply_no_store(response)
-    trigger = Path("/tmp/im_sync_trigger")
+    # Sol P2: 与 im_sync_daemon 对齐的用户私有触发目录；O_EXCL|O_NOFOLLOW 防 symlink 抢占
+    trigger_dir = Path(
+        os.environ.get("IM_SYNC_TRIGGER_DIR", str(Path.home() / ".personal-ai-workspace" / "run"))
+    )
+    trigger = trigger_dir / "im_sync_trigger"
     try:
-        trigger.write_text(str(time.time()), encoding="utf-8")
+        trigger_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(trigger, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, str(time.time()).encode("utf-8"))
+        finally:
+            os.close(fd)
         return {"status": "ok", "message": "sync_requested"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}

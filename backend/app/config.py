@@ -77,7 +77,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         vault_path=vault_path,
         templates_dir=templates_dir,
         database_path=db_path,
-        bind_host=sec.get("bind_host", "127.0.0.1"),
+        bind_host=srv.get("bind_host", sec.get("bind_host", "127.0.0.1")),  # Sol P2: server 段优先，security 段向后兼容
         port=int(srv.get("port", 8787)),
         scan_exclude=list(sec.get("scan_exclude", [])),
         extension_ignore=list(sec.get("extension_ignore", [])),
@@ -89,7 +89,3 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         raw=raw,
     )
 
-
-def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path

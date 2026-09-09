@@ -17,9 +17,9 @@ from app.security.secret_detector import looks_like_secret
 class TestSecretDetector(unittest.TestCase):
     def test_env_assignment_hits(self):
         for s in [
-            "OPENAI_API_KEY=abcdefghijk",
-            "export GITHUB_TOKEN=abcdefghijklmnopqrstuvwxyz123456",
-            "MY_SECRET_KEY = xyz123456789",
+            "OPENAI_API_KEY=" + "x" * 20,  # 占位假值，仅测模式命中
+            "export GITHUB_TOKEN=" + "y" * 36,
+            "MY_SECRET_KEY = " + "z" * 12,
         ]:
             with self.subTest(s=s):
                 hit, note = looks_like_secret(s)
@@ -40,12 +40,12 @@ class TestSecretDetector(unittest.TestCase):
         self.assertFalse(hit)
 
     def test_assignment_with_quotes_still_hits(self):
-        hit, _ = looks_like_secret('api_key = "verysecret1234567890"')
+        hit, _ = looks_like_secret('api_key = "' + "w" * 24 + '"')
         self.assertTrue(hit)
 
     def test_large_file_beyond_256k_hits(self):
         # P1-M5-NEW-1: 验证密钥位于 256k 之后仍能被全量检出
-        large_content = "x" * 300_000 + "\nOPENAI_API_KEY=plainlongsecret"
+        large_content = "x" * 300_000 + "\nOPENAI_API_KEY=" + "q" * 20
         hit, note = looks_like_secret(large_content)
         self.assertTrue(hit, f"should hit beyond 256k (got {note})")
 

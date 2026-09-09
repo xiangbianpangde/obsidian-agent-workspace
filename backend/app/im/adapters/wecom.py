@@ -16,6 +16,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -419,11 +420,11 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         channel_names: Dict[str, str] = {}
         if sess_db.exists():
             try:
-                sc = sqlite3.connect(f"file:{sess_db}?mode=ro", uri=True)
-                for cid, name in sc.execute("SELECT id, name FROM conversation_table;"):
-                    if cid:
-                        channel_names[str(cid)] = (name or str(cid))
-                sc.close()
+                # contextlib.closing：查询抛异常时连接也必须关闭（Sol P2，轮询每 3s 重试会累积泄漏）
+                with contextlib.closing(sqlite3.connect("file:" + str(sess_db) + "?mode=ro", uri=True)) as sc:
+                    for cid, name in sc.execute("SELECT id, name FROM conversation_table;"):
+                        if cid:
+                            channel_names[str(cid)] = (name or str(cid))
             except Exception as e:
                 logger.warning("WeCom session.db read failed: %s", e)
 
@@ -431,11 +432,10 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         user_names: Dict[int, str] = {}
         if user_db.exists():
             try:
-                uc = sqlite3.connect(f"file:{user_db}?mode=ro", uri=True)
-                for uid, name in uc.execute("SELECT id, name FROM user_table;"):
-                    if uid is not None:
-                        user_names[int(uid)] = (name or str(uid))
-                uc.close()
+                with contextlib.closing(sqlite3.connect("file:" + str(user_db) + "?mode=ro", uri=True)) as uc:
+                    for uid, name in uc.execute("SELECT id, name FROM user_table;"):
+                        if uid is not None:
+                            user_names[int(uid)] = (name or str(uid))
             except Exception as e:
                 logger.warning("WeCom user.db read failed: %s", e)
 
@@ -452,8 +452,8 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
                 since_ts = 0
 
         records: List[IMIngestRecord] = []
+        mc = sqlite3.connect(f"file:{msg_db}?mode=ro", uri=True)
         try:
-            mc = sqlite3.connect(f"file:{msg_db}?mode=ro", uri=True)
             mc.row_factory = sqlite3.Row
             query = """
                 SELECT message_id, server_id, sequence, sender_id, conversation_id,
@@ -467,10 +467,11 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
                 rec = self._normalize_row(dict(row), channel_names, user_names)
                 if rec is not None:
                     records.append(rec)
-            mc.close()
         except Exception as e:
             logger.warning("WeCom message.db read failed: %s", e)
             raise
+        finally:
+            mc.close()
 
         return records
 
@@ -492,13 +493,15 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
             return
         try:
             c = sqlite3.connect(f"file:{user_db}?mode=ro", uri=True)
-            cur = c.cursor()
-            if self._self_user_ids:
-                for uid in list(self._self_user_ids):
-                    cur.execute("SELECT 1 FROM user_table WHERE id = ? LIMIT 1;", (uid,))
-                    if cur.fetchone() is None:
-                        self._self_user_ids.discard(uid)
-            c.close()
+            try:
+                cur = c.cursor()
+                if self._self_user_ids:
+                    for uid in list(self._self_user_ids):
+                        cur.execute("SELECT 1 FROM user_table WHERE id = ? LIMIT 1;", (uid,))
+                        if cur.fetchone() is None:
+                            self._self_user_ids.discard(uid)
+            finally:
+                c.close()
         except Exception:
             pass
 
@@ -530,12 +533,17 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
 
         sender_id_int = row.get("sender_id")
         sender_id = str(sender_id_int) if sender_id_int is not None else None
-        sender_name = user_names.get(int(sender_id_int)) if sender_id_int is not None else None
+        # 非数值 sender_id 不允许让整批快照失败（Sol P2：单行降级）
+        try:
+            sender_key = int(sender_id_int)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            sender_key = None
+        sender_name = user_names.get(sender_key) if sender_key is not None else None
         sender_name = sender_name or f"企微用户 {sender_id}"
 
         is_self: Optional[bool] = None
-        if sender_id_int is not None and self._self_user_ids:
-            is_self = int(sender_id_int) in self._self_user_ids
+        if sender_key is not None and self._self_user_ids:
+            is_self = sender_key in self._self_user_ids
 
         mentions = self._extract_mentions(text)
 

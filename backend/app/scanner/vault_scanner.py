@@ -24,70 +24,83 @@ def scan_vault(cfg: AppConfig, conn, *, coordinator=None) -> dict:
     vault_root = cfg.vault_root
 
     conn.execute("DELETE FROM files")
-    conn.commit()
 
     n_files = 0
     n_secret = 0
-    for dirpath, dirnames, filenames in os.walk(vault_root, followlinks=False):
-        kept = []
-        for d in dirnames:
-            rel_dir = (Path(dirpath) / d).relative_to(vault_root).as_posix()
-            if matches_scan_exclude(vault_root, rel_dir, exclude):
-                sqlite.record_event(conn, "excluded", rel_dir)
-                continue
-            kept.append(d)
-        dirnames[:] = kept
+    try:
+        for dirpath, dirnames, filenames in os.walk(vault_root, followlinks=False):
+            kept = []
+            for d in dirnames:
+                rel_dir = (Path(dirpath) / d).relative_to(vault_root).as_posix()
+                if matches_scan_exclude(vault_root, rel_dir, exclude):
+                    sqlite.record_event(conn, "excluded", rel_dir)
+                    continue
+                kept.append(d)
+            dirnames[:] = kept
 
-        for fname in filenames:
-            if fname.startswith("."):
-                continue
-            if Path(fname).suffix.lower() != ".md":  # 只索引 Markdown
-                continue
-            full = Path(dirpath) / fname
-            rel = full.relative_to(vault_root).as_posix()
+            for fname in filenames:
+                if fname.startswith("."):
+                    continue
+                if Path(fname).suffix.lower() != ".md":  # 只索引 Markdown
+                    continue
+                full = Path(dirpath) / fname
+                rel = full.relative_to(vault_root).as_posix()
 
-            # P1-M5-NEW-2: 符号链接越界与内部指向排除区双重拦截
-            canonical = full.resolve(strict=False)
-            if not (canonical == vault_root or canonical.is_relative_to(vault_root)):
-                sqlite.record_event(conn, "excluded", rel, "symlink escape")
-                continue
-            try:
-                canonical_rel = canonical.relative_to(vault_root).as_posix()
-            except ValueError:
-                sqlite.record_event(conn, "excluded", rel, "symlink escape")
-                continue
-            if matches_scan_exclude(vault_root, canonical_rel, exclude):
-                sqlite.record_event(conn, "excluded", rel, "symlink target in excluded zone")
-                continue
+                # P1-M5-NEW-2: 符号链接越界与内部指向排除区双重拦截
+                canonical = full.resolve(strict=False)
+                if not (canonical == vault_root or canonical.is_relative_to(vault_root)):
+                    sqlite.record_event(conn, "excluded", rel, "symlink escape")
+                    continue
+                try:
+                    canonical_rel = canonical.relative_to(vault_root).as_posix()
+                except ValueError:
+                    sqlite.record_event(conn, "excluded", rel, "symlink escape")
+                    continue
+                if matches_scan_exclude(vault_root, canonical_rel, exclude):
+                    sqlite.record_event(conn, "excluded", rel, "symlink target in excluded zone")
+                    continue
 
-            try:
-                raw = full.read_bytes()
-            except OSError as e:
-                sqlite.record_event(conn, "excluded", rel, f"read error: {e}")
-                continue
+                try:
+                    raw = full.read_bytes()
+                except OSError as e:
+                    sqlite.record_event(conn, "excluded", rel, f"read error: {e}")
+                    continue
 
-            hit, note = looks_like_secret(raw.decode("utf-8", errors="replace"))
-            if hit:
-                n_secret += 1
-                sqlite.record_event(conn, "secret_skipped", rel, note)
-                continue
+                hit, note = looks_like_secret(raw.decode("utf-8", errors="replace"))
+                if hit:
+                    n_secret += 1
+                    sqlite.record_event(conn, "secret_skipped", rel, note)
+                    continue
 
-            try:
-                parsed = parse_markdown(full, vault_root, raw_bytes=raw)
-            except Exception as e:  # noqa: BLE001
-                sqlite.record_event(conn, "excluded", rel, f"parse error: {e}")
-                continue
+                try:
+                    parsed = parse_markdown(full, vault_root, raw_bytes=raw)
+                except Exception as e:  # noqa: BLE001
+                    sqlite.record_event(conn, "excluded", rel, f"parse error: {e}")
+                    continue
 
-            _upsert_parsed(conn, parsed)
-            n_files += 1
+                _upsert_parsed(conn, parsed)
+                n_files += 1
 
-    duration_ms = int((time.time() - t0) * 1000)
-    sqlite.finish_scan(conn, run_id, n_files, n_secret, duration_ms)
-    conn.commit()
+        # 全量重建后清理孤儿标签（Sol P2：tags 表只增不减导致 stats 虚高）
+        conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM file_tags)")
+
+        duration_ms = int((time.time() - t0) * 1000)
+        sqlite.finish_scan(conn, run_id, n_files, n_secret, duration_ms)
+        # 单事务提交（Sol P1 修复）：DELETE 与重建同事务，扫描期间读者看到旧索引，
+        # 中途崩溃回滚后旧索引完整保留；此前 DELETE 提前 commit 会暴露空窗口
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     if coordinator is not None:
         pending = coordinator.end_scan()
         for kind, rel in pending:  # replay 扫描期间积压事件
-            process_event(cfg, conn, kind, rel)
+            try:
+                process_event(cfg, conn, kind, rel)
+            except Exception as e:  # noqa: BLE001
+                # 单事件失败绝不中断剩余积压事件重放（Sol P2）
+                sqlite.record_event(conn, "excluded", rel, f"replay error: {e}")
+                conn.commit()
     return {
         "run_id": run_id,
         "files_indexed": n_files,
@@ -144,7 +157,14 @@ def process_event(cfg: AppConfig, conn, kind: str, rel: str) -> None:
         conn.commit()
         return
 
-    hit, note = looks_like_secret(full.read_bytes().decode("utf-8", errors="replace"))
+    try:
+        raw = full.read_bytes()
+    except OSError as e:
+        # is_file 检查与读取之间的竞态删除/权限错误不得杀死 watchdog 分发线程（Sol P1）
+        sqlite.record_event(conn, "excluded", rel, f"read error: {e}")
+        conn.commit()
+        return
+    hit, note = looks_like_secret(raw.decode("utf-8", errors="replace"))
     if hit:
         with sqlite.transaction(conn):
             sqlite.remove_file(conn, rel)

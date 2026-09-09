@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,11 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 进程内已初始化过 schema 的数据库路径（Sol P1：避免每请求重复执行 13 条 DDL）
+_schema_initialized: set[str] = set()
+_schema_lock = threading.Lock()
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -79,13 +85,20 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.executescript(SCHEMA)
+    key = str(db_path.resolve())
+    with _schema_lock:
+        if key not in _schema_initialized:
+            conn.executescript(SCHEMA)
+            _schema_initialized.add(key)
     return conn
 
 
 @contextmanager
 def transaction(conn: sqlite3.Connection, name: str = "write"):
     """显式事务（P1-M2-1）：upsert+relations+event 必须同一事务。"""
+    if conn.in_transaction:
+        # 防御：先前 DML 遗留的隐式事务会让 BEGIN IMMEDIATE 抛错，先落盘
+        conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield

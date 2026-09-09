@@ -5,7 +5,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import frontmatter
@@ -105,7 +105,7 @@ def parse_markdown(path: Path, vault_root: Path, raw_bytes: bytes | None = None)
         folder=path.parent.relative_to(vault_root).as_posix(),
         size=st.st_size,
         created_at=_norm_ts(fm.get("创建时间") or fm.get("created")),
-        modified_at=datetime.fromtimestamp(st.st_mtime).isoformat(),
+        modified_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
         sha256=sha256,
         tags=tags,
         statuses=statuses,

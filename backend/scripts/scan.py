@@ -10,11 +10,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.config import load_config  # noqa: E402
-from app.database import sqlite  # noqa: E402
-from app.scanner.vault_scanner import scan_vault  # noqa: E402
+from backend.app.config import load_config  # noqa: E402
+from backend.app.database import sqlite  # noqa: E402
+from backend.app.scanner.vault_scanner import scan_vault  # noqa: E402
 
 
 def main() -> None:

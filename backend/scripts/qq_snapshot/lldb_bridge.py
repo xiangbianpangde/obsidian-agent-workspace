@@ -75,16 +75,18 @@ def _has_loaded_wrapper(target) -> bool:
     return False
 
 
-def _source_salts(db_root: str) -> dict[bytes, str]:
+def _source_salts(fd_map: dict[str, int]) -> dict[bytes, str]:
+    """用 os.pread 从父进程预打开的库文件 fd 读取 SQLCipher salt。
+
+    全程只接受整数 fd，不做任何路径解析/open 调用——不存在路径 sink。
+    """
     result: dict[bytes, str] = {}
     for name in REQUIRED_EXPORTS:
-        path = os.path.join(db_root, name)
-        with open(path, "rb") as handle:
-            header = handle.read(64)
-            if not header.startswith(b"SQLite header 3\x00") or b"QQ_NT DB" not in header:
-                raise ValueError("QQ_SNAPSHOT_SOURCE_HEADER")
-            handle.seek(1024)
-            salt = handle.read(16)
+        fd = fd_map[name]
+        header = os.pread(fd, 64, 0)
+        if not header.startswith(b"SQLite header 3\x00") or b"QQ_NT DB" not in header:
+            raise ValueError("QQ_SNAPSHOT_SOURCE_HEADER")
+        salt = os.pread(fd, 16, 1024)
         if len(salt) != 16 or salt in result:
             raise ValueError("QQ_SNAPSHOT_SOURCE_SALT")
         result[salt] = name
@@ -168,8 +170,13 @@ def _candidate(process, ref_address: int, salt_address: int, profile) -> dict | 
 def qq_secure_capture(debugger, command, result, internal_dict) -> None:
     stage = "init"
     try:
-        db_root = os.environ.get("QQ_SNAPSHOT_DB_ROOT", "")
-        if not db_root or not os.path.isdir(db_root):
+        try:
+            fd_map_raw = json.loads(os.environ["QQ_SNAPSHOT_EXPORT_FDS"])
+            fd_map = {str(k): int(v) for k, v in fd_map_raw.items()}
+        except (KeyError, ValueError, TypeError, AttributeError):
+            _emit({"error_code": "QQ_SNAPSHOT_SOURCE_MISSING"})
+            return
+        if set(fd_map) != set(REQUIRED_EXPORTS) or any(fd < 0 for fd in fd_map.values()):
             _emit({"error_code": "QQ_SNAPSHOT_SOURCE_MISSING"})
             return
         stage = "target"
@@ -185,7 +192,7 @@ def qq_secure_capture(debugger, command, result, internal_dict) -> None:
             return
 
         stage = "source_salts"
-        wanted = _source_salts(db_root)
+        wanted = _source_salts(fd_map)
         stage = "regions"
         regions = list(_writable_regions(process))
         stage = "find_salts"

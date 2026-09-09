@@ -41,8 +41,11 @@ def tags_overview(conn=Depends(get_conn)):
         tag_file_pairs.add((r["tag_id"], r["file_id"]))
 
     tag_status: dict[int, Counter] = {}
+    status_cache: dict[int, tuple | None] = {}  # Sol P2: 同一文件挂 N 个标签时只算一次
     for tag_id, file_id in tag_file_pairs:
-        picked = pick_status(by_file.get(file_id, []))
+        if file_id not in status_cache:
+            status_cache[file_id] = pick_status(by_file.get(file_id, []))
+        picked = status_cache[file_id]
         if picked is None:
             continue
         _, value = picked
@@ -95,7 +98,10 @@ def files_by_tag(tag: str = Query(...), conn=Depends(get_conn)):
             status = "无状态"
         else:
             value = picked[1]
-            status = ", ".join(value) if isinstance(value, list) else str(value) or "无状态"
+            if isinstance(value, list):
+                status = ", ".join(str(s) for s in value) or "无状态"
+            else:
+                status = "无状态" if value is None or str(value) == "" else str(value)
         grouped.setdefault(status, []).append(
             {
                 "path": f["path"],

@@ -17,7 +17,6 @@ from .api import schedule as schedule_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import get_cfg, init_state
-
 observer = None
 
 
@@ -31,20 +30,24 @@ async def lifespan(app: FastAPI):
         init_state(cfg)
     watchdog_conn = None
     im_coordinator = im_api.get_im_coordinator()
-    await im_coordinator.start()
-    if cfg.watchdog_enabled:
-        from .watch.watcher import ScanCoordinator, start_watcher
+    try:
+        await im_coordinator.start()
+        if cfg.watchdog_enabled:
+            from .watch.watcher import ScanCoordinator, start_watcher
 
-        watchdog_conn = sqlite.connect(cfg.database_path)
-        coordinator = ScanCoordinator()
-        observer = start_watcher(cfg, watchdog_conn, coordinator)
-    yield
-    if observer is not None:
-        observer.stop()
-        observer.join()
-    if watchdog_conn is not None:
-        watchdog_conn.close()
-    await im_coordinator.stop()
+            watchdog_conn = sqlite.connect(cfg.database_path)
+            coordinator = ScanCoordinator()
+            observer = start_watcher(cfg, watchdog_conn, coordinator)
+        yield
+    finally:
+        if observer is not None:
+            observer.stop()
+            observer.join()
+            observer = None
+        if watchdog_conn is not None:
+            watchdog_conn.close()
+        await im_coordinator.stop()
+        im_coordinator.journal.close()
 
 
 app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lifespan)
@@ -74,10 +77,7 @@ app.include_router(schedule_api.router)
 
 @app.get("/api/health")
 def health():
-    from .deps import get_conn
-
-    conn_gen = get_conn()
-    conn = next(conn_gen)
+    conn = sqlite.connect(get_cfg().database_path)
     try:
         s = sqlite.stats(conn)
     finally:

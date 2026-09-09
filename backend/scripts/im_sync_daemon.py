@@ -6,7 +6,7 @@ Runs as an independent background helper (similar to wx-cli server).
 Monitors local database file modifications for WeCom and QQ:
   - WeCom: WXWork Data/message.db[-wal] -> triggers vault_cli.py decrypt
   - QQ: nt_qq_.../nt_db/nt_msg.db[-wal] -> triggers capture_snapshot("qq_primary")
-  - Trigger file: /tmp/im_sync_trigger -> immediate sync on demand
+  - Trigger file: ~/.personal-ai-workspace/run/im_sync_trigger -> immediate sync on demand
 
 Maintains Sol security boundaries:
   - Operates outside the FastAPI workspace runtime.
@@ -34,7 +34,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("im_sync_daemon")
 
-TRIGGER_FILE = Path("/tmp/im_sync_trigger")
+# Sol P2: 用当前用户私有目录替代世界可写 /tmp 固定路径，杜绝 symlink 抢占/伪造触发
+TRIGGER_DIR = Path(os.environ.get("IM_SYNC_TRIGGER_DIR", str(Path.home() / ".personal-ai-workspace" / "run")))
+TRIGGER_FILE = TRIGGER_DIR / "im_sync_trigger"
 DEFAULT_WECOM_DATA_ROOT = (
     Path.home()
     / "Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data"
@@ -194,7 +196,9 @@ class IMSyncDaemon:
         t0 = time.time()
         try:
             # Import capture_snapshot directly in the daemon process
-            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+            project_root = str(Path(__file__).resolve().parents[2])
+            if project_root not in sys.path:  # Sol P2: 防止每次 sync 无限膨胀 sys.path
+                sys.path.insert(0, project_root)
             from backend.scripts.qq_snapshot.capture import capture_snapshot
 
             res = capture_snapshot(account_alias="qq_primary")
@@ -210,6 +214,10 @@ class IMSyncDaemon:
             return False
 
     def run(self) -> None:
+        try:
+            TRIGGER_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except Exception:
+            pass
         logger.info("Starting IM Sync Daemon (poll_interval=%.1fs)...", self.poll_interval)
         logger.info("WeCom dir: %s", self.wecom_dir)
         logger.info("QQ DB dir: %s", self.qq_db_dir)
@@ -233,7 +241,7 @@ class IMSyncDaemon:
                         TRIGGER_FILE.unlink(missing_ok=True)
                     except Exception:
                         pass
-                    logger.info("Manual trigger received via /tmp/im_sync_trigger")
+                    logger.info("Manual trigger received via %s", TRIGGER_FILE)
                     self.sync_wecom(reason="manual_trigger")
                     self.sync_qq(reason="manual_trigger")
 
@@ -241,16 +249,20 @@ class IMSyncDaemon:
                 wecom_mtime = get_latest_mtime(self.wecom_dir, "message")
                 if wecom_mtime > self.last_wecom_mtime:
                     if now - self.last_wecom_sync >= self.wecom_debounce:
+                        diff = wecom_mtime - self.last_wecom_mtime  # 先算差值再推进（Sol P2：原日志恒为 +0.0s）
                         self.last_wecom_mtime = wecom_mtime
-                        self.sync_wecom(reason=f"mtime_change (+{wecom_mtime - self.last_wecom_mtime:.1f}s)")
+                        if not self.sync_wecom(reason=f"mtime_change (+{diff:.1f}s)"):
+                            self.last_wecom_mtime = 0.0  # 同步失败回滚，下轮重试该变更
 
                 # 3. Check QQ file modifications
                 if self.qq_db_dir:
                     qq_mtime = get_latest_mtime(self.qq_db_dir, "nt_msg")
                     if qq_mtime > self.last_qq_mtime:
                         if now - self.last_qq_sync >= self.qq_debounce:
+                            diff = qq_mtime - self.last_qq_mtime
                             self.last_qq_mtime = qq_mtime
-                            self.sync_qq(reason=f"mtime_change (+{qq_mtime - self.last_qq_mtime:.1f}s)")
+                            if not self.sync_qq(reason=f"mtime_change (+{diff:.1f}s)"):
+                                self.last_qq_mtime = 0.0
 
                 time.sleep(self.poll_interval)
             except (KeyboardInterrupt, SystemExit):

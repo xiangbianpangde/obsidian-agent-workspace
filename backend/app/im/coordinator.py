@@ -29,9 +29,7 @@ from backend.app.im.models import (
 )
 
 
-class InvalidCursorError(ValueError):
-    """Raised when after_seq > current head_seq (P2-2)."""
-    pass
+REPLAY_LIMIT = 200
 
 
 class IngestionCoordinator(IMIngestSink):
@@ -111,7 +109,8 @@ class IngestionCoordinator(IMIngestSink):
         Atomically commits normalized batch to IM Journal,
         pushes committed items into ring buffer, and notifies SSE subscribers.
         """
-        receipt = self.journal.commit_batch(batch)
+        # WeCom backfill can be 20k records; SQLite commit must not block the event loop (Sol P1)
+        receipt = await asyncio.to_thread(self.journal.commit_batch, batch)
 
         if receipt.inserted_count > 0:
             # Query the newly inserted messages
@@ -123,12 +122,23 @@ class IngestionCoordinator(IMIngestSink):
             async with self._lock:
                 for msg in new_msgs:
                     self._ring.append(msg)
-                    # Broadcast to SSE subscribers
+                    # Broadcast to SSE subscribers; drop slow consumers instead of
+                    # silently skipping (they will reconnect via Last-Event-ID resync)
                     for q in list(self._subscribers):
                         try:
                             q.put_nowait(msg)
                         except asyncio.QueueFull:
-                            pass
+                            # Slow consumer: drop its backlog, remove it from the
+                            # bus and push a sentinel so its stream emits
+                            # resync_required and the client resumes via
+                            # Last-Event-ID instead of silently losing events.
+                            self._subscribers.discard(q)
+                            try:
+                                while True:
+                                    q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            q.put_nowait(None)
 
         return receipt
 
@@ -176,23 +186,44 @@ class IngestionCoordinator(IMIngestSink):
             yield f"event: resync_required\ndata: {resync_data}\n\n"
             return
 
-        # 5. Replay missed items from ring buffer or journal (Open interval: seq > effective_after_seq)
-        if effective_after_seq < head_seq:
-            missed = self.journal.query_replay_events(after_seq=effective_after_seq, limit=200)
-            for m in missed:
-                yield self._format_sse_message(m)
-
-        # 6. Stream live events
-        q: asyncio.Queue[IMMessageItem] = asyncio.Queue(maxsize=100)
-        self._subscribers.add(q)
+        # 5. Register the live queue BEFORE journal replay so no committed
+        # message can fall into the replay/subscribe gap (Sol P1).
+        # Overlap between replay and live broadcast is removed by seq dedupe.
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        async with self._lock:
+            self._subscribers.add(q)
         try:
+            last_seq = effective_after_seq
+            if effective_after_seq < head_seq:
+                missed = self.journal.query_replay_events(
+                    after_seq=effective_after_seq, limit=REPLAY_LIMIT + 1
+                )
+                if len(missed) > REPLAY_LIMIT:
+                    # Bounded replay would silently truncate (Sol P1): hand the
+                    # client to the exhaustive snapshot resync path instead.
+                    resync_data = json.dumps({"snapshot_head_seq": missed[-1].ingest_seq})
+                    yield f"event: resync_required\ndata: {resync_data}\n\n"
+                    return
+                for m in missed:
+                    last_seq = m.ingest_seq
+                    yield self._format_sse_message(m)
+
+            # 6. Stream live events; skip anything already covered by replay
             while True:
-                # Send periodic heartbeat comment or message
                 try:
                     msg = await asyncio.wait_for(q.get(), timeout=15.0)
-                    yield self._format_sse_message(msg)
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
+                    continue
+                if msg is None:
+                    # Evicted slow consumer: force deterministic resync
+                    resync_data = json.dumps({"snapshot_head_seq": self.journal.get_current_head_seq()})
+                    yield f"event: resync_required\ndata: {resync_data}\n\n"
+                    return
+                if msg.ingest_seq <= last_seq:
+                    continue
+                last_seq = msg.ingest_seq
+                yield self._format_sse_message(msg)
         finally:
             self._subscribers.discard(q)
 

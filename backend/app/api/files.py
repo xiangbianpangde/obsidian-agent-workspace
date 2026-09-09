@@ -32,8 +32,6 @@ from ..status import pick_status
 
 router = APIRouter()
 
-import unicodedata
-
 _path_locks: dict[str, threading.Lock] = {}
 _path_locks_guard = threading.Lock()
 
@@ -75,30 +73,40 @@ class StatusRequest(BaseModel):
 
 # ---------- helpers ----------
 
-def _file_payload(row, conn) -> dict:
-    tags = [
-        r["name"]
-        for r in conn.execute(
-            "SELECT t.name FROM tags t JOIN file_tags ft ON ft.tag_id=t.id WHERE ft.file_id=? ORDER BY t.name",
-            (row["id"],),
+# Sol P2: 常量 SQL（无外部输入），批量拉取 tags/metadata 消除每文件 N+1
+_SQL_ALL_TAGS = (
+    "SELECT ft.file_id AS file_id, t.name AS name "
+    "FROM file_tags ft JOIN tags t ON t.id = ft.tag_id ORDER BY t.name"
+)
+_SQL_ALL_META = "SELECT file_id, key, value, value_type FROM metadata"
+
+
+def _file_payloads_bulk(conn) -> list[dict]:
+    files = conn.execute("SELECT * FROM files ORDER BY path").fetchall()
+    tags_by_file: dict[int, list[str]] = {}
+    for r in conn.execute(_SQL_ALL_TAGS):
+        tags_by_file.setdefault(r["file_id"], []).append(r["name"])
+    meta_by_file: dict[int, list] = {}
+    for r in conn.execute(_SQL_ALL_META):
+        meta_by_file.setdefault(r["file_id"], []).append(r)
+
+    payloads = []
+    for row in files:
+        status = pick_status(meta_by_file.get(row["id"], []))
+        payloads.append(
+            {
+                "path": row["path"],
+                "filename": row["filename"],
+                "title": row["title"],
+                "folder": row["folder"],
+                "size": row["size"],
+                "modified_at": row["modified_at"],
+                "hash": row["hash"],
+                "tags": tags_by_file.get(row["id"], []),
+                "statuses": status[1] if status else [],
+            }
         )
-    ]
-    meta_rows = conn.execute(
-        "SELECT key, value, value_type FROM metadata WHERE file_id=?",
-        (row["id"],),
-    ).fetchall()
-    status = pick_status(meta_rows)
-    return {
-        "path": row["path"],
-        "filename": row["filename"],
-        "title": row["title"],
-        "folder": row["folder"],
-        "size": row["size"],
-        "modified_at": row["modified_at"],
-        "hash": row["hash"],
-        "tags": tags,
-        "statuses": status[1] if status else [],
-    }
+    return payloads
 
 
 def _check_conflict(full: Path, expected_hash: str) -> None:
@@ -116,12 +124,19 @@ def _backup(full: Path) -> None:
 
 
 def _atomic_write(full: Path, content: str) -> None:
-    """原子替换（P1-M2-2）：同目录 temp + flush + os.replace。"""
+    """原子替换（P1-M2-2）：同目录 temp + fsync + os.replace。"""
     tmp = full.with_name(f".{full.name}.ws-tmp-{uuid.uuid4().hex}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
+    try:
+        tmp.resolve(strict=False).relative_to(full.parent.resolve(strict=False))
+    except (OSError, ValueError):
+        # full 名异常或 symlink 指向 vault 外：temp 绝不写到边界之外
+        raise HTTPException(400, "path traversal rejected")
+    tmp.write_text(content, encoding="utf-8")
+    fd = os.open(tmp, os.O_RDONLY)  # write_text 不落盘：fsync 后再 replace
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     os.replace(tmp, full)
 
 
@@ -144,21 +159,20 @@ def get_config(conn=Depends(get_conn)):
 
 @router.get("/files/tree")
 def files_tree(conn=Depends(get_conn)):
-    rows = conn.execute("SELECT * FROM files ORDER BY path").fetchall()
-    payloads = [_file_payload(r, conn) for r in rows]
+    payloads = _file_payloads_bulk(conn)
     root: dict = {"name": "", "path": "", "type": "dir", "children": []}
+    # Sol P2：目录节点建 dict 索引，把每文件的建树开销从 O(深度×兄弟数) 降为 O(深度)
+    dirs_by_path: dict[str, dict] = {}
     for f in payloads:
         parts = f["path"].split("/")
         node = root
         for i, part in enumerate(parts):
             dir_path = "/".join(parts[: i + 1])
-            child = next(
-                (c for c in node["children"] if c["path"] == dir_path and c["type"] == "dir"),
-                None,
-            )
             if i < len(parts) - 1:
+                child = dirs_by_path.get(dir_path)
                 if child is None:
                     child = {"name": part, "path": dir_path, "type": "dir", "children": []}
+                    dirs_by_path[dir_path] = child
                     node["children"].append(child)
                 node = child
             else:

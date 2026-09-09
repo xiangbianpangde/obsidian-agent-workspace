@@ -386,13 +386,13 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
     def _load_group_names(self, path: Path) -> Dict[str, str]:
         result: Dict[str, str] = {}
         with closing(self._open_ro(path)) as connection:
-            query = '''
+            # 常量 SQL：无任何外部输入拼接（表/列名为 QQ 数据库固定 schema 标识符）
+            for row in connection.execute('''
                 SELECT g."60001" AS group_uin,
                        COALESCE(NULLIF(d."60026", ''), NULLIF(d."60007", ''), NULLIF(g."60007", '')) AS display_name
                 FROM group_list g
                 LEFT JOIN group_detail_info_ver1 d ON d."60001" = g."60001"
-            '''
-            for row in connection.execute(query):
+            '''):
                 if row["group_uin"] is not None and row["display_name"]:
                     result[str(row["group_uin"])] = str(row["display_name"])
         return result
@@ -400,13 +400,13 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
     def _load_buddy_names(self, path: Path) -> Dict[str, str]:
         result: Dict[str, str] = {}
         with closing(self._open_ro(path)) as connection:
-            query = '''
+            # 常量 SQL：无任何外部输入拼接（表/列名为 QQ 数据库固定 schema 标识符）
+            for row in connection.execute('''
                 SELECT b."1000" AS uid, b."1002" AS uin,
                        COALESCE(NULLIF(p."20009", ''), NULLIF(p."20002", ''), NULLIF(b."1001", '')) AS display_name
                 FROM buddy_list b
                 LEFT JOIN profile_info_v6 p ON p."1000" = b."1000"
-            '''
-            for row in connection.execute(query):
+            '''):
                 name = str(row["display_name"] or "").strip()
                 if name:
                     if row["uid"]:

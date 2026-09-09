@@ -194,17 +194,19 @@ def render_template(
         lines.append(line)
     result = "\n".join(lines)
 
-    # 2. 替换 tp.file.title
-    result = _RE_FILE_TITLE.sub(title, result)
-
-    # 3. 替换 tp.file.path (P1-M4-1)
-    result = _RE_FILE_PATH.sub(target_path, result)
-
-    # 4. 替换 custom vars
+    # 2. 替换 tp.file.title / 3. tp.file.path / 4. custom vars
+    # 全部用 lambda 替换（Sol P2）：值中含反斜杠时 re.sub 当 replacement 用会
+    # 抛 re.error（\1 等分组引用则被注入）；函数形式按字面量返回
+    result = _RE_FILE_TITLE.sub(lambda _m: title, result)
+    result = _RE_FILE_PATH.sub(lambda _m: target_path, result)
     for k, v in vars.items():
-        escaped_k = re.escape(k)
-        result = re.sub(rf"<%\s*tp\.user\.{escaped_k}\s*%>", str(v), result)
-        result = re.sub(rf"\{{\{{\s*{escaped_k}\s*\}}\}}", str(v), result)
+        value = str(v)
+        result = _RE_USER_VAR_TP.sub(
+            lambda m: value if m.group(1) == k else m.group(0), result
+        )
+        result = _RE_USER_VAR_MUSTACHE.sub(
+            lambda m: value if m.group(1) == k else m.group(0), result
+        )
 
     # 5. 替换 tp.date.now (P1-M4-3: fail-closed)
     def _replace_date(match: re.Match) -> str:

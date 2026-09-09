@@ -6,6 +6,7 @@ P1-M4-3: fail-closed 降级提示。
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -26,6 +27,8 @@ from ..template.engine import (
     inspect_template,
     render_template,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -49,6 +52,10 @@ def _sanitize_title(title: str) -> str:
     clean = title.strip().replace("/", "_").replace("\\", "_")
     if not clean:
         raise HTTPException(400, "笔记标题不能为空")
+    # Sol P2: ".." 分量可借 custom_path 生成 dir/../x.md 绕过模板目录意图；
+    # 点开头文件永不被索引。统一替换为下划线。
+    if clean in ("..", ".") or clean.startswith("."):
+        clean = "_" + clean.lstrip(".")
     return clean
 
 
@@ -86,6 +93,8 @@ def list_templates():
             # 模板若含 secret 则忽略不列入可用模板
             continue
         except Exception:
+            # Sol P2: 不再整体静默——记录后跳过单个模板，避免列表无解释地空掉
+            logger.warning("template inspect failed: %s", rel, exc_info=True)
             continue
     return {"templates": results}
 

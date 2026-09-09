@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
@@ -26,22 +28,30 @@ from backend.app.schedule.models import (
 from backend.app.schedule.reminders import get_upcoming_reminders
 from backend.app.schedule.storage import ScheduleStorage
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/schedule", tags=["Schedule"])
 
 _storage: Optional[ScheduleStorage] = None
+_storage_lock = threading.Lock()
+# Sol P1/P2 修复：导入尝试只做一次（失败也记为已尝试），否则 vault 无课表时
+# 每个请求都全 vault 扫描；懒初始化并发首请求会构造两条泄漏的 SQLite 连接
+_import_attempted = False
 
 
 def get_schedule_storage() -> ScheduleStorage:
-    global _storage
-    if _storage is None:
-        _storage = ScheduleStorage()
-        if len(_storage.list_courses()) == 0:
+    global _storage, _import_attempted
+    with _storage_lock:
+        if _storage is None:
+            _storage = ScheduleStorage()
+        if not _import_attempted and len(_storage.list_courses()) == 0:
+            _import_attempted = True
             try:
                 cfg = load_config()
                 courses = import_schedule_from_obsidian_vault(cfg.vault_path)
                 _storage.save_courses_batch(courses)
             except Exception:
-                pass
+                logger.exception("schedule import from obsidian vault failed")  # 失败可见，绝不静默
     return _storage
 
 
@@ -227,6 +237,13 @@ def create_course(payload: CourseIn) -> Dict[str, Any]:
 
 @router.put("/course/{course_id}")
 def update_course(course_id: str, payload: CourseIn) -> Dict[str, Any]:
+    storage = get_schedule_storage()
+    existing = storage.get_course(course_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    if payload.semester != existing.semester:
+        # 学期不一致会走 id 前缀检查失败分支、插入重复课程而非更新（Sol P2）
+        raise HTTPException(status_code=400, detail="不允许修改课程学期")
     payload.id = course_id
     return create_course(payload)
 
@@ -257,6 +274,8 @@ def update_course_reminder(course_id: str, payload: ReminderMinutesIn) -> Dict[s
 def delete_course(course_id: str) -> Dict[str, Any]:
     """Soft delete course (Zero Delete compliance)."""
     storage = get_schedule_storage()
+    if not storage.get_course(course_id):
+        raise HTTPException(status_code=404, detail="课程不存在")
     storage.delete_course(course_id)
     return {"status": "ok", "soft_deleted": course_id}
 
@@ -388,8 +407,13 @@ def get_reminders(
 @router.post("/import/obsidian")
 def import_from_obsidian_vault(semester: str = Query("2026-2027-1")) -> Dict[str, Any]:
     """B4: 1-click import from 课表.md executed in an atomic batch transaction."""
+    from ..state import get_cfg  # 延迟导入避免测试环境未初始化 lifespan
+
     storage = get_schedule_storage()
-    cfg = load_config()
+    try:
+        cfg = get_cfg()
+    except RuntimeError:
+        cfg = load_config()
     courses = import_schedule_from_obsidian_vault(cfg.vault_path, semester=semester)
     storage.save_courses_batch(courses)
     return {

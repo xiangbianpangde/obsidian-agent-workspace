@@ -282,7 +282,14 @@ def _capture_live_keys(pid: int, source_root: Path, wrapper_digest: str) -> dict
     read_fd, write_fd = os.pipe()
     env = os.environ.copy()
     env["QQ_SNAPSHOT_SECRET_FD"] = str(write_fd)
-    env["QQ_SNAPSHOT_DB_ROOT"] = os.fspath(source_root)
+    # 导出库以预打开 fd 传递（JSON int 映射）：子进程全程 os.pread 读字节，
+    # 污点数据不再以任何路径形态进入子进程
+    fd_map: dict[str, int] = {}
+    for export_name in REQUIRED_EXPORTS:
+        export_fd = os.open(os.fspath(source_root / export_name), os.O_RDONLY)
+        os.set_inheritable(export_fd, True)
+        fd_map[export_name] = export_fd
+    env["QQ_SNAPSHOT_EXPORT_FDS"] = json.dumps(fd_map)
     env["QQ_SNAPSHOT_WRAPPER_SHA256"] = wrapper_digest
     command = [
         lldb,
@@ -301,7 +308,7 @@ def _capture_live_keys(pid: int, source_root: Path, wrapper_digest: str) -> dict
         proc = subprocess.Popen(
             command,
             env=env,
-            pass_fds=(write_fd,),
+            pass_fds=(write_fd, *fd_map.values()),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -336,6 +343,8 @@ def _capture_live_keys(pid: int, source_root: Path, wrapper_digest: str) -> dict
         if write_fd >= 0:
             os.close(write_fd)
         os.close(read_fd)
+        for export_fd in fd_map.values():
+            os.close(export_fd)
 
 
 def _clonefile(source: Path, target: Path) -> None:
@@ -481,7 +490,12 @@ def _validate_schema(path: Path, expected: dict[str, dict[str, tuple[str, int]]]
     try:
         connection.execute("PRAGMA query_only=ON")
         for table, required_columns in expected.items():
-            rows = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            # 参数化表值函数替代 PRAGMA 拼接；列序与 PRAGMA table_info 一致：
+            # (cid, name, type, notnull, dflt_value, pk)
+            rows = connection.execute(
+                'SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)',
+                (table,),
+            ).fetchall()
             actual = {str(row[1]): (str(row[2]).upper(), int(row[5])) for row in rows}
             for name, specification in required_columns.items():
                 if actual.get(name) != specification:
@@ -496,7 +510,10 @@ def _validate_schema(path: Path, expected: dict[str, dict[str, tuple[str, int]]]
             # pinyin tokenizer. Stock SQLite cannot instantiate those virtual
             # tables, so validate every critical ordinary table individually.
             for table in expected:
-                row = connection.execute(f'PRAGMA integrity_check("{table}")').fetchone()
+                # 参数化表值函数替代 PRAGMA 拼接，表名走 ? 绑定，无注入面
+                row = connection.execute(
+                    "SELECT * FROM pragma_integrity_check(?)", (table,)
+                ).fetchone()
                 if not row or row[0] != "ok":
                     raise QQSnapshotError("QQ_SNAPSHOT_INTEGRITY_FAILED")
             integrity_scope = "critical_tables"

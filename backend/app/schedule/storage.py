@@ -158,20 +158,33 @@ class ScheduleStorage:
             """)
 
             # Forward migration for pre-existing databases (R6, R8, R10)
-            def _ensure_col(table: str, col: str, col_type: str) -> None:
-                cur.execute(f"PRAGMA table_info({table});")
-                cols = {row[1] for row in cur.fetchall()}
-                if col not in cols:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
+            # SQLite 标识符不接受参数绑定；表/列均为代码内固定 schema，
+            # 全部展开为字面量 SQL，杜绝任何动态拼接
+            cur.execute("PRAGMA table_info(courses);")
+            courses_cols = {row[1] for row in cur.fetchall()}
+            cur.execute("PRAGMA table_info(time_slots);")
+            time_slots_cols = {row[1] for row in cur.fetchall()}
+            cur.execute("PRAGMA table_info(overrides);")
+            overrides_cols = {row[1] for row in cur.fetchall()}
+            cur.execute("PRAGMA table_info(academic_events);")
+            academic_events_cols = {row[1] for row in cur.fetchall()}
 
-            _ensure_col("courses", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_col("courses", "deleted_at", "TEXT")
-            _ensure_col("time_slots", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_col("overrides", "time_slot_id", "TEXT NOT NULL DEFAULT ''")
-            _ensure_col("overrides", "is_revoked", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_col("overrides", "revoked_at", "TEXT")
-            _ensure_col("academic_events", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_col("academic_events", "deleted_at", "TEXT")
+            if "is_deleted" not in courses_cols:
+                cur.execute("ALTER TABLE courses ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+            if "deleted_at" not in courses_cols:
+                cur.execute("ALTER TABLE courses ADD COLUMN deleted_at TEXT;")
+            if "is_deleted" not in time_slots_cols:
+                cur.execute("ALTER TABLE time_slots ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+            if "time_slot_id" not in overrides_cols:
+                cur.execute("ALTER TABLE overrides ADD COLUMN time_slot_id TEXT NOT NULL DEFAULT '';")
+            if "is_revoked" not in overrides_cols:
+                cur.execute("ALTER TABLE overrides ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0;")
+            if "revoked_at" not in overrides_cols:
+                cur.execute("ALTER TABLE overrides ADD COLUMN revoked_at TEXT;")
+            if "is_deleted" not in academic_events_cols:
+                cur.execute("ALTER TABLE academic_events ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+            if "deleted_at" not in academic_events_cols:
+                cur.execute("ALTER TABLE academic_events ADD COLUMN deleted_at TEXT;")
 
             # B3: Enforce unique index on overrides(time_slot_id, week_number) for all DBs
             cur.execute("""

@@ -24,7 +24,11 @@ with open(DB_PATH, "rb") as f:
 print(f"[*] Target message_0.db Salt: {target_salt.hex()}")
 
 # Create LLDB hook script
-lldb_script_path = Path("/tmp/wechat_key_hook.py")
+_HOOK_NAME = "wechat_key_hook.py"
+lldb_script_path = (Path("/tmp") / _HOOK_NAME).resolve(strict=False)
+# 规范化后校验：必须在 /tmp 一级目录下、无 ..、文件名固定
+if lldb_script_path.parent != Path("/tmp") or ".." in lldb_script_path.parts or lldb_script_path.name != _HOOK_NAME:
+    raise RuntimeError(f"unsafe hook script path: {lldb_script_path}")
 lldb_script_content = """import lldb
 import binascii
 
@@ -67,8 +71,7 @@ def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand(f'command script add -f {__name__}.setup capture_keys')
 """
 
-with open(lldb_script_path, "w") as f:
-    f.write(lldb_script_content)
+lldb_script_path.write_text(lldb_script_content, encoding="utf-8")
 
 print("[*] Killing existing WeChat...")
 subprocess.run(["killall", "WeChat"], capture_output=True)
@@ -142,14 +145,18 @@ finally:
 
 if matched_key:
     print(f"\n[SUCCESS] Extracted Raw Key (64-char Hex): {matched_key}")
-    
+
     # Save to wx-cli keys.toml
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 规范化后校验：keys.toml 必须位于用户 home 目录内，拒绝 .. 与越界
+    resolved_config = CONFIG_PATH.expanduser().resolve(strict=False)
+    home_root = Path.home().expanduser().resolve(strict=False)
+    if ".." in resolved_config.parts or not resolved_config.is_relative_to(home_root):
+        raise RuntimeError(f"unsafe config path: {CONFIG_PATH}")
     toml_content = f"""[accounts.{ACCOUNT_ID}]
 key = "{matched_key}"
 """
-    with open(CONFIG_PATH, "w") as f:
-        f.write(toml_content)
+    resolved_config.write_text(toml_content, encoding="utf-8")
     print(f"[+] Saved to {CONFIG_PATH}")
 else:
     print("\n[-] Key not captured in this run.")

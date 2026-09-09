@@ -207,7 +207,10 @@ def evaluate_focus_decision(
             is_course_group = any(kw in channel_name for kw in keywords) or "课" in channel_name or "大群" in channel_name
             if is_course_group:
                 # 严格匹配任课教师，其他同学信息一律不登记（即使 student @本人 也被抑制）
-                is_real_teacher = any(t == sender_name or (len(t) >= 2 and t in sender_name) for t in teachers)
+                # Sol P2: 全等优先；子串匹配要求教师名 >= 3 字，避免「李娜」误命中「李娜娜」等学生
+                is_real_teacher = any(
+                    t == sender_name or (len(t) >= 3 and t in sender_name) for t in teachers
+                )
                 if not is_real_teacher:
                     is_real_teacher = any(title in sender_name for title in ["任课教师", "任课老师", "指导老师", "辅导员"])
                 if is_real_teacher:

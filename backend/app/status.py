@@ -14,7 +14,8 @@ def decode_status_value(value: str, value_type: str):
     if value_type == "list":
         try:
             v = json.loads(value or "[]")
-            return v if isinstance(v, list) else [str(v)]
+            # json.loads("null") 等非 list 结果不得变成 "None" 状态名（Sol P2）
+            return v if isinstance(v, list) else ([] if v is None else [str(v)])
         except Exception:
             return [value]
     return value
