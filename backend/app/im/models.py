@@ -119,13 +119,13 @@ class IMChannelSummary:
     platform: Literal["wechat", "wecom", "qq"]
     account_id: str
     channel_type: Literal["direct", "group", "notice"]
-    name: string
+    name: str
     avatar_availability: Literal["local", "placeholder", "unavailable"]
     avatar_local_ref: Optional[str]
     last_message: str
     last_time: str
     local_unseen_count: int
-    is_focus: boolean
+    is_focus: bool
     native_unread_count: Optional[int] = None
 
 
@@ -247,7 +247,7 @@ def compute_server_digest(msg: IMMessageItem) -> str:
 class IMIngestRecord:
     source: Literal["wechat", "wecom", "qq"]
     account_id: str
-    dedupe_key: string
+    dedupe_key: str
     dedupe_basis: Literal["native_message_id", "source_event_id", "synthetic_v1"]
     message: IMMessageItem
     provided_digest: Optional[str] = None
