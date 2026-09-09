@@ -2287,7 +2287,10 @@
           loadImChannels(),
           loadImTimeline()
         ]);
-        connectImSSE();
+        if (!state.im.eventSource) {
+          const startSeq = state.im.headSeq || 0;
+          connectImSSE(startSeq);
+        }
       } catch (err) {
         console.error('加载 IM Hub 失败:', err);
       }
@@ -2781,12 +2784,24 @@
     }
 
     // ======================== 可靠 SSE 总线 & Resync Fence (P1-IM-7) ========================
+    let sseDebounceTimer = null;
+    function scheduleSseUiRefresh() {
+      if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
+      sseDebounceTimer = setTimeout(() => {
+        loadImOverview();
+        loadImChannels();
+      }, 1000);
+    }
+
     function connectImSSE(afterSeq) {
       if (state.im.eventSource) {
         state.im.eventSource.close();
+        state.im.eventSource = null;
       }
 
-      const url = afterSeq ? `/api/im/events?after_seq=${afterSeq}` : '/api/im/events';
+      // Default afterSeq to current headSeq to prevent dumping entire database
+      const seq = (afterSeq !== undefined && afterSeq !== null) ? afterSeq : (state.im.headSeq || 0);
+      const url = seq > 0 ? `/api/im/events?after_seq=${seq}` : '/api/im/events';
       const es = new EventSource(url);
       state.im.eventSource = es;
 
@@ -2794,46 +2809,39 @@
         try {
           const msg = JSON.parse(e.data);
           state.im.messages.unshift(msg);
+          // Bound active view in memory to 100 to prevent browser freezing
+          if (state.im.messages.length > 100) {
+            state.im.messages = state.im.messages.slice(0, 100);
+          }
           state.im.headSeq = msg.ingest_seq;
           el.imStatTotalMsgs.textContent = state.im.headSeq;
           
-          // Refresh timeline & channels
-          loadImOverview();
-          loadImChannels();
           renderImMessages(state.im.messages);
-          renderImFocusFeed(state.im.messages);
+          if (!state.im.activeChannelId) {
+            renderImFocusFeed(state.im.messages);
+          }
+          scheduleSseUiRefresh();
         } catch (err) {}
       });
 
       es.addEventListener('resync_required', async (e) => {
-        // P1-IM-7-R1: MUST call close() immediately to stop browser native auto-reconnect loop!
         es.close();
+        state.im.eventSource = null;
         try {
           const data = JSON.parse(e.data);
-          const headSeq = data.snapshot_head_seq;
-          await exhaustImSnapshot(headSeq);
-          // After full snapshot exhaustion, reopen SSE with after_seq = headSeq
+          const headSeq = data.snapshot_head_seq || 0;
+          state.im.headSeq = headSeq;
+          // Bounded reload of current view
+          await Promise.all([
+            loadImOverview(),
+            loadImChannels(),
+            loadImTimeline()
+          ]);
           connectImSSE(headSeq);
         } catch (err) {
           console.error('Snapshot Resync failed:', err);
         }
       });
-    }
-
-    async function exhaustImSnapshot(snapshotHeadSeq) {
-      let cursor = 0;
-      while (true) {
-        const res = await api(`/im/snapshot?snapshot_head_seq=${snapshotHeadSeq}&cursor=${cursor}&limit=50`);
-        if (res.items && res.items.length > 0) {
-          state.im.messages = res.items.concat(state.im.messages);
-        }
-        if (!res.next_cursor) {
-          break; // Exhaustive pagination completed with 0 gap!
-        }
-        cursor = res.next_cursor;
-      }
-      renderImMessages(state.im.messages);
-      renderImFocusFeed(state.im.messages);
     }
 
     // IM 交互事件监听绑定
