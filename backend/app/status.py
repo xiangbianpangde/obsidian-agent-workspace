@@ -3,6 +3,7 @@
 - 两个 key：优先 `状态`，其次 `status`（避免双字段）
 - list 值 decode 后按语义值处理（不按 JSON 字符串分组）
 """
+
 from __future__ import annotations
 
 import json

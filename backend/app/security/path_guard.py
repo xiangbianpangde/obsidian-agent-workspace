@@ -6,6 +6,7 @@
 
 注意：macOS 文件名 NFD/NFC —— 所有路径比较统一 unicodedata.normalize('NFC', ...)。
 """
+
 from __future__ import annotations
 
 import unicodedata
@@ -113,7 +114,7 @@ def resolve_for_read_snapshot(cfg: AppConfig, relative_or_abs: str):
         canonical_rel = full.relative_to(cfg.vault_root).as_posix()
     except ValueError:
         raise PathError(f"path escapes vault: {relative_or_abs}") from None
-    _reject_excluded(cfg, canonical_rel)   # canonical 后检查（内部 symlink 不再绕开排除区）
+    _reject_excluded(cfg, canonical_rel)  # canonical 后检查（内部 symlink 不再绕开排除区）
     _reject_non_note(full)
     if not full.is_file():
         raise PathError(f"not a file: {canonical_rel}")
@@ -146,9 +147,7 @@ def resolve_for_template_read_snapshot(cfg: AppConfig, relative_or_abs: str):
 
 
 # P1-NEW-2: 严禁 SVG（同源主动可执行脚本风险）与 PDF（独立附件），仅允许纯被动位图
-_ALLOWED_ASSET_EXTS = {
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico"
-}
+_ALLOWED_ASSET_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico"}
 
 
 def resolve_for_asset_read(cfg: AppConfig, asset_path: str, note_path: str | None = None) -> Path:
@@ -183,14 +182,18 @@ def resolve_for_asset_read(cfg: AppConfig, asset_path: str, note_path: str | Non
         if len(exact_matches) == 1:
             cand = exact_matches[0]
         elif len(exact_matches) > 1:
-            raise PathError(f"ambiguous asset name ({len(exact_matches)} matches found): please specify relative path")
+            raise PathError(
+                f"ambiguous asset name ({len(exact_matches)} matches found): please specify relative path"
+            )
 
     if cand is None or not cand.is_file():
         raise PathError(f"asset not found: {asset_str}")
 
     # 4. 扩展名白名单校验 (严格禁止 SVG)
     if cand.suffix.lower() not in _ALLOWED_ASSET_EXTS:
-        raise PathError(f"asset extension not allowed: {cand.suffix} (SVG and active formats prohibited)")
+        raise PathError(
+            f"asset extension not allowed: {cand.suffix} (SVG and active formats prohibited)"
+        )
 
     # 5. 排除区校验
     canonical_rel = cand.relative_to(vault_root).as_posix()

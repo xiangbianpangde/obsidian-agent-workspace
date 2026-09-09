@@ -3,18 +3,35 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from .models import Course, CourseTimeSlot, period_range_to_time
 
 DAY_MAP = {
-    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7,
-    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
-    "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "日": 7,
+    "天": 7,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
+    "sun": 7,
 }
 
 PALETTE = [
@@ -69,7 +86,9 @@ def parse_week_pattern(raw: str) -> Tuple[int, int, str, List[int]]:
     return 1, 16, pattern, []
 
 
-def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027-1") -> List[Course]:
+def parse_markdown_schedule_table(
+    markdown_text: str, semester: str = "2026-2027-1"
+) -> List[Course]:
     """
     Parses a standard markdown course table into structured Course objects.
     Enforces multi-semester isolation: course IDs incorporate `semester`
@@ -94,16 +113,20 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
                 continue
             cols = [c.strip() for c in line_clean.split("|")[1:-1]]
             if len(cols) >= 6 and not cols[0].startswith("---"):
-                raw_rows.append({
-                    "day": cols[0],
-                    "period": cols[1],
-                    "time": cols[2] if len(cols) >= 8 else "",
-                    "name": cols[3] if len(cols) >= 8 else cols[2],
-                    "code": cols[4].strip("`") if len(cols) >= 8 else "",
-                    "weeks": cols[5] if len(cols) >= 8 else cols[3],
-                    "teacher": cols[6] if len(cols) >= 8 else cols[4],
-                    "classroom": cols[7] if len(cols) >= 8 else (cols[5] if len(cols) >= 6 else ""),
-                })
+                raw_rows.append(
+                    {
+                        "day": cols[0],
+                        "period": cols[1],
+                        "time": cols[2] if len(cols) >= 8 else "",
+                        "name": cols[3] if len(cols) >= 8 else cols[2],
+                        "code": cols[4].strip("`") if len(cols) >= 8 else "",
+                        "weeks": cols[5] if len(cols) >= 8 else cols[3],
+                        "teacher": cols[6] if len(cols) >= 8 else cols[4],
+                        "classroom": cols[7]
+                        if len(cols) >= 8
+                        else (cols[5] if len(cols) >= 6 else ""),
+                    }
+                )
 
     # Group by semester + course name + teacher
     course_map: Dict[str, Course] = {}
@@ -161,7 +184,7 @@ def parse_markdown_schedule_table(markdown_text: str, semester: str = "2026-2027
 def import_schedule_from_obsidian_vault(
     vault_path: Path,
     semester: str = "2026-2027-1",
-    relative_path: str = "07.学习笔记/大二上/课表.md"
+    relative_path: str = "07.学习笔记/大二上/课表.md",
 ) -> List[Course]:
     """
     Finds and parses 课表.md inside the user's Obsidian Vault.

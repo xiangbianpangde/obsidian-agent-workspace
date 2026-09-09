@@ -12,13 +12,13 @@
 - PRAGMA query_only=ON; PRAGMA busy_timeout=2000;
 - 短生命周期连接，按需获取，立即释放，不阻塞 WAL checkpoint。
 """
+
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
 import subprocess
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -37,12 +37,8 @@ class AgentsViewError(Exception):
 class AgentsViewAdapter:
     def __init__(self, cfg: AppConfig, force_transport: str | None = None):
         self.cfg = cfg
-        self.db_path = cfg.agentsview_db_path or (
-            Path.home() / ".agentsview" / "sessions.db"
-        )
-        self.cli_path = cfg.agentsview_cli_path or (
-            Path.home() / ".local" / "bin" / "agentsview"
-        )
+        self.db_path = cfg.agentsview_db_path or (Path.home() / ".agentsview" / "sessions.db")
+        self.cli_path = cfg.agentsview_cli_path or (Path.home() / ".local" / "bin" / "agentsview")
         # 支持测试中注入 force_transport='cli' 或 force_transport='sqlite-ro'
         self._force_transport = force_transport
 
@@ -52,9 +48,7 @@ class AgentsViewAdapter:
         if self._force_transport == "cli":
             return True
         return bool(
-            self.cli_path
-            and self.cli_path.is_file()
-            and os.access(str(self.cli_path), os.X_OK)
+            self.cli_path and self.cli_path.is_file() and os.access(str(self.cli_path), os.X_OK)
         )
 
     def _get_ro_connection(self) -> sqlite3.Connection:
@@ -213,9 +207,7 @@ class AgentsViewAdapter:
                 if project and project.strip() and project.strip().lower() != "all":
                     cmd.extend(["--project", project.strip()])
 
-                res = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=2.5, check=False
-                )
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.5, check=False)
                 if res.returncode == 0 and res.stdout.strip():
                     raw = json.loads(res.stdout)
                     sessions_raw = raw.get("sessions", [])
@@ -284,9 +276,7 @@ class AgentsViewAdapter:
         if self._cli_available():
             try:
                 cmd = [str(self.cli_path), "session", "get", session_id, "--json"]
-                res = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=2.0, check=False
-                )
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0, check=False)
                 if res.returncode == 0 and res.stdout.strip():
                     raw = json.loads(res.stdout)
                     return _normalize_cli_session(raw)
@@ -296,9 +286,7 @@ class AgentsViewAdapter:
         # 2. 回退路径: SQLite-RO
         conn = self._get_ro_connection()
         try:
-            row = conn.execute(
-                "SELECT * FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if not row:
                 raise AgentsViewError("SESSION_NOT_FOUND", f"会话未找到: {session_id}", 404)
             data = _format_session_dto(row)
@@ -327,22 +315,21 @@ class AgentsViewAdapter:
                     str(limit),
                     "--json",
                 ]
-                res = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=2.5, check=False
-                )
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.5, check=False)
                 if res.returncode == 0 and res.stdout.strip():
                     raw = json.loads(res.stdout)
                     raw_msgs = raw.get("messages", [])
                     messages = [_normalize_cli_message(m) for m in raw_msgs]
-                    next_ord = (
-                        messages[-1]["ordinal"] + 1 if messages else from_ordinal
-                    )
+                    next_ord = messages[-1]["ordinal"] + 1 if messages else from_ordinal
                     # 若 CLI 未返回准确 total，通过短生命周期只读连接获取真实条数，保证 has_more 精准 (P2-AV-R1)
                     total = raw.get("total")
                     if total is None:
                         try:
                             c = self._get_ro_connection()
-                            row = c.execute("SELECT COUNT(*) c FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+                            row = c.execute(
+                                "SELECT COUNT(*) c FROM messages WHERE session_id = ?",
+                                (session_id,),
+                            ).fetchone()
                             total = row["c"] if row else len(messages)
                             c.close()
                         except Exception:
@@ -382,9 +369,7 @@ class AgentsViewAdapter:
             valid_rows = rows[:limit]
 
             messages = [_format_message_dto(r) for r in valid_rows]
-            next_ordinal = (
-                valid_rows[-1]["ordinal"] + 1 if valid_rows else from_ordinal
-            )
+            next_ordinal = valid_rows[-1]["ordinal"] + 1 if valid_rows else from_ordinal
         finally:
             conn.close()
 
@@ -398,9 +383,7 @@ class AgentsViewAdapter:
             "has_more": has_more,
         }
 
-    def get_tool_calls(
-        self, session_id: str, limit: int = 100
-    ) -> dict[str, Any]:
+    def get_tool_calls(self, session_id: str, limit: int = 100) -> dict[str, Any]:
         """查询指定会话的工具调用明细 (主路径: CLI Transport; 回退: SQLite-RO)。"""
         limit = max(1, min(limit, 200))
 
@@ -408,9 +391,7 @@ class AgentsViewAdapter:
         if self._cli_available():
             try:
                 cmd = [str(self.cli_path), "session", "tool-calls", session_id, "--json"]
-                res = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=2.5, check=False
-                )
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.5, check=False)
                 if res.returncode == 0 and res.stdout.strip():
                     raw = json.loads(res.stdout)
                     calls_raw = raw if isinstance(raw, list) else raw.get("tool_calls", [])
@@ -445,6 +426,7 @@ class AgentsViewAdapter:
 
 
 # ======================== 权威 Session API DTO 规范化映射 (P1-AV-1) ========================
+
 
 def _format_session_dto(r) -> dict[str, Any]:
     keys = r.keys()

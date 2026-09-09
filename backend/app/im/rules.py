@@ -22,14 +22,35 @@ class FocusDecision:
 
 
 DEFAULT_COURSE_TEACHERS = [
-    "田莎莎", "谭永荣", "李娜", "胡丽霞", "吴立锋",
-    "谢金翠", "郝家春", "宫丽", "张翼", "姚欣雨", "高志荣", "康老师"
+    "田莎莎",
+    "谭永荣",
+    "李娜",
+    "胡丽霞",
+    "吴立锋",
+    "谢金翠",
+    "郝家春",
+    "宫丽",
+    "张翼",
+    "姚欣雨",
+    "高志荣",
+    "康老师",
 ]
 
 DEFAULT_COURSE_KEYWORDS = [
-    "数字电子技术", "数电", "概率论", "数理统计", "深度学习", "学术英语",
-    "数据结构", "大学物理", "大物", "体育", "毛泽东思想", "认识自我",
-    "计算机学院", "人工2502"
+    "数字电子技术",
+    "数电",
+    "概率论",
+    "数理统计",
+    "深度学习",
+    "学术英语",
+    "数据结构",
+    "大学物理",
+    "大物",
+    "体育",
+    "毛泽东思想",
+    "认识自我",
+    "计算机学院",
+    "人工2502",
 ]
 
 
@@ -103,7 +124,11 @@ def evaluate_focus_decision(
             )
 
         # 1.3 工作群: 2026新思路中高层群
-        if channel_type == "group" and ("2026新思路" in channel_name or "新思路中高层" in channel_name or "新思路" in channel_name):
+        if channel_type == "group" and (
+            "2026新思路" in channel_name
+            or "新思路中高层" in channel_name
+            or "新思路" in channel_name
+        ):
             return FocusDecision(
                 action="HIGHLIGHT",
                 priority="high",
@@ -128,7 +153,11 @@ def evaluate_focus_decision(
 
         # 1.5 其他 QQ 群聊: 默认折叠 (除非发布了 @全体成员)
         if channel_type == "group":
-            has_at_all = any(m.get("is_all") is True for m in mentions_list) or "@所有人" in text or "@全体成员" in text
+            has_at_all = (
+                any(m.get("is_all") is True for m in mentions_list)
+                or "@所有人" in text
+                or "@全体成员" in text
+            )
             if has_at_all:
                 return FocusDecision(
                     action="REGISTER_TODO",
@@ -154,7 +183,11 @@ def evaluate_focus_decision(
     # -------------------------------------------------------------------------
     elif source == "wechat":
         if is_self is not True:
-            has_at_all = any(m.get("is_all") is True for m in mentions_list) or "@所有人" in text or "@全体成员" in text
+            has_at_all = (
+                any(m.get("is_all") is True for m in mentions_list)
+                or "@所有人" in text
+                or "@全体成员" in text
+            )
             if has_at_all:
                 return FocusDecision(
                     action="REGISTER_TODO",
@@ -204,7 +237,11 @@ def evaluate_focus_decision(
 
         # 3.2 群聊关注逻辑：与课表匹配的课程群
         if channel_type == "group":
-            is_course_group = any(kw in channel_name for kw in keywords) or "课" in channel_name or "大群" in channel_name
+            is_course_group = (
+                any(kw in channel_name for kw in keywords)
+                or "课" in channel_name
+                or "大群" in channel_name
+            )
             if is_course_group:
                 # 严格匹配任课教师，其他同学信息一律不登记（即使 student @本人 也被抑制）
                 # Sol P2: 全等优先；子串匹配要求教师名 >= 3 字，避免「李娜」误命中「李娜娜」等学生
@@ -212,7 +249,10 @@ def evaluate_focus_decision(
                     t == sender_name or (len(t) >= 3 and t in sender_name) for t in teachers
                 )
                 if not is_real_teacher:
-                    is_real_teacher = any(title in sender_name for title in ["任课教师", "任课老师", "指导老师", "辅导员"])
+                    is_real_teacher = any(
+                        title in sender_name
+                        for title in ["任课教师", "任课老师", "指导老师", "辅导员"]
+                    )
                 if is_real_teacher:
                     return FocusDecision(
                         action="MUST_PROCESS",

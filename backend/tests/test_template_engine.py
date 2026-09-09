@@ -1,6 +1,7 @@
 """Template Engine 单元测试 (v0.2 §5 / M4 rev2).
 测试两阶段渲染、tp.file.path 闭合、custom vars 与 fail-closed 降级。
 """
+
 from __future__ import annotations
 
 import sys
@@ -32,7 +33,10 @@ class TestTemplateEngine(unittest.TestCase):
         self.assertEqual(info["supported_level"], "full")
 
         rendered, suggested_dir = render_template(
-            raw, title="测试普通笔记", target_path="07.学习笔记/测试普通笔记.md", now_dt=datetime(2026, 9, 3)
+            raw,
+            title="测试普通笔记",
+            target_path="07.学习笔记/测试普通笔记.md",
+            now_dt=datetime(2026, 9, 3),
         )
         self.assertIn("创建时间: '[[2026-09-03]]'", rendered)
         self.assertIsNone(suggested_dir)
@@ -43,9 +47,7 @@ class TestTemplateEngine(unittest.TestCase):
         target_path = compute_target_path("算法导论", "07.学习笔记")
         self.assertEqual(target_path, "07.学习笔记/算法导论.md")
 
-        rendered, _ = render_template(
-            raw, title="算法导论", target_path=target_path
-        )
+        rendered, _ = render_template(raw, title="算法导论", target_path=target_path)
         self.assertIn("文件路径是: 07.学习笔记/算法导论.md", rendered)
         self.assertIn("标题是: 算法导论", rendered)
 
@@ -114,6 +116,7 @@ tR += "复习内容";
     def test_template_secret_detection(self):
         # P1-M4-2: 模板读取必须受 secret detector 保护
         from app.security.secret_detector import looks_like_secret
+
         secret_tpl = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456\n# 模板正文"
         hit, note = looks_like_secret(secret_tpl)
         self.assertTrue(hit)

@@ -1,5 +1,6 @@
 """API: tags（标签统计与按标签筛选，按状态分组）。
 P1-M2-3: Python 侧组装（消除 N+1），status 统一识别 `状态`/`status` 两 key，list 先 decode 再分组。"""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -29,7 +30,7 @@ def tags_overview(conn=Depends(get_conn)):
         f"""
         SELECT ft.tag_id, ft.file_id, m.key, m.value, m.value_type
         FROM file_tags ft
-        JOIN metadata m ON m.file_id = ft.file_id AND m.key IN ({','.join('?' for _ in STATUS_KEYS)})
+        JOIN metadata m ON m.file_id = ft.file_id AND m.key IN ({",".join("?" for _ in STATUS_KEYS)})
         """,
         tuple(STATUS_KEYS),
     ).fetchall()
@@ -56,9 +57,7 @@ def tags_overview(conn=Depends(get_conn)):
     result = []
     for t in tag_rows:
         dist = tag_status.get(t["id"], Counter())
-        result.append(
-            {"tag": t["tag"], "count": t["cnt"], "status_distribution": dict(dist)}
-        )
+        result.append({"tag": t["tag"], "count": t["cnt"], "status_distribution": dict(dist)})
     return {"tags": result}
 
 
@@ -85,7 +84,7 @@ def files_by_tag(tag: str = Query(...), conn=Depends(get_conn)):
         for m in conn.execute(
             f"""
             SELECT file_id, key, value, value_type FROM metadata
-            WHERE file_id IN ({placeholders}) AND key IN ({','.join('?' for _ in STATUS_KEYS)})
+            WHERE file_id IN ({placeholders}) AND key IN ({",".join("?" for _ in STATUS_KEYS)})
             """,
             (*ids, *STATUS_KEYS),
         ):
@@ -122,7 +121,7 @@ def statuses_overview(conn=Depends(get_conn)):
     meta_rows = conn.execute(
         f"""
         SELECT file_id, key, value, value_type FROM metadata
-        WHERE key IN ({','.join('?' for _ in STATUS_KEYS)})
+        WHERE key IN ({",".join("?" for _ in STATUS_KEYS)})
         """,
         tuple(STATUS_KEYS),
     ).fetchall()
@@ -180,8 +179,7 @@ def statuses_overview(conn=Depends(get_conn)):
 
     for st in sorted_statuses:
         top_tags = [
-            {"tag": t, "count": c}
-            for t, c in status_tags.get(st, Counter()).most_common(8)
+            {"tag": t, "count": c} for t, c in status_tags.get(st, Counter()).most_common(8)
         ]
         result.append(
             {
@@ -201,7 +199,7 @@ def files_by_status(status: str = Query(...), conn=Depends(get_conn)):
     meta_rows = conn.execute(
         f"""
         SELECT file_id, key, value, value_type FROM metadata
-        WHERE key IN ({','.join('?' for _ in STATUS_KEYS)})
+        WHERE key IN ({",".join("?" for _ in STATUS_KEYS)})
         """,
         tuple(STATUS_KEYS),
     ).fetchall()

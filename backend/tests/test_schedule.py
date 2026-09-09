@@ -1,6 +1,5 @@
 """Comprehensive Test Suite for Schedule, Academic Calendar & Focus Rules."""
 
-import json
 import sqlite3
 import tempfile
 from datetime import date, datetime
@@ -23,10 +22,10 @@ from backend.app.schedule.models import (
 from backend.app.schedule.reminders import get_upcoming_reminders
 from backend.app.schedule.storage import ScheduleStorage
 
-
 # -----------------------------------------------------------------------------
 # 1. Week & Academic Calendar Calculation Tests
 # -----------------------------------------------------------------------------
+
 
 def test_current_week_and_phase_calculation():
     with tempfile.TemporaryDirectory() as td:
@@ -39,9 +38,7 @@ def test_current_week_and_phase_calculation():
             teaching_weeks_end=16,
             exam_weeks_start=17,
             exam_weeks_end=18,
-            holidays=[
-                HolidayRule(name="国庆节", start_date="2026-10-01", end_date="2026-10-07")
-            ]
+            holidays=[HolidayRule(name="国庆节", start_date="2026-10-01", end_date="2026-10-07")],
         )
         storage.save_calendar(cal)
 
@@ -63,7 +60,9 @@ def test_current_week_and_phase_calculation():
         assert w_hol["holiday_name"] == "国庆节"
 
         # 2026-12-28 is Exam Week (Week 18)
-        w_exam = storage.compute_current_week(target_date=date(2026, 12, 28), semester="2026-2027-1")
+        w_exam = storage.compute_current_week(
+            target_date=date(2026, 12, 28), semester="2026-2027-1"
+        )
         assert w_exam["current_week"] == 18
         assert w_exam["phase"] == "exam"
 
@@ -83,6 +82,7 @@ SAMPLE_SCHEDULE_MD = """
 | 星期一 | 第3–4节 | 10:00–11:40 | 概率论与数理统计 | `[2101000112]-06` | 1–14周 | 谭永荣 | 11309 |
 | 星期一 | 第9–11节 | 18:40–21:05 | 数字电子技术(B)（实验） | `[209100035618S]-01` | 9–15周（单） | 田莎莎 | S090307 |
 """
+
 
 def test_markdown_importer_and_effective_schedule():
     with tempfile.TemporaryDirectory() as td:
@@ -124,6 +124,7 @@ def test_markdown_importer_and_effective_schedule():
 # 3. Single-Week Temporary Overrides Isolation Tests
 # -----------------------------------------------------------------------------
 
+
 def test_single_week_overrides_isolation():
     """
     Temporary override for Week 2 (relocate / cancel) must NOT bleed into Week 3 or Week 1.
@@ -146,7 +147,7 @@ def test_single_week_overrides_isolation():
             day_of_week=1,
             override_type="relocate",
             new_classroom="15204",
-            reason="临时更换多媒体教室"
+            reason="临时更换多媒体教室",
         )
         storage.add_override(ov)
 
@@ -170,6 +171,7 @@ def test_single_week_overrides_isolation():
 # 4. Upcoming Class Reminders Tests
 # -----------------------------------------------------------------------------
 
+
 def test_upcoming_reminders_and_override_synchronization():
     with tempfile.TemporaryDirectory() as td:
         storage = ScheduleStorage(Path(td) / "schedule.db")
@@ -189,19 +191,23 @@ def test_upcoming_reminders_and_override_synchronization():
 
         # Test: Cancel this class in week 2
         prob_course = next(c for c in courses if "概率论" in c.name)
-        storage.add_override(CourseOverride(
-            id="ov_cancel_prob",
-            time_slot_id=prob_course.time_slots[0].id,
-            course_id=prob_course.id,
-            semester="2026-2027-1",
-            week_number=2,
-            day_of_week=1,
-            override_type="cancel",
-            reason="老师开会停课一次"
-        ))
+        storage.add_override(
+            CourseOverride(
+                id="ov_cancel_prob",
+                time_slot_id=prob_course.time_slots[0].id,
+                course_id=prob_course.id,
+                semester="2026-2027-1",
+                week_number=2,
+                day_of_week=1,
+                override_type="cancel",
+                reason="老师开会停课一次",
+            )
+        )
 
         # Cancelled class must NOT produce reminder!
-        reminders_after_cancel = get_upcoming_reminders(storage, ref_dt=ref_monday, lookahead_minutes=30)
+        reminders_after_cancel = get_upcoming_reminders(
+            storage, ref_dt=ref_monday, lookahead_minutes=30
+        )
         assert not any("概率论" in r["course_name"] for r in reminders_after_cancel)
 
         storage.close()
@@ -210,6 +216,7 @@ def test_upcoming_reminders_and_override_synchronization():
 # -----------------------------------------------------------------------------
 # 5. Integrated Academic Events Tests
 # -----------------------------------------------------------------------------
+
 
 def test_integrated_academic_events():
     with tempfile.TemporaryDirectory() as td:
@@ -247,6 +254,7 @@ def test_integrated_academic_events():
 # 6. Focus & Attention Rules Unit Tests (User Specifications)
 # -----------------------------------------------------------------------------
 
+
 def test_user_specific_focus_rules_matrix():
     # 6.1 QQ: 人工2502班通知群 (全量必看高优待办)
     tags, reasons = evaluate_focus_rules(
@@ -254,7 +262,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="qq",
         sender_name="学习委员",
-        text="明天调课通知"
+        text="明天调课通知",
     )
     assert "class_must_read" in tags
     assert "人工2502班通知群" in reasons[0]
@@ -265,7 +273,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="direct",
         source="qq",
         sender_name="乌鸦像写字台",
-        text="记录：研读 Transformer 论文第 4 节"
+        text="记录：研读 Transformer 论文第 4 节",
     )
     assert "self_memo_obsidian" in tags
     assert "Obsidian" in reasons[0]
@@ -276,7 +284,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="direct",
         source="qq",
         sender_name="康老师",
-        text="浩岚，下午两点到实验室开组会"
+        text="浩岚，下午两点到实验室开组会",
     )
     assert "leader_urgent_todo" in tags
     assert "康老师" in reasons[0]
@@ -287,7 +295,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="qq",
         sender_name="康老师",
-        text="大家下午好，关于选课有一点说明"
+        text="大家下午好，关于选课有一点说明",
     )
     assert "leader_urgent_todo" in tags_kang_class
     assert "康老师" in reasons_kang_class[0]
@@ -298,7 +306,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="qq",
         sender_name="行政主管",
-        text="请各组提交本周周报"
+        text="请各组提交本周周报",
     )
     assert "work_group_focus" in tags
     assert "新思路" in reasons[0]
@@ -309,7 +317,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="qq",
         sender_name="张三",
-        text="今晚来一把"
+        text="今晚来一把",
     )
     assert tags == []  # Folded groups must have EMPTY tags so they are excluded from focus feed!
 
@@ -319,7 +327,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="wechat",
         sender_name="李四",
-        text="周六环湖骑行报名"
+        text="周六环湖骑行报名",
     )
     assert "wechat_todo" in tags_wx_grp
 
@@ -330,7 +338,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="group",
         source="wecom",
         sender_name="谢金翠",  # 课表中的大物任课老师
-        text="本周五由于校运动会停课一次"
+        text="本周五由于校运动会停课一次",
     )
     assert "course_teacher_notice" in tags_t
     assert "谢金翠" in reasons_t[0]
@@ -342,7 +350,7 @@ def test_user_specific_focus_rules_matrix():
         source="wecom",
         sender_name="李同学",
         text="收到老师 @袁浩岚",
-        mentions=[{"is_self": True}]
+        mentions=[{"is_self": True}],
     )
     assert "course_teacher_notice" not in tags_s
     assert "mention_self" not in tags_s
@@ -354,7 +362,7 @@ def test_user_specific_focus_rules_matrix():
         channel_type="direct",
         source="wecom",
         sender_name="辅导员刘老师",
-        text="请提交综合素质测评表"
+        text="请提交综合素质测评表",
     )
     assert "wecom_direct_todo" in tags_direct
 
@@ -362,6 +370,7 @@ def test_user_specific_focus_rules_matrix():
 # -----------------------------------------------------------------------------
 # 7. FastAPI Schedule Endpoints End-to-End
 # -----------------------------------------------------------------------------
+
 
 def test_schedule_api_endpoints():
     client = TestClient(app)
@@ -419,6 +428,7 @@ def test_schedule_api_endpoints():
 # 8. Same-Day Multiple Slots Override Isolation (R6)
 # -----------------------------------------------------------------------------
 
+
 def test_same_day_multiple_slots_override_isolation():
     """
     R6: A course with two slots on the same day (e.g. slot 1 in morning,
@@ -442,7 +452,7 @@ def test_same_day_multiple_slots_override_isolation():
                     end_time="09:40",
                     start_week=1,
                     end_week=16,
-                    classroom="15110"
+                    classroom="15110",
                 ),
                 CourseTimeSlot(
                     id="ts_evening_2",
@@ -454,9 +464,9 @@ def test_same_day_multiple_slots_override_isolation():
                     end_time="21:05",
                     start_week=1,
                     end_week=16,
-                    classroom="S090307"
+                    classroom="S090307",
                 ),
-            ]
+            ],
         )
         storage.save_course(course)
 
@@ -470,7 +480,7 @@ def test_same_day_multiple_slots_override_isolation():
             day_of_week=1,
             override_type="relocate",
             new_classroom="15204",
-            reason="上午改至15204"
+            reason="上午改至15204",
         )
         storage.add_override(ov)
 
@@ -492,6 +502,7 @@ def test_same_day_multiple_slots_override_isolation():
 # -----------------------------------------------------------------------------
 # 9. Period & Absolute Time Synchronization in Reschedule (R7)
 # -----------------------------------------------------------------------------
+
 
 def test_reschedule_period_and_time_synchronization():
     """
@@ -516,9 +527,9 @@ def test_reschedule_period_and_time_synchronization():
                     end_time="09:40",
                     start_week=1,
                     end_week=16,
-                    classroom="11413"
+                    classroom="11413",
                 )
-            ]
+            ],
         )
         storage.save_course(course)
 
@@ -534,7 +545,7 @@ def test_reschedule_period_and_time_synchronization():
             new_day_of_week=2,
             new_start_period=5,
             new_end_period=6,
-            reason="调至下午第5-6节"
+            reason="调至下午第5-6节",
         )
         storage.add_override(ov)
 
@@ -546,11 +557,15 @@ def test_reschedule_period_and_time_synchronization():
         assert resched_slot["end_time"] == "15:50"
 
         # Reminders check: at 07:50 (morning), NO reminder should trigger!
-        rem_morning = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 8, 7, 50), lookahead_minutes=30)
+        rem_morning = get_upcoming_reminders(
+            storage, ref_dt=datetime(2026, 9, 8, 7, 50), lookahead_minutes=30
+        )
         assert len(rem_morning) == 0
 
         # At 13:55 (15 mins before 14:10), reminder MUST trigger!
-        rem_afternoon = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 8, 13, 55), lookahead_minutes=30)
+        rem_afternoon = get_upcoming_reminders(
+            storage, ref_dt=datetime(2026, 9, 8, 13, 55), lookahead_minutes=30
+        )
         assert len(rem_afternoon) == 1
         assert rem_afternoon[0]["start_time"] == "14:10"
 
@@ -560,6 +575,7 @@ def test_reschedule_period_and_time_synchronization():
 # -----------------------------------------------------------------------------
 # 10. Multi-Semester Course ID Isolation (R9)
 # -----------------------------------------------------------------------------
+
 
 def test_multi_semester_course_id_isolation():
     """
@@ -580,6 +596,7 @@ def test_multi_semester_course_id_isolation():
 # 11. Zero Delete Soft Delete Compliance (R10)
 # -----------------------------------------------------------------------------
 
+
 def test_zero_delete_soft_delete_compliance():
     """
     R10: Calling delete_course or delete_event soft-deletes the item (is_deleted=1)
@@ -599,7 +616,9 @@ def test_zero_delete_soft_delete_compliance():
 
         # Physical row STILL EXISTS in SQLite with is_deleted=1 (Zero Delete compliance)!
         with sqlite3.connect(str(storage.db_path)) as conn:
-            row = conn.execute("SELECT id, is_deleted, deleted_at FROM courses WHERE id='crs_soft_del';").fetchone()
+            row = conn.execute(
+                "SELECT id, is_deleted, deleted_at FROM courses WHERE id='crs_soft_del';"
+            ).fetchone()
             assert row is not None
             assert row[1] == 1
             assert row[2] is not None  # Timestamp preserved for audit!
@@ -610,6 +629,7 @@ def test_zero_delete_soft_delete_compliance():
 # -----------------------------------------------------------------------------
 # 12. PUT Meeting & Reminder Endpoints Return 200 without Slot Duplication (B1)
 # -----------------------------------------------------------------------------
+
 
 def test_meeting_and_reminder_put_endpoints_atomic_success():
     """
@@ -624,21 +644,32 @@ def test_meeting_and_reminder_put_endpoints_atomic_success():
         "semester": "2026-2027-1",
         "time_slots": [
             {
-                "day_of_week": 3, "start_period": 1, "end_period": 2,
-                "start_time": "08:00", "end_time": "09:40", "classroom": "15204"
+                "day_of_week": 3,
+                "start_period": 1,
+                "end_period": 2,
+                "start_time": "08:00",
+                "end_time": "09:40",
+                "classroom": "15204",
             },
             {
-                "day_of_week": 5, "start_period": 3, "end_period": 4,
-                "start_time": "10:00", "end_time": "11:40", "classroom": "15204"
-            }
-        ]
+                "day_of_week": 5,
+                "start_period": 3,
+                "end_period": 4,
+                "start_time": "10:00",
+                "end_time": "11:40",
+                "classroom": "15204",
+            },
+        ],
     }
     r = client.post("/api/schedule/course", json=c_payload)
     assert r.status_code == 200
     cid = r.json()["course"]["id"]
 
     # Update meeting URL -> MUST return 200
-    r_meet = client.put(f"/api/schedule/course/{cid}/meeting", json={"meeting_url": "https://meeting.tencent.com/dm/123456"})
+    r_meet = client.put(
+        f"/api/schedule/course/{cid}/meeting",
+        json={"meeting_url": "https://meeting.tencent.com/dm/123456"},
+    )
     assert r_meet.status_code == 200
     assert r_meet.json()["meeting_url"] == "https://meeting.tencent.com/dm/123456"
 
@@ -658,6 +689,7 @@ def test_meeting_and_reminder_put_endpoints_atomic_success():
 # -----------------------------------------------------------------------------
 # 13. Pre-existing DB Override Unique Constraint Migration (B3)
 # -----------------------------------------------------------------------------
+
 
 def test_pre_existing_db_override_unique_constraint_migration():
     """
@@ -696,7 +728,7 @@ def test_pre_existing_db_override_unique_constraint_migration():
             week_number=2,
             day_of_week=1,
             override_type="relocate",
-            new_classroom="Room A"
+            new_classroom="Room A",
         )
         storage.add_override(ov1)
 
@@ -708,7 +740,7 @@ def test_pre_existing_db_override_unique_constraint_migration():
             week_number=2,
             day_of_week=1,
             override_type="relocate",
-            new_classroom="Room B"
+            new_classroom="Room B",
         )
         storage.add_override(ov2)
 
@@ -723,6 +755,7 @@ def test_pre_existing_db_override_unique_constraint_migration():
 # 14. Batch Save Courses Atomic Rollback on Failure (B4)
 # -----------------------------------------------------------------------------
 
+
 def test_batch_save_courses_atomic_rollback_on_failure():
     """
     B4: When batch saving courses, an error on any item rolls back the ENTIRE batch.
@@ -730,9 +763,22 @@ def test_batch_save_courses_atomic_rollback_on_failure():
     with tempfile.TemporaryDirectory() as td:
         storage = ScheduleStorage(Path(td) / "schedule.db")
         c1 = Course(id="crs_batch_1", name="课程1", semester="2026-2027-1")
-        c2 = Course(id="crs_batch_2", name="课程2", semester="2026-2027-1", time_slots=[
-            CourseTimeSlot(id="ts_bad", course_id="crs_batch_2", day_of_week=1, start_period=None, end_period=2, start_time="08:00", end_time="09:40")
-        ])
+        c2 = Course(
+            id="crs_batch_2",
+            name="课程2",
+            semester="2026-2027-1",
+            time_slots=[
+                CourseTimeSlot(
+                    id="ts_bad",
+                    course_id="crs_batch_2",
+                    day_of_week=1,
+                    start_period=None,
+                    end_period=2,
+                    start_time="08:00",
+                    end_time="09:40",
+                )
+            ],
+        )
 
         with pytest.raises(Exception):
             storage.save_courses_batch([c1, c2])
@@ -746,6 +792,7 @@ def test_batch_save_courses_atomic_rollback_on_failure():
 # -----------------------------------------------------------------------------
 # 15. Reminder Minutes Exact Threshold Window (B6)
 # -----------------------------------------------------------------------------
+
 
 def test_reminder_minutes_exact_threshold_window():
     """
@@ -767,18 +814,22 @@ def test_reminder_minutes_exact_threshold_window():
                     start_period=3,
                     end_period=4,
                     start_time="10:00",
-                    end_time="11:40"
+                    end_time="11:40",
                 )
-            ]
+            ],
         )
         storage.save_course(c)
 
         # 09:15 is 45 minutes before class -> MUST NOT trigger!
-        rems_early = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 7, 9, 15), lookahead_minutes=90)
+        rems_early = get_upcoming_reminders(
+            storage, ref_dt=datetime(2026, 9, 7, 9, 15), lookahead_minutes=90
+        )
         assert len(rems_early) == 0
 
         # 09:56 is 4 minutes before class -> MUST trigger!
-        rems_on_time = get_upcoming_reminders(storage, ref_dt=datetime(2026, 9, 7, 9, 56), lookahead_minutes=90)
+        rems_on_time = get_upcoming_reminders(
+            storage, ref_dt=datetime(2026, 9, 7, 9, 56), lookahead_minutes=90
+        )
         assert len(rems_on_time) == 1
         assert rems_on_time[0]["minutes_until_start"] == 4
 
@@ -788,6 +839,7 @@ def test_reminder_minutes_exact_threshold_window():
 # -----------------------------------------------------------------------------
 # 16. Repeat Import Preserves Slot IDs & Overrides (B8 & B9)
 # -----------------------------------------------------------------------------
+
 
 def test_repeat_import_preserves_slot_ids_and_overrides():
     """
@@ -812,7 +864,7 @@ def test_repeat_import_preserves_slot_ids_and_overrides():
             day_of_week=slot1.day_of_week,
             override_type="relocate",
             new_classroom="15204",
-            reason="临时调换"
+            reason="临时调换",
         )
         storage.add_override(ov)
 

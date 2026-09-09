@@ -1,9 +1,8 @@
 """Markdown parser: frontmatter, tags (分类), 状态 (生命周期), metadata typing, sha256."""
+
 from __future__ import annotations
 
 import hashlib
-import json
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,8 +27,8 @@ class ParsedFile:
     created_at: str | None
     modified_at: str | None
     sha256: str
-    tags: list[str] = field(default_factory=list)      # 分类（tags/标签）
-    statuses: list[str] = field(default_factory=list)   # 生命周期（状态/status）
+    tags: list[str] = field(default_factory=list)  # 分类（tags/标签）
+    statuses: list[str] = field(default_factory=list)  # 生命周期（状态/status）
     metadata: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def as_dict(self) -> dict:

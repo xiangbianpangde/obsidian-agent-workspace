@@ -3,6 +3,7 @@ P1-M4-1: 两阶段渲染与完整 target_path 上下文。
 P1-M4-3: Fail-closed 支持等级判定，动态/未知表达式降级而不猜测执行。
 合同收口: 支持 custom vars (tp.user.* / {{key}})。
 """
+
 from __future__ import annotations
 
 import re
@@ -201,9 +202,7 @@ def render_template(
     result = _RE_FILE_PATH.sub(lambda _m: target_path, result)
     for k, v in vars.items():
         value = str(v)
-        result = _RE_USER_VAR_TP.sub(
-            lambda m: value if m.group(1) == k else m.group(0), result
-        )
+        result = _RE_USER_VAR_TP.sub(lambda m: value if m.group(1) == k else m.group(0), result)
         result = _RE_USER_VAR_MUSTACHE.sub(
             lambda m: value if m.group(1) == k else m.group(0), result
         )
@@ -222,7 +221,9 @@ def render_template(
     # 6. 对纯 JS 块插入降级说明
     def _wrap_js_block(match: re.Match) -> str:
         js_code = match.group(0)
-        warning = "\n<!-- workspace: unsupported Templater JS block (will execute in Obsidian) -->\n"
+        warning = (
+            "\n<!-- workspace: unsupported Templater JS block (will execute in Obsidian) -->\n"
+        )
         return warning + js_code + "\n"
 
     result = _RE_PURE_JS_BLOCK.sub(_wrap_js_block, result)

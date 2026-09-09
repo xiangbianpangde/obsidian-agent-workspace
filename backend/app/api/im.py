@@ -51,6 +51,7 @@ def apply_no_store(response: Response) -> None:
 # Public Query Endpoints
 # -----------------------------------------------------------------------------
 
+
 @router.get("/api/im/status")
 async def get_im_status(response: Response) -> Dict[str, Any]:
     apply_no_store(response)
@@ -59,7 +60,7 @@ async def get_im_status(response: Response) -> Dict[str, Any]:
     return {
         "status": "ok",
         "sources": statuses,
-        "head_seq": coordinator.journal.get_current_head_seq()
+        "head_seq": coordinator.journal.get_current_head_seq(),
     }
 
 
@@ -80,7 +81,7 @@ async def get_im_overview(response: Response) -> Dict[str, Any]:
         "channel_count": len(channels),
         "total_unseen": total_unseen,
         "platforms": platform_counts,
-        "head_seq": journal.get_current_head_seq()
+        "head_seq": journal.get_current_head_seq(),
     }
 
 
@@ -89,7 +90,7 @@ async def list_im_channels(
     response: Response,
     platform: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
-    focus_only: bool = Query(False)
+    focus_only: bool = Query(False),
 ) -> Dict[str, Any]:
     apply_no_store(response)
     journal = get_im_journal()
@@ -102,15 +103,12 @@ async def list_im_channels(
             "account_id": c.account_id,
             "channel_type": c.channel_type,
             "name": c.name,
-            "avatar": {
-                "availability": c.avatar_availability,
-                "local_ref": c.avatar_local_ref
-            },
+            "avatar": {"availability": c.avatar_availability, "local_ref": c.avatar_local_ref},
             "last_message": c.last_message,
             "last_time": c.last_time,
             "local_unseen_count": c.local_unseen_count,
             "is_focus": c.is_focus,
-            "native_unread_count": c.native_unread_count
+            "native_unread_count": c.native_unread_count,
         }
         for c in channels
     ]
@@ -125,7 +123,7 @@ async def get_im_timeline(
     limit: int = Query(50, ge=1, le=100),
     cursor: Optional[str] = Query(None),
     snapshot_seq: Optional[int] = Query(None),
-    focus_only: bool = Query(False)
+    focus_only: bool = Query(False),
 ) -> Dict[str, Any]:
     apply_no_store(response)
     journal = get_im_journal()
@@ -135,13 +133,15 @@ async def get_im_timeline(
         limit=limit,
         cursor=cursor,
         snapshot_seq=snapshot_seq,
-        focus_only=focus_only
+        focus_only=focus_only,
     )
 
     return {
         "items": [asdict_message(m) for m in items],
         "next_cursor": next_cursor,
-        "snapshot_head_seq": snapshot_seq if snapshot_seq is not None else journal.get_current_head_seq()
+        "snapshot_head_seq": snapshot_seq
+        if snapshot_seq is not None
+        else journal.get_current_head_seq(),
     }
 
 
@@ -150,7 +150,7 @@ async def get_im_snapshot_page(
     response: Response,
     snapshot_head_seq: int = Query(..., ge=1),
     cursor: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100)
+    limit: int = Query(50, ge=1, le=100),
 ) -> Dict[str, Any]:
     """
     Deterministic pagination for Resync Snapshot Exhaustion (P1-IM-7-R1 & AT-8):
@@ -159,15 +159,13 @@ async def get_im_snapshot_page(
     apply_no_store(response)
     journal = get_im_journal()
     items, next_cursor = journal.query_snapshot_page(
-        snapshot_head_seq=snapshot_head_seq,
-        cursor=cursor,
-        limit=limit
+        snapshot_head_seq=snapshot_head_seq, cursor=cursor, limit=limit
     )
 
     return {
         "items": [asdict_message(m) for m in items],
         "next_cursor": next_cursor,
-        "snapshot_head_seq": snapshot_head_seq
+        "snapshot_head_seq": snapshot_head_seq,
     }
 
 
@@ -183,8 +181,8 @@ async def mark_channel_seen(channel_id: str, response: Response) -> Dict[str, An
 async def trigger_im_sync(response: Response) -> Dict[str, Any]:
     """Request an on-demand snapshot sync via loopback trigger file."""
     import os
-    import tempfile
     import time
+
     apply_no_store(response)
     # Sol P2: 与 im_sync_daemon 对齐的用户私有触发目录；O_EXCL|O_NOFOLLOW 防 symlink 抢占
     trigger_dir = Path(
@@ -207,21 +205,20 @@ async def trigger_im_sync(response: Response) -> Dict[str, Any]:
 async def get_im_events(
     request: Request,
     after_seq: Optional[int] = Query(None),
-    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID")
+    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     """
     Unified SSE Event Bus with dual-cursor precedence and Resync Fence (P1-IM-7).
     """
     coordinator = await ensure_im_coordinator_started()
     gen = coordinator.subscribe_events(
-        query_after_seq=after_seq,
-        header_last_event_id=last_event_id
+        query_after_seq=after_seq, header_last_event_id=last_event_id
     )
 
     headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Connection": "keep-alive",
-        "Content-Type": "text/event-stream"
+        "Content-Type": "text/event-stream",
     }
     return StreamingResponse(gen, media_type="text/event-stream", headers=headers)
 
@@ -229,6 +226,7 @@ async def get_im_events(
 def asdict_message(m: Any) -> Dict[str, Any]:
     """Safe serialization of IMMessageItem without leaking filesystem paths."""
     from dataclasses import asdict
+
     d = asdict(m)
     # Ensure attachments do not leak local paths
     if "attachments" in d:

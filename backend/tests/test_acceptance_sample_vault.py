@@ -2,10 +2,10 @@
 P1-M5-EVIDENCE-1 & P1-M5-REPRO-1:
 彻底自包含、零摩擦、零外部数据依赖，可在任何机器独立跑绿 1~9 项指标。
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import sys
@@ -19,12 +19,12 @@ _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from fastapi.testclient import TestClient
 from app.config import AppConfig
 from app.database import sqlite
 from app.main import app
 from app.scanner.vault_scanner import scan_vault
 from app.state import init_state
+from fastapi.testclient import TestClient
 
 
 class TestAcceptanceSampleVault(unittest.TestCase):
@@ -86,8 +86,16 @@ class TestAcceptanceSampleVault(unittest.TestCase):
             bind_host="127.0.0.1",
             port=8787,
             scan_exclude=[
-                ".obsidian", ".claudian", ".codex", ".hermes", ".claude",
-                "copilot", ".trash", "附件", "credentials", ".git",
+                ".obsidian",
+                ".claudian",
+                ".codex",
+                ".hermes",
+                ".claude",
+                "copilot",
+                ".trash",
+                "附件",
+                "credentials",
+                ".git",
             ],
             reject_symlink_escape=True,
             watchdog_enabled=True,
@@ -142,7 +150,7 @@ class TestAcceptanceSampleVault(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         tdata = res.json()
         tags = tdata["tags"]
-        
+
         ml_tag = next((t for t in tags if t["tag"] == "机器学习"), None)
         self.assertIsNotNone(ml_tag)
         self.assertGreaterEqual(ml_tag["count"], 1)
@@ -157,7 +165,7 @@ class TestAcceptanceSampleVault(unittest.TestCase):
     def test_04_successful_edit_and_backup(self):
         """验收 4: 真实的编辑成功保存、索引刷新与备份生成"""
         target_path = "02. 归类 Arrange/算法设计.md"
-        
+
         # 1. 先读出当前快照与 hash
         res1 = self.client.get(f"/api/file/content?path={target_path}")
         self.assertEqual(res1.status_code, 200)
@@ -167,7 +175,7 @@ class TestAcceptanceSampleVault(unittest.TestCase):
         new_content = res1.json()["raw"] + "\n\n## 验收追加章节\n这是真实保存测试内容。\n"
         save_res = self.client.post(
             "/api/file/save",
-            json={"path": target_path, "content": new_content, "expected_hash": orig_hash}
+            json={"path": target_path, "content": new_content, "expected_hash": orig_hash},
         )
         self.assertEqual(save_res.status_code, 200)
         self.assertTrue(save_res.json()["ok"])
@@ -187,11 +195,15 @@ class TestAcceptanceSampleVault(unittest.TestCase):
     def test_05_optimistic_lock_409_conflict(self):
         """验收 5: 并发修改 409 冲突阻断（防止外部覆盖）"""
         target_path = "02. 归类 Arrange/算法设计.md"
-        
+
         # 故意传入过期的 expected_hash 模拟并发修改
         conflict_res = self.client.post(
             "/api/file/save",
-            json={"path": target_path, "content": "试图覆盖修改", "expected_hash": "stale_hash_12345"}
+            json={
+                "path": target_path,
+                "content": "试图覆盖修改",
+                "expected_hash": "stale_hash_12345",
+            },
         )
         self.assertEqual(conflict_res.status_code, 409)
         self.assertIn("已被外部修改", conflict_res.json()["detail"])
@@ -199,7 +211,7 @@ class TestAcceptanceSampleVault(unittest.TestCase):
         # 状态修改同样拦截
         status_conflict = self.client.patch(
             "/api/file/status",
-            json={"path": target_path, "status": "已完成", "expected_hash": "stale_hash_12345"}
+            json={"path": target_path, "status": "已完成", "expected_hash": "stale_hash_12345"},
         )
         self.assertEqual(status_conflict.status_code, 409)
 
@@ -211,12 +223,12 @@ class TestAcceptanceSampleVault(unittest.TestCase):
             json={
                 "template_path": "资料库/模版/01. 采集笔记模版.md",
                 "title": "量子计算前沿探索",
-            }
+            },
         )
         self.assertEqual(create_res.status_code, 200)
         ret = create_res.json()
         target_rel = ret["path"]
-        
+
         # 验证自动按建议目录落位 (01. 采集 Grasp/所有采集/...)
         self.assertTrue(target_rel.startswith("01. 采集 Grasp/所有采集/"))
         self.assertTrue(target_rel.endswith("量子计算前沿探索.md"))
@@ -239,7 +251,7 @@ class TestAcceptanceSampleVault(unittest.TestCase):
             json={
                 "template_path": "资料库/模版/01. 采集笔记模版.md",
                 "title": "量子计算前沿探索",
-            }
+            },
         )
         self.assertEqual(dup_res.status_code, 409)
 
@@ -250,11 +262,11 @@ class TestAcceptanceSampleVault(unittest.TestCase):
             json={
                 "template_path": "资料库/模版/04. 日记模版.md",
                 "title": "2026-09-03-验收日记",
-            }
+            },
         )
         self.assertEqual(diary_res.status_code, 200)
         created_path = diary_res.json()["path"]
-        
+
         # 读取验证降级注释与代码
         res_c = self.client.get(f"/api/file/content?path={created_path}")
         self.assertEqual(res_c.status_code, 200)
@@ -265,21 +277,31 @@ class TestAcceptanceSampleVault(unittest.TestCase):
     def test_08_security_boundaries(self):
         """验收 8: 全套安全边界（路径穿越、排除区、模板只读、Secret 拦截、DELETE 禁用）"""
         # 1. 路径穿越
-        self.assertEqual(self.client.get("/api/file/content?path=../../etc/passwd").status_code, 400)
+        self.assertEqual(
+            self.client.get("/api/file/content?path=../../etc/passwd").status_code, 400
+        )
 
         # 2. 排除区 (.obsidian)
-        self.assertEqual(self.client.get("/api/file/content?path=.obsidian/app.json").status_code, 400)
+        self.assertEqual(
+            self.client.get("/api/file/content?path=.obsidian/app.json").status_code, 400
+        )
 
         # 3. 模板目录写保护
         tpl_write = self.client.post(
             "/api/file/save",
-            json={"path": "资料库/模版/00. 普通笔记模版.md", "content": "篡改模板", "expected_hash": "abc"}
+            json={
+                "path": "资料库/模版/00. 普通笔记模版.md",
+                "content": "篡改模板",
+                "expected_hash": "abc",
+            },
         )
         self.assertEqual(tpl_write.status_code, 400)
         self.assertIn("read-only", tpl_write.json()["detail"])
 
         # 4. Secret 笔记读取拒绝 (测试刚才构造的包含明文 key 的测试文件)
-        secret_read = self.client.get("/api/file/content?path=07. 学习笔记/测试Secret/key_sample.md")
+        secret_read = self.client.get(
+            "/api/file/content?path=07. 学习笔记/测试Secret/key_sample.md"
+        )
         self.assertEqual(secret_read.status_code, 400)
         self.assertIn("secret guard", secret_read.json()["detail"])
 

@@ -1,5 +1,6 @@
 """FastAPI app: M2 API 契约（v0.2 §6）。模板端点（templates/preview/create-with-template）由 M4 提供。
 P1-M2-1: API（per-request）/ watchdog / scanner 各用独立 connection。"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -8,15 +9,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import files as files_api
-from .api import tags as tags_api
-from .api import templates as templates_api
 from .api import agentsview as agentsview_api
+from .api import files as files_api
 from .api import im as im_api
 from .api import schedule as schedule_api
+from .api import tags as tags_api
+from .api import templates as templates_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import get_cfg, init_state
+
 observer = None
 
 

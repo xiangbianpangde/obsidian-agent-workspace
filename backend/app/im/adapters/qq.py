@@ -106,7 +106,11 @@ def _assert_private_file(path: Path) -> None:
     if path.is_symlink() or not path.is_file():
         raise QQSnapshotValidationError("QQ_SNAPSHOT_PATH_REJECTED")
     stat_result = path.lstat()
-    if stat_result.st_uid != os.getuid() or stat_result.st_nlink != 1 or (stat_result.st_mode & 0o077):
+    if (
+        stat_result.st_uid != os.getuid()
+        or stat_result.st_nlink != 1
+        or (stat_result.st_mode & 0o077)
+    ):
         raise QQSnapshotValidationError("QQ_SNAPSHOT_PERMISSION")
 
 
@@ -150,7 +154,9 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         if not ACCOUNT_RE.fullmatch(account_id):
             raise ValueError("invalid QQ account alias")
         self._account_id = account_id
-        default_root = Path.home() / "Library/Application Support/qq-local-vault/accounts" / account_id
+        default_root = (
+            Path.home() / "Library/Application Support/qq-local-vault/accounts" / account_id
+        )
         self._snapshot_root = Path(snapshot_root).expanduser() if snapshot_root else default_root
         self._poll_interval = poll_interval_secs
         self._stale_after_secs = int(os.environ.get("QQ_SNAPSHOT_STALE_SECS", stale_after_secs))
@@ -230,12 +236,16 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
             raise QQSnapshotValidationError("QQ_SNAPSHOT_SCHEMA_UNSUPPORTED")
         core = dict(manifest)
         core.pop("snapshot_id", None)
-        canonical = json.dumps(core, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        canonical = json.dumps(
+            core, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         expected_id = "qqsnap-v1-" + hashlib.sha256(canonical).hexdigest()[:24]
         if expected_id != snapshot_id:
             raise QQSnapshotValidationError("QQ_SNAPSHOT_INTEGRITY_FAILED")
 
-        listed = {item.get("role"): item for item in manifest.get("files", []) if isinstance(item, dict)}
+        listed = {
+            item.get("role"): item for item in manifest.get("files", []) if isinstance(item, dict)
+        }
         if set(listed) != set(EXPECTED_EXPORTS):
             raise QQSnapshotValidationError("QQ_SNAPSHOT_MANIFEST_INVALID")
         paths: Dict[str, Path] = {}
@@ -278,12 +288,18 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
 
         coverage = manifest.get("coverage") or {}
         source_dt = _parse_iso(coverage.get("source_through_at"))
-        lag_ms = max(0, int((datetime.now(timezone.utc) - source_dt).total_seconds() * 1000)) if source_dt else None
+        lag_ms = (
+            max(0, int((datetime.now(timezone.utc) - source_dt).total_seconds() * 1000))
+            if source_dt
+            else None
+        )
         stale = lag_ms is None or lag_ms > self._stale_after_secs * 1000
         from_iso = _epoch_iso(coverage.get("from_epoch"))
         through_iso = _epoch_iso(coverage.get("through_epoch"))
         gaps = [
-            IMCoverageGap(from_time=from_iso or "", through_time=through_iso or "", reason=str(reason))
+            IMCoverageGap(
+                from_time=from_iso or "", through_time=through_iso or "", reason=str(reason)
+            )
             for reason in coverage.get("gaps", [])
         ]
         connectivity = self._connectivity if self._running else "offline"
@@ -292,7 +308,9 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         return IMSourceStatus(
             source="qq",
             connectivity=connectivity,
-            coverage=IMCoverage(kind="snapshot", from_time=from_iso, through_time=through_iso, gaps=gaps),
+            coverage=IMCoverage(
+                kind="snapshot", from_time=from_iso, through_time=through_iso, gaps=gaps
+            ),
             freshness=IMFreshness(
                 stale=stale,
                 last_observed_at=self._last_observed_at,
@@ -387,12 +405,12 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         result: Dict[str, str] = {}
         with closing(self._open_ro(path)) as connection:
             # 常量 SQL：无任何外部输入拼接（表/列名为 QQ 数据库固定 schema 标识符）
-            for row in connection.execute('''
+            for row in connection.execute("""
                 SELECT g."60001" AS group_uin,
                        COALESCE(NULLIF(d."60026", ''), NULLIF(d."60007", ''), NULLIF(g."60007", '')) AS display_name
                 FROM group_list g
                 LEFT JOIN group_detail_info_ver1 d ON d."60001" = g."60001"
-            '''):
+            """):
                 if row["group_uin"] is not None and row["display_name"]:
                     result[str(row["group_uin"])] = str(row["display_name"])
         return result
@@ -401,12 +419,12 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         result: Dict[str, str] = {}
         with closing(self._open_ro(path)) as connection:
             # 常量 SQL：无任何外部输入拼接（表/列名为 QQ 数据库固定 schema 标识符）
-            for row in connection.execute('''
+            for row in connection.execute("""
                 SELECT b."1000" AS uid, b."1002" AS uin,
                        COALESCE(NULLIF(p."20009", ''), NULLIF(p."20002", ''), NULLIF(b."1001", '')) AS display_name
                 FROM buddy_list b
                 LEFT JOIN profile_info_v6 p ON p."1000" = b."1000"
-            '''):
+            """):
                 name = str(row["display_name"] or "").strip()
                 if name:
                     if row["uid"]:
@@ -446,14 +464,19 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
                     ORDER BY "40050" {order}, "40001" {order}
                 '''
                 rows.extend((table_role, row) for row in connection.execute(query, params))
-        rows.sort(key=lambda item: (int(item[1]["msg_time"] or 0), int(item[1]["msg_id"] or 0)), reverse=descending)
+        rows.sort(
+            key=lambda item: (int(item[1]["msg_time"] or 0), int(item[1]["msg_id"] or 0)),
+            reverse=descending,
+        )
         if limit is not None:
             rows = rows[:limit]
 
         observed_at = datetime.now(timezone.utc).isoformat()
         records: List[IMIngestRecord] = []
         for table_role, row in rows:
-            record = self._normalize_row(table_role, row, group_names, buddy_names, manifest["snapshot_id"], observed_at)
+            record = self._normalize_row(
+                table_role, row, group_names, buddy_names, manifest["snapshot_id"], observed_at
+            )
             if record is not None:
                 records.append(record)
         return records
@@ -491,7 +514,9 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         recorded_name = str(row["sender_member_name"] or row["sender_nickname"] or "").strip()
         numeric_type = int(row["msg_type"] or 0)
         message_type = QQ_MESSAGE_TYPES.get(numeric_type, "unknown")
-        sender_name = recorded_name or _stable_sender_fallback(sender_id, notice=message_type == "notice")
+        sender_name = recorded_name or _stable_sender_fallback(
+            sender_id, notice=message_type == "notice"
+        )
         decoded = decode_qq_message_blob(row["body"])
         attachments = [
             IMAttachment(
@@ -510,7 +535,10 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         tags, reasons = evaluate_focus_rules(
             channel_name=channel_name,
             channel_type=channel_type,
-            is_focus=any(keyword in channel_name for keyword in ["通知", "班", "学院", "课程", "实验室", "科研", "竞赛"]),
+            is_focus=any(
+                keyword in channel_name
+                for keyword in ["通知", "班", "学院", "课程", "实验室", "科研", "竞赛"]
+            ),
             text=decoded["text"],
             message_type=message_type,
             mentions=[],
@@ -558,7 +586,9 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
             message=message,
         )
 
-    async def read_history(self, limit: int = 50, before_cursor: Optional[str] = None) -> List[IMMessageItem]:
+    async def read_history(
+        self, limit: int = 50, before_cursor: Optional[str] = None
+    ) -> List[IMMessageItem]:
         manifest, paths = await asyncio.to_thread(self._validate_current)
         before_epoch = None
         if before_cursor:
@@ -566,5 +596,7 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
                 before_epoch = int(before_cursor)
             except ValueError:
                 before_epoch = None
-        records = await asyncio.to_thread(self._read_records, manifest, paths, True, before_epoch, limit)
+        records = await asyncio.to_thread(
+            self._read_records, manifest, paths, True, before_epoch, limit
+        )
         return [record.message for record in records]

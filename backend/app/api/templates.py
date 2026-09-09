@@ -4,12 +4,11 @@ P1-M4-2: resolve_for_template_read_snapshot 单次快照与 inline secret 拦截
 P1-M4-3: fail-closed 降级提示。
 合同收口: 支持 vars 参数，clean_title 限制纯文件名。
 """
+
 from __future__ import annotations
 
 import logging
 import os
-import re
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -144,9 +143,7 @@ def create_with_template(req: CreateWithTemplateRequest, conn=Depends(get_conn))
     info = inspect_template(raw)
 
     # 1. 确定最终目标文件路径 (两阶段阶段一: P1-M4-1)
-    target_path = compute_target_path(
-        clean_title, info["suggested_dir"], req.custom_path
-    )
+    target_path = compute_target_path(clean_title, info["suggested_dir"], req.custom_path)
 
     # 2. 严格校验目标路径安全（非模板目录、非排除区、不逃逸）
     try:

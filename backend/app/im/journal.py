@@ -10,20 +10,18 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
 import sqlite3
 import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from backend.app.im.models import (
     IMAttachment,
     IMChannelSummary,
     IMCommitReceipt,
     IMIngestBatch,
-    IMIngestRecord,
     IMMessageItem,
     IMWatermark,
     compute_server_digest,
@@ -32,11 +30,13 @@ from backend.app.im.models import (
 
 class IdentityConflictError(Exception):
     """Raised when a dedupe_key collides with a different objective payload digest."""
+
     pass
 
 
 class InvalidIngestEnvelopeError(ValueError):
     """Raised when envelope source/account_id mismatches inner message source/account_id."""
+
     pass
 
 
@@ -73,7 +73,9 @@ def secure_harden_directory_and_files(db_path: Path) -> None:
         os.chmod(db_dir, 0o700)
         dir_stat = os.stat(db_dir)
         if dir_stat.st_mode & 0o077 != 0:
-            raise PermissionError(f"Security invariant violated: directory {db_dir} has broad permissions {oct(dir_stat.st_mode)}")
+            raise PermissionError(
+                f"Security invariant violated: directory {db_dir} has broad permissions {oct(dir_stat.st_mode)}"
+            )
 
         # Secure database file and WAL/SHM if they exist
         for target in [db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]:
@@ -81,7 +83,9 @@ def secure_harden_directory_and_files(db_path: Path) -> None:
                 os.chmod(target, 0o600)
                 f_stat = os.stat(target)
                 if f_stat.st_mode & 0o077 != 0:
-                    raise PermissionError(f"Security invariant violated: file {target} has broad permissions {oct(f_stat.st_mode)}")
+                    raise PermissionError(
+                        f"Security invariant violated: file {target} has broad permissions {oct(f_stat.st_mode)}"
+                    )
     finally:
         os.umask(old_umask)
 
@@ -111,7 +115,7 @@ class IMJournal:
                 str(self.db_path),
                 timeout=30.0,
                 check_same_thread=False,
-                isolation_level=None  # Explicit transaction management
+                isolation_level=None,  # Explicit transaction management
             )
             self._conn.row_factory = sqlite3.Row
             self._init_schema()
@@ -179,14 +183,20 @@ class IMJournal:
             );
             """)
 
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_timeline ON messages (occurred_at_epoch_ms DESC, ingest_seq DESC);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel_id, ingest_seq ASC);")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_timeline ON messages (occurred_at_epoch_ms DESC, ingest_seq DESC);"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel_id, ingest_seq ASC);"
+            )
 
             # Lightweight forward migration: add channel_name to pre-existing journals.
             cur.execute("PRAGMA table_info(messages);")
             existing_cols = {row[1] for row in cur.fetchall()}
             if "channel_name" not in existing_cols:
-                cur.execute("ALTER TABLE messages ADD COLUMN channel_name TEXT NOT NULL DEFAULT '';")
+                cur.execute(
+                    "ALTER TABLE messages ADD COLUMN channel_name TEXT NOT NULL DEFAULT '';"
+                )
 
             # Watermarks table
             cur.execute("""
@@ -237,12 +247,14 @@ class IMJournal:
                     # 1. Server computes authoritative digest (P1-IM-6 & AT-2)
                     server_digest = compute_server_digest(rec.message)
                     if rec.provided_digest and rec.provided_digest != server_digest:
-                        raise ValueError(f"Provided digest mismatch: provided '{rec.provided_digest}' != computed '{server_digest}'")
+                        raise ValueError(
+                            f"Provided digest mismatch: provided '{rec.provided_digest}' != computed '{server_digest}'"
+                        )
 
                     # 2. Check existing record by (source, account_id, dedupe_key)
                     cur.execute(
                         "SELECT payload_digest FROM messages WHERE source = ? AND account_id = ? AND dedupe_key = ?;",
-                        (rec.source, rec.account_id, rec.dedupe_key)
+                        (rec.source, rec.account_id, rec.dedupe_key),
                     )
                     row = cur.fetchone()
 
@@ -261,15 +273,23 @@ class IMJournal:
                     # 3. New record insertion
                     # Serialize complex fields to JSON
                     mentions_str = json.dumps(rec.message.mentions, ensure_ascii=False)
-                    att_dicts = [asdict(a) if isinstance(a, IMAttachment) else a for a in rec.message.attachments]
+                    att_dicts = [
+                        asdict(a) if isinstance(a, IMAttachment) else a
+                        for a in rec.message.attachments
+                    ]
                     attachments_str = json.dumps(att_dicts, ensure_ascii=False)
                     provenance_str = json.dumps(rec.message.provenance, ensure_ascii=False)
                     focus_tags_str = json.dumps(rec.message.focus_tags, ensure_ascii=False)
                     focus_reasons_str = json.dumps(rec.message.focus_reasons, ensure_ascii=False)
 
-                    is_self_int = 1 if rec.message.is_self is True else (0 if rec.message.is_self is False else None)
+                    is_self_int = (
+                        1
+                        if rec.message.is_self is True
+                        else (0 if rec.message.is_self is False else None)
+                    )
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                     INSERT INTO messages (
                         id, source, account_id, channel_id, channel_name, dedupe_key, dedupe_basis,
                         payload_digest, source_message_id, source_id_quality, sender_id,
@@ -283,13 +303,35 @@ class IMJournal:
                         ?, ?, ?, ?,
                         ?, ?, ?, ?
                     );
-                    """, (
-                        rec.message.id, rec.source, rec.account_id, rec.message.channel_id, rec.message.channel_name, rec.dedupe_key, rec.dedupe_basis,
-                        server_digest, rec.message.source_message_id, rec.message.source_id_quality, rec.message.sender_id,
-                        rec.message.sender_name, rec.message.sender_role, is_self_int, rec.message.reply_to, rec.message.text, rec.message.message_type,
-                        mentions_str, attachments_str, rec.message.occurred_at, rec.message.occurred_at_epoch_ms,
-                        rec.message.observed_at, provenance_str, focus_tags_str, focus_reasons_str
-                    ))
+                    """,
+                        (
+                            rec.message.id,
+                            rec.source,
+                            rec.account_id,
+                            rec.message.channel_id,
+                            rec.message.channel_name,
+                            rec.dedupe_key,
+                            rec.dedupe_basis,
+                            server_digest,
+                            rec.message.source_message_id,
+                            rec.message.source_id_quality,
+                            rec.message.sender_id,
+                            rec.message.sender_name,
+                            rec.message.sender_role,
+                            is_self_int,
+                            rec.message.reply_to,
+                            rec.message.text,
+                            rec.message.message_type,
+                            mentions_str,
+                            attachments_str,
+                            rec.message.occurred_at,
+                            rec.message.occurred_at_epoch_ms,
+                            rec.message.observed_at,
+                            provenance_str,
+                            focus_tags_str,
+                            focus_reasons_str,
+                        ),
+                    )
                     inserted_count += 1
 
                     # Update or register channel summary
@@ -298,18 +340,26 @@ class IMJournal:
                 # 4. Atomic Watermark advance within the same transaction (Core Invariant)
                 watermark_advanced = False
                 if batch.new_watermark is not None:
-                    committed_at = batch.new_watermark.committed_at or datetime.now(timezone.utc).isoformat()
-                    cur.execute("""
+                    committed_at = (
+                        batch.new_watermark.committed_at or datetime.now(timezone.utc).isoformat()
+                    )
+                    cur.execute(
+                        """
                     INSERT INTO watermarks (source, account_id, kind, value, committed_at)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(source, account_id) DO UPDATE SET
                         kind = excluded.kind,
                         value = excluded.value,
                         committed_at = excluded.committed_at;
-                    """, (
-                        batch.source, batch.account_id, batch.new_watermark.kind,
-                        batch.new_watermark.value, committed_at
-                    ))
+                    """,
+                        (
+                            batch.source,
+                            batch.account_id,
+                            batch.new_watermark.kind,
+                            batch.new_watermark.value,
+                            committed_at,
+                        ),
+                    )
                     watermark_advanced = True
 
                 cur.execute("COMMIT;")
@@ -324,7 +374,7 @@ class IMJournal:
                     inserted_count=inserted_count,
                     skipped_count=skipped_count,
                     committed_seq_head=head,
-                    watermark_advanced=watermark_advanced
+                    watermark_advanced=watermark_advanced,
                 )
 
             except Exception:
@@ -343,23 +393,34 @@ class IMJournal:
             # Create channel entry
             name = msg.channel_name or msg.channel_id.split(":", 1)[-1]
             unseen = 0 if is_self else 1
-            cur.execute("""
+            cur.execute(
+                """
             INSERT INTO channels (
                 id, platform, account_id, channel_type, name,
                 avatar_availability, last_message, last_time,
                 last_occurred_at_epoch_ms, local_unseen_count, is_focus
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, (
-                msg.channel_id, msg.source, msg.account_id,
-                infer_channel_type(msg.source, msg.channel_id),
-                name, "placeholder", msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms,
-                unseen, 1 if ("通知" in name or "班" in name) else 0
-            ))
+            """,
+                (
+                    msg.channel_id,
+                    msg.source,
+                    msg.account_id,
+                    infer_channel_type(msg.source, msg.channel_id),
+                    name,
+                    "placeholder",
+                    msg.text[:100],
+                    msg.occurred_at,
+                    msg.occurred_at_epoch_ms,
+                    unseen,
+                    1 if ("通知" in name or "班" in name) else 0,
+                ),
+            )
         else:
             unseen = row["local_unseen_count"] + (0 if is_self else 1)
             if msg.channel_name and msg.channel_name not in ("QQ群聊", "QQ好友", "未知会话"):
                 # 两条完整静态语句替代 f-string 拼接（值全部走 ? 占位符）
-                cur.execute("""
+                cur.execute(
+                    """
                 UPDATE channels SET
                     last_message = ?,
                     last_time = ?,
@@ -368,30 +429,51 @@ class IMJournal:
                     name = ?,
                     is_focus = ?
                 WHERE id = ?;
-                """, (
-                    msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen,
-                    msg.channel_name,
-                    1 if any(kw in msg.channel_name for kw in ("通知", "班", "课程", "学院", "实验室", "科研", "导师")) else 0,
-                    msg.channel_id,
-                ))
+                """,
+                    (
+                        msg.text[:100],
+                        msg.occurred_at,
+                        msg.occurred_at_epoch_ms,
+                        unseen,
+                        msg.channel_name,
+                        1
+                        if any(
+                            kw in msg.channel_name
+                            for kw in ("通知", "班", "课程", "学院", "实验室", "科研", "导师")
+                        )
+                        else 0,
+                        msg.channel_id,
+                    ),
+                )
             else:
-                cur.execute("""
+                cur.execute(
+                    """
                 UPDATE channels SET
                     last_message = ?,
                     last_time = ?,
                     last_occurred_at_epoch_ms = MAX(last_occurred_at_epoch_ms, ?),
                     local_unseen_count = ?
                 WHERE id = ?;
-                """, (
-                    msg.text[:100], msg.occurred_at, msg.occurred_at_epoch_ms, unseen,
-                    msg.channel_id,
-                ))
+                """,
+                    (
+                        msg.text[:100],
+                        msg.occurred_at,
+                        msg.occurred_at_epoch_ms,
+                        unseen,
+                        msg.channel_id,
+                    ),
+                )
 
     # -------------------------------------------------------------------------
     # Channel & Timeline Query APIs
     # -------------------------------------------------------------------------
 
-    def list_channels(self, platform: Optional[str] = None, channel_type: Optional[str] = None, focus_only: bool = False) -> List[IMChannelSummary]:
+    def list_channels(
+        self,
+        platform: Optional[str] = None,
+        channel_type: Optional[str] = None,
+        focus_only: bool = False,
+    ) -> List[IMChannelSummary]:
         with self._lock:
             cur = self._conn.cursor()
             query = "SELECT * FROM channels WHERE 1=1"
@@ -413,20 +495,22 @@ class IMJournal:
 
             results: List[IMChannelSummary] = []
             for r in rows:
-                results.append(IMChannelSummary(
-                    id=r["id"],
-                    platform=r["platform"],
-                    account_id=r["account_id"],
-                    channel_type=r["channel_type"],
-                    name=r["name"],
-                    avatar_availability=r["avatar_availability"],
-                    avatar_local_ref=r["avatar_local_ref"],
-                    last_message=r["last_message"],
-                    last_time=r["last_time"],
-                    local_unseen_count=r["local_unseen_count"],
-                    is_focus=bool(r["is_focus"]),
-                    native_unread_count=r["native_unread_count"]
-                ))
+                results.append(
+                    IMChannelSummary(
+                        id=r["id"],
+                        platform=r["platform"],
+                        account_id=r["account_id"],
+                        channel_type=r["channel_type"],
+                        name=r["name"],
+                        avatar_availability=r["avatar_availability"],
+                        avatar_local_ref=r["avatar_local_ref"],
+                        last_message=r["last_message"],
+                        last_time=r["last_time"],
+                        local_unseen_count=r["local_unseen_count"],
+                        is_focus=bool(r["is_focus"]),
+                        native_unread_count=r["native_unread_count"],
+                    )
+                )
             return results
 
     def mark_channel_seen(self, channel_id: str) -> None:
@@ -442,7 +526,7 @@ class IMJournal:
         limit: int = 50,
         cursor: Optional[str] = None,
         snapshot_seq: Optional[int] = None,
-        focus_only: bool = False
+        focus_only: bool = False,
     ) -> Tuple[List[IMMessageItem], Optional[str]]:
         """
         Keyset pagination ordered by (occurred_at_epoch_ms DESC, ingest_seq DESC).
@@ -492,25 +576,32 @@ class IMJournal:
                 last_item = items[-1]
                 cursor_payload = {
                     "epoch_ms": last_item.occurred_at_epoch_ms,
-                    "ingest_seq": last_item.ingest_seq
+                    "ingest_seq": last_item.ingest_seq,
                 }
-                next_cursor = base64.b64encode(json.dumps(cursor_payload).encode("utf-8")).decode("utf-8")
+                next_cursor = base64.b64encode(json.dumps(cursor_payload).encode("utf-8")).decode(
+                    "utf-8"
+                )
 
             return items, next_cursor
 
-    def query_snapshot_page(self, snapshot_head_seq: int, cursor: int, limit: int = 50) -> Tuple[List[IMMessageItem], Optional[int]]:
+    def query_snapshot_page(
+        self, snapshot_head_seq: int, cursor: int, limit: int = 50
+    ) -> Tuple[List[IMMessageItem], Optional[int]]:
         """
         Deterministic pagination for Resync Snapshot Exhaustion (P1-IM-7-R1 & AT-8):
         WHERE ingest_seq > :cursor AND ingest_seq <= :snapshot_head_seq ORDER BY ingest_seq ASC LIMIT :limit
         """
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
             SELECT * FROM messages
             WHERE ingest_seq > ? AND ingest_seq <= ?
             ORDER BY ingest_seq ASC
             LIMIT ?;
-            """, (cursor, snapshot_head_seq, limit))
+            """,
+                (cursor, snapshot_head_seq, limit),
+            )
             rows = cur.fetchall()
             cur.close()
 
@@ -521,7 +612,10 @@ class IMJournal:
             last_seq = items[-1].ingest_seq
             # Check if additional records <= snapshot_head_seq remain
             cur = self._conn.cursor()
-            cur.execute("SELECT 1 FROM messages WHERE ingest_seq > ? AND ingest_seq <= ? LIMIT 1;", (last_seq, snapshot_head_seq))
+            cur.execute(
+                "SELECT 1 FROM messages WHERE ingest_seq > ? AND ingest_seq <= ? LIMIT 1;",
+                (last_seq, snapshot_head_seq),
+            )
             has_next = cur.fetchone() is not None
             cur.close()
 
@@ -532,12 +626,15 @@ class IMJournal:
         """Replays events where ingest_seq > after_seq (Open interval, P2-1 & AT-7)."""
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
             SELECT * FROM messages
             WHERE ingest_seq > ?
             ORDER BY ingest_seq ASC
             LIMIT ?;
-            """, (after_seq, limit))
+            """,
+                (after_seq, limit),
+            )
             rows = cur.fetchall()
             cur.close()
             return [self._row_to_message(r) for r in rows]
@@ -545,15 +642,16 @@ class IMJournal:
     def get_source_watermark(self, source: str, account_id: str) -> Optional[IMWatermark]:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("SELECT * FROM watermarks WHERE source = ? AND account_id = ?;", (source, account_id))
+            cur.execute(
+                "SELECT * FROM watermarks WHERE source = ? AND account_id = ?;",
+                (source, account_id),
+            )
             row = cur.fetchone()
             cur.close()
             if row is None:
                 return None
             return IMWatermark(
-                kind=row["kind"],
-                value=row["value"],
-                committed_at=row["committed_at"]
+                kind=row["kind"], value=row["value"], committed_at=row["committed_at"]
             )
 
     def _row_to_message(self, r: sqlite3.Row) -> IMMessageItem:
@@ -566,7 +664,7 @@ class IMJournal:
                 mime=a.get("mime"),
                 size=a.get("size"),
                 availability=a.get("availability", "placeholder"),
-                local_ref=a.get("local_ref")
+                local_ref=a.get("local_ref"),
             )
             for a in raw_attachments
         ]
@@ -578,7 +676,8 @@ class IMJournal:
             source=r["source"],
             account_id=r["account_id"],
             channel_id=r["channel_id"],
-            channel_name=(r["channel_name"] if "channel_name" in r.keys() else "") or r["channel_id"],
+            channel_name=(r["channel_name"] if "channel_name" in r.keys() else "")
+            or r["channel_id"],
             source_id_quality=r["source_id_quality"],
             sender_id=r["sender_id"],
             sender_name=r["sender_name"],
@@ -595,5 +694,5 @@ class IMJournal:
             provenance=json.loads(r["provenance_json"]),
             focus_tags=json.loads(r["focus_tags_json"]),
             focus_reasons=json.loads(r["focus_reasons_json"]),
-            source_message_id=r["source_message_id"]
+            source_message_id=r["source_message_id"],
         )

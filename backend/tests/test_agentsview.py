@@ -3,6 +3,7 @@ P1-AV-1: 权威 Session API DTO 映射断言 (包含 machine, cwd, git_branch, c
 P1-AV-2: 所有返回会话内容的端点 100% 覆盖 Cache-Control: no-store
 P1-AV-3: 消息流多页分页递增回归 (page 1 -> next_ordinal -> page 2, 无重复, 严格递增)
 """
+
 from __future__ import annotations
 
 import sys
@@ -13,10 +14,10 @@ _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from fastapi.testclient import TestClient
 from app.config import load_config
 from app.main import app
 from app.state import init_state
+from fastapi.testclient import TestClient
 
 
 class TestAgentsView(unittest.TestCase):
@@ -52,7 +53,7 @@ class TestAgentsView(unittest.TestCase):
         self.assertGreater(data["total_sessions"], 1000)
         self.assertGreaterEqual(data["recent_7d_count"], 0)
         self.assertGreaterEqual(data["recent_24h_count"], 0)
-        
+
         # 验证 Top Agents 包含 Pi, Claude, Codex
         agents = [a["agent"] for a in data["agent_matrix"]]
         self.assertIn("pi", agents)
@@ -73,7 +74,7 @@ class TestAgentsView(unittest.TestCase):
         data = res.json()
         self.assertGreater(data["total"], 300)
         self.assertLessEqual(len(data["sessions"]), 5)
-        
+
         for s in data["sessions"]:
             self.assertEqual(s["agent"], "pi")
             # 验证 P1-AV-1: Session DTO 规范字段
@@ -116,7 +117,9 @@ class TestAgentsView(unittest.TestCase):
         self.assertGreater(next_ord, p1_data["messages"][-1]["ordinal"])
 
         # 第二页: 使用 next_ordinal 作为 from 参数
-        page2_res = self.client.get(f"/api/agentsview/session/{sid}/messages?from={next_ord}&limit=3")
+        page2_res = self.client.get(
+            f"/api/agentsview/session/{sid}/messages?from={next_ord}&limit=3"
+        )
         self.assertEqual(page2_res.status_code, 200)
         p2_data = page2_res.json()
         self.assertGreater(len(p2_data["messages"]), 0)
@@ -124,8 +127,12 @@ class TestAgentsView(unittest.TestCase):
         # 严格断言: 序号递增且两页完全无交集 (No Duplicates)
         p1_ordinals = [m["ordinal"] for m in p1_data["messages"]]
         p2_ordinals = [m["ordinal"] for m in p2_data["messages"]]
-        self.assertTrue(all(o2 > p1_ordinals[-1] for o2 in p2_ordinals), "第二页序号必须严格大于第一页最大序号")
-        self.assertEqual(len(set(p1_ordinals).intersection(set(p2_ordinals))), 0, "两页消息绝不能有任何重复")
+        self.assertTrue(
+            all(o2 > p1_ordinals[-1] for o2 in p2_ordinals), "第二页序号必须严格大于第一页最大序号"
+        )
+        self.assertEqual(
+            len(set(p1_ordinals).intersection(set(p2_ordinals))), 0, "两页消息绝不能有任何重复"
+        )
 
         # 验证 Message DTO 字段对齐
         m_sample = p1_data["messages"][0]
@@ -166,7 +173,16 @@ class TestAgentsView(unittest.TestCase):
         # 3. 验证两个通道输出的 DTO 契约字段完全一致
         s_cli = cli_sessions[0]
         s_ro = ro_sessions[0]
-        for field in ("id", "project", "machine", "agent", "title", "started_at", "message_count", "user_message_count"):
+        for field in (
+            "id",
+            "project",
+            "machine",
+            "agent",
+            "title",
+            "started_at",
+            "message_count",
+            "user_message_count",
+        ):
             self.assertIn(field, s_cli, f"CLI DTO 必须包含 {field}")
             self.assertIn(field, s_ro, f"SQLite-ro DTO 必须包含 {field}")
 

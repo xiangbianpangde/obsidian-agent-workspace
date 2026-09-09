@@ -12,22 +12,22 @@ import json
 import os
 from collections import deque
 from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Deque, Dict, List, Optional, Set
+from typing import Any, AsyncGenerator, Deque, Dict, Optional, Set
 
-from backend.app.im.adapters.base import IMIngestDriver, IMIngestSink, IMSourceAdapter, IMSourceReader
+from backend.app.im.adapters.base import (
+    IMIngestDriver,
+    IMIngestSink,
+    IMSourceAdapter,
+)
 from backend.app.im.adapters.qq import QQSnapshotAdapter
 from backend.app.im.adapters.wechat import WxCliAdapter
 from backend.app.im.adapters.wecom import WeComSnapshotAdapter
 from backend.app.im.journal import IMJournal
 from backend.app.im.models import (
-    IMAttachment,
     IMCommitReceipt,
     IMIngestBatch,
     IMMessageItem,
-    IMSourceStatus,
 )
-
 
 REPLAY_LIMIT = 200
 
@@ -117,7 +117,9 @@ class IngestionCoordinator(IMIngestSink):
             # For simplicity, query the latest batch items from journal
             cur_head = receipt.committed_seq_head
             start_seq = max(0, cur_head - receipt.inserted_count)
-            new_msgs = self.journal.query_replay_events(after_seq=start_seq, limit=receipt.inserted_count)
+            new_msgs = self.journal.query_replay_events(
+                after_seq=start_seq, limit=receipt.inserted_count
+            )
 
             async with self._lock:
                 for msg in new_msgs:
@@ -147,9 +149,7 @@ class IngestionCoordinator(IMIngestSink):
     # -------------------------------------------------------------------------
 
     async def subscribe_events(
-        self,
-        query_after_seq: Optional[int] = None,
-        header_last_event_id: Optional[str] = None
+        self, query_after_seq: Optional[int] = None, header_last_event_id: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         """
         Subscribes to SSE stream with exact dual-cursor precedence and Resync Fence.
@@ -217,7 +217,9 @@ class IngestionCoordinator(IMIngestSink):
                     continue
                 if msg is None:
                     # Evicted slow consumer: force deterministic resync
-                    resync_data = json.dumps({"snapshot_head_seq": self.journal.get_current_head_seq()})
+                    resync_data = json.dumps(
+                        {"snapshot_head_seq": self.journal.get_current_head_seq()}
+                    )
                     yield f"event: resync_required\ndata: {resync_data}\n\n"
                     return
                 if msg.ingest_seq <= last_seq:

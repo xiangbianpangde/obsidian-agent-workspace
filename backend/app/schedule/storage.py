@@ -19,7 +19,7 @@ import uuid
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .models import (
     AcademicCalendar,
@@ -174,15 +174,23 @@ class ScheduleStorage:
             if "deleted_at" not in courses_cols:
                 cur.execute("ALTER TABLE courses ADD COLUMN deleted_at TEXT;")
             if "is_deleted" not in time_slots_cols:
-                cur.execute("ALTER TABLE time_slots ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+                cur.execute(
+                    "ALTER TABLE time_slots ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;"
+                )
             if "time_slot_id" not in overrides_cols:
-                cur.execute("ALTER TABLE overrides ADD COLUMN time_slot_id TEXT NOT NULL DEFAULT '';")
+                cur.execute(
+                    "ALTER TABLE overrides ADD COLUMN time_slot_id TEXT NOT NULL DEFAULT '';"
+                )
             if "is_revoked" not in overrides_cols:
-                cur.execute("ALTER TABLE overrides ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0;")
+                cur.execute(
+                    "ALTER TABLE overrides ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0;"
+                )
             if "revoked_at" not in overrides_cols:
                 cur.execute("ALTER TABLE overrides ADD COLUMN revoked_at TEXT;")
             if "is_deleted" not in academic_events_cols:
-                cur.execute("ALTER TABLE academic_events ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+                cur.execute(
+                    "ALTER TABLE academic_events ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;"
+                )
             if "deleted_at" not in academic_events_cols:
                 cur.execute("ALTER TABLE academic_events ADD COLUMN deleted_at TEXT;")
 
@@ -243,10 +251,7 @@ class ScheduleStorage:
                 self.save_calendar(default_cal)
                 return default_cal
 
-            holidays = [
-                HolidayRule(**h)
-                for h in json.loads(row["holidays_json"])
-            ]
+            holidays = [HolidayRule(**h) for h in json.loads(row["holidays_json"])]
             return AcademicCalendar(
                 semester=row["semester"],
                 start_date=row["start_date"],
@@ -264,7 +269,8 @@ class ScheduleStorage:
             try:
                 cur.execute("BEGIN TRANSACTION;")
                 holidays_json = json.dumps([asdict(h) for h in cal.holidays], ensure_ascii=False)
-                cur.execute("""
+                cur.execute(
+                    """
                 INSERT INTO calendar_config (
                     semester, start_date, total_weeks, teaching_weeks_start,
                     teaching_weeks_end, exam_weeks_start, exam_weeks_end, holidays_json
@@ -277,11 +283,18 @@ class ScheduleStorage:
                     exam_weeks_start = excluded.exam_weeks_start,
                     exam_weeks_end = excluded.exam_weeks_end,
                     holidays_json = excluded.holidays_json;
-                """, (
-                    cal.semester, cal.start_date, cal.total_weeks,
-                    cal.teaching_weeks_start, cal.teaching_weeks_end,
-                    cal.exam_weeks_start, cal.exam_weeks_end, holidays_json
-                ))
+                """,
+                    (
+                        cal.semester,
+                        cal.start_date,
+                        cal.total_weeks,
+                        cal.teaching_weeks_start,
+                        cal.teaching_weeks_end,
+                        cal.exam_weeks_start,
+                        cal.exam_weeks_end,
+                        holidays_json,
+                    ),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -290,9 +303,7 @@ class ScheduleStorage:
                 cur.close()
 
     def compute_current_week(
-        self,
-        target_date: Optional[date] = None,
-        semester: str = "2026-2027-1"
+        self, target_date: Optional[date] = None, semester: str = "2026-2027-1"
     ) -> Dict[str, Any]:
         cal = self.get_calendar(semester)
         cur_date = target_date or date.today()
@@ -351,9 +362,12 @@ class ScheduleStorage:
     def list_courses(self, semester: str = "2026-2027-1") -> List[Course]:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
             SELECT * FROM courses WHERE semester = ? AND is_deleted = 0 ORDER BY name ASC;
-            """, (semester,))
+            """,
+                (semester,),
+            )
             rows = cur.fetchall()
             courses = []
             for r in rows:
@@ -377,7 +391,8 @@ class ScheduleStorage:
 
     def _save_course_in_cursor(self, cur: sqlite3.Cursor, course: Course) -> None:
         """Internal worker executing course and slot upsert within an active transaction."""
-        cur.execute("""
+        cur.execute(
+            """
         INSERT INTO courses (
             id, name, code, teacher, classroom, credits, semester,
             color, notes, course_group_id, meeting_url, reminder_minutes,
@@ -397,11 +412,22 @@ class ScheduleStorage:
             reminder_minutes = excluded.reminder_minutes,
             is_deleted = 0,
             deleted_at = NULL;
-        """, (
-            course.id, course.name, course.code, course.teacher, course.classroom,
-            course.credits, course.semester, course.color, course.notes,
-            course.course_group_id, course.meeting_url, course.reminder_minutes
-        ))
+        """,
+            (
+                course.id,
+                course.name,
+                course.code,
+                course.teacher,
+                course.classroom,
+                course.credits,
+                course.semester,
+                course.color,
+                course.notes,
+                course.course_group_id,
+                course.meeting_url,
+                course.reminder_minutes,
+            ),
+        )
 
         # Soft delete any slots that are NOT present in the updated course.time_slots
         active_ids = [ts.id for ts in course.time_slots if ts.id]
@@ -409,7 +435,7 @@ class ScheduleStorage:
             placeholders = ",".join("?" for _ in active_ids)
             cur.execute(
                 f"UPDATE time_slots SET is_deleted = 1 WHERE course_id = ? AND id NOT IN ({placeholders});",
-                [course.id, *active_ids]
+                [course.id, *active_ids],
             )
         else:
             cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course.id,))
@@ -418,7 +444,8 @@ class ScheduleStorage:
         for ts in course.time_slots:
             slot_id = ts.id or f"ts_{uuid.uuid4().hex[:8]}"
             cw_json = json.dumps(ts.custom_weeks)
-            cur.execute("""
+            cur.execute(
+                """
             INSERT INTO time_slots (
                 id, course_id, day_of_week, start_period, end_period,
                 start_time, end_time, week_pattern, start_week, end_week,
@@ -437,11 +464,22 @@ class ScheduleStorage:
                 custom_weeks_json = excluded.custom_weeks_json,
                 classroom = excluded.classroom,
                 is_deleted = 0;
-            """, (
-                slot_id, course.id, ts.day_of_week, ts.start_period, ts.end_period,
-                ts.start_time, ts.end_time, ts.week_pattern, ts.start_week, ts.end_week,
-                cw_json, ts.classroom or course.classroom
-            ))
+            """,
+                (
+                    slot_id,
+                    course.id,
+                    ts.day_of_week,
+                    ts.start_period,
+                    ts.end_period,
+                    ts.start_time,
+                    ts.end_time,
+                    ts.week_pattern,
+                    ts.start_week,
+                    ts.end_week,
+                    cw_json,
+                    ts.classroom or course.classroom,
+                ),
+            )
 
     def save_course(self, course: Course) -> None:
         """Saves course and slots in an atomic transaction."""
@@ -478,7 +516,10 @@ class ScheduleStorage:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
-                cur.execute("UPDATE courses SET meeting_url = ? WHERE id = ? AND is_deleted = 0;", (meeting_url, course_id))
+                cur.execute(
+                    "UPDATE courses SET meeting_url = ? WHERE id = ? AND is_deleted = 0;",
+                    (meeting_url, course_id),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -492,7 +533,10 @@ class ScheduleStorage:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
-                cur.execute("UPDATE courses SET reminder_minutes = ? WHERE id = ? AND is_deleted = 0;", (reminder_minutes, course_id))
+                cur.execute(
+                    "UPDATE courses SET reminder_minutes = ? WHERE id = ? AND is_deleted = 0;",
+                    (reminder_minutes, course_id),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -507,9 +551,17 @@ class ScheduleStorage:
             try:
                 cur.execute("BEGIN TRANSACTION;")
                 now_iso = datetime.now(timezone.utc).isoformat()
-                cur.execute("UPDATE courses SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, course_id))
-                cur.execute("UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course_id,))
-                cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE course_id = ?;", (now_iso, course_id))
+                cur.execute(
+                    "UPDATE courses SET is_deleted = 1, deleted_at = ? WHERE id = ?;",
+                    (now_iso, course_id),
+                )
+                cur.execute(
+                    "UPDATE time_slots SET is_deleted = 1 WHERE course_id = ?;", (course_id,)
+                )
+                cur.execute(
+                    "UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE course_id = ?;",
+                    (now_iso, course_id),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -520,9 +572,12 @@ class ScheduleStorage:
     def _get_time_slots(self, course_id: str) -> List[CourseTimeSlot]:
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
             SELECT * FROM time_slots WHERE course_id = ? AND is_deleted = 0 ORDER BY day_of_week, start_period;
-            """, (course_id,))
+            """,
+                (course_id,),
+            )
             rows = cur.fetchall()
             cur.close()
             return [
@@ -583,7 +638,8 @@ class ScheduleStorage:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
-                cur.execute("""
+                cur.execute(
+                    """
                 INSERT INTO overrides (
                     id, time_slot_id, course_id, semester, week_number, day_of_week,
                     override_type, new_classroom, new_day_of_week,
@@ -603,12 +659,24 @@ class ScheduleStorage:
                     reason = excluded.reason,
                     is_revoked = 0,
                     revoked_at = NULL;
-                """, (
-                    override.id, override.time_slot_id, override.course_id, override.semester,
-                    override.week_number, override.day_of_week, override.override_type,
-                    override.new_classroom, override.new_day_of_week, override.new_start_period,
-                    override.new_end_period, override.new_start_time, override.new_end_time, override.reason
-                ))
+                """,
+                    (
+                        override.id,
+                        override.time_slot_id,
+                        override.course_id,
+                        override.semester,
+                        override.week_number,
+                        override.day_of_week,
+                        override.override_type,
+                        override.new_classroom,
+                        override.new_day_of_week,
+                        override.new_start_period,
+                        override.new_end_period,
+                        override.new_start_time,
+                        override.new_end_time,
+                        override.reason,
+                    ),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -623,7 +691,10 @@ class ScheduleStorage:
             try:
                 cur.execute("BEGIN TRANSACTION;")
                 now_iso = datetime.now(timezone.utc).isoformat()
-                cur.execute("UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE id = ?;", (now_iso, override_id))
+                cur.execute(
+                    "UPDATE overrides SET is_revoked = 1, revoked_at = ? WHERE id = ?;",
+                    (now_iso, override_id),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -631,17 +702,25 @@ class ScheduleStorage:
             finally:
                 cur.close()
 
-    def list_overrides(self, semester: str = "2026-2027-1", week_number: Optional[int] = None) -> List[CourseOverride]:
+    def list_overrides(
+        self, semester: str = "2026-2027-1", week_number: Optional[int] = None
+    ) -> List[CourseOverride]:
         with self._lock:
             cur = self._conn.cursor()
             if week_number is not None:
-                cur.execute("""
+                cur.execute(
+                    """
                 SELECT * FROM overrides WHERE semester = ? AND week_number = ? AND is_revoked = 0;
-                """, (semester, week_number))
+                """,
+                    (semester, week_number),
+                )
             else:
-                cur.execute("""
+                cur.execute(
+                    """
                 SELECT * FROM overrides WHERE semester = ? AND is_revoked = 0;
-                """, (semester,))
+                """,
+                    (semester,),
+                )
             rows = cur.fetchall()
             cur.close()
             return [
@@ -671,9 +750,7 @@ class ScheduleStorage:
     # -------------------------------------------------------------------------
 
     def get_effective_week_schedule(
-        self,
-        week_number: int,
-        semester: str = "2026-2027-1"
+        self, week_number: int, semester: str = "2026-2027-1"
     ) -> List[Dict[str, Any]]:
         """
         Calculates the active courses for a given week.
@@ -681,9 +758,7 @@ class ScheduleStorage:
         """
         courses = self.list_courses(semester)
         overrides = self.list_overrides(semester, week_number)
-        slot_override_map: Dict[str, CourseOverride] = {
-            o.time_slot_id: o for o in overrides
-        }
+        slot_override_map: Dict[str, CourseOverride] = {o.time_slot_id: o for o in overrides}
 
         active_slots: List[Dict[str, Any]] = []
 
@@ -697,12 +772,16 @@ class ScheduleStorage:
                     continue
 
                 # 2. Check pattern (odd/even/custom/all)
-                is_odd_week = (week_number % 2 == 1)
+                is_odd_week = week_number % 2 == 1
                 if ts.week_pattern == "odd" and not is_odd_week:
                     continue
                 if ts.week_pattern == "even" and is_odd_week:
                     continue
-                if ts.week_pattern == "custom" and ts.custom_weeks and week_number not in ts.custom_weeks:
+                if (
+                    ts.week_pattern == "custom"
+                    and ts.custom_weeks
+                    and week_number not in ts.custom_weeks
+                ):
                     continue
 
                 # 3. Check overrides strictly by time_slot_id (R6)
@@ -726,39 +805,49 @@ class ScheduleStorage:
                         override_reason = ov.reason or f"调换教室至 {effective_room}"
                     elif ov.override_type == "reschedule":
                         status = "rescheduled"
-                        effective_day = ov.new_day_of_week if ov.new_day_of_week is not None else effective_day
-                        effective_start_p = ov.new_start_period if ov.new_start_period is not None else effective_start_p
-                        effective_end_p = ov.new_end_period if ov.new_end_period is not None else effective_end_p
+                        effective_day = (
+                            ov.new_day_of_week if ov.new_day_of_week is not None else effective_day
+                        )
+                        effective_start_p = (
+                            ov.new_start_period
+                            if ov.new_start_period is not None
+                            else effective_start_p
+                        )
+                        effective_end_p = (
+                            ov.new_end_period if ov.new_end_period is not None else effective_end_p
+                        )
                         effective_start_t = ov.new_start_time or effective_start_t
                         effective_end_t = ov.new_end_time or effective_end_t
                         if ov.new_classroom:
                             effective_room = ov.new_classroom
                         override_reason = ov.reason or "调课"
 
-                active_slots.append({
-                    "time_slot_id": ts.id,
-                    "course_id": c.id,
-                    "course_name": c.name,
-                    "code": c.code,
-                    "teacher": c.teacher,
-                    "color": c.color,
-                    "credits": c.credits,
-                    "notes": c.notes,
-                    "course_group_id": c.course_group_id,
-                    "meeting_url": c.meeting_url,
-                    "reminder_minutes": c.reminder_minutes,
-                    "day_of_week": effective_day,
-                    "start_period": effective_start_p,
-                    "end_period": effective_end_p,
-                    "start_time": effective_start_t,
-                    "end_time": effective_end_t,
-                    "classroom": effective_room,
-                    "original_classroom": ts.classroom or c.classroom,
-                    "week_pattern": ts.week_pattern,
-                    "status": status,
-                    "override_reason": override_reason,
-                    "override_id": ov.id if ov else None,
-                })
+                active_slots.append(
+                    {
+                        "time_slot_id": ts.id,
+                        "course_id": c.id,
+                        "course_name": c.name,
+                        "code": c.code,
+                        "teacher": c.teacher,
+                        "color": c.color,
+                        "credits": c.credits,
+                        "notes": c.notes,
+                        "course_group_id": c.course_group_id,
+                        "meeting_url": c.meeting_url,
+                        "reminder_minutes": c.reminder_minutes,
+                        "day_of_week": effective_day,
+                        "start_period": effective_start_p,
+                        "end_period": effective_end_p,
+                        "start_time": effective_start_t,
+                        "end_time": effective_end_t,
+                        "classroom": effective_room,
+                        "original_classroom": ts.classroom or c.classroom,
+                        "week_pattern": ts.week_pattern,
+                        "status": status,
+                        "override_reason": override_reason,
+                        "override_id": ov.id if ov else None,
+                    }
+                )
 
         # Process any standalone makeup overrides for this week
         for ov in overrides:
@@ -768,30 +857,32 @@ class ScheduleStorage:
                     start_p = ov.new_start_period or 1
                     end_p = ov.new_end_period or 2
                     s_time, e_time = period_range_to_time(start_p, end_p)
-                    active_slots.append({
-                        "time_slot_id": ov.time_slot_id,
-                        "course_id": matched_course.id,
-                        "course_name": matched_course.name,
-                        "code": matched_course.code,
-                        "teacher": matched_course.teacher,
-                        "color": matched_course.color,
-                        "credits": matched_course.credits,
-                        "notes": matched_course.notes,
-                        "course_group_id": matched_course.course_group_id,
-                        "meeting_url": matched_course.meeting_url,
-                        "reminder_minutes": matched_course.reminder_minutes,
-                        "day_of_week": ov.new_day_of_week or ov.day_of_week,
-                        "start_period": start_p,
-                        "end_period": end_p,
-                        "start_time": ov.new_start_time or s_time,
-                        "end_time": ov.new_end_time or e_time,
-                        "classroom": ov.new_classroom or matched_course.classroom,
-                        "original_classroom": matched_course.classroom,
-                        "week_pattern": "all",
-                        "status": "makeup",
-                        "override_reason": ov.reason or "补课",
-                        "override_id": ov.id,
-                    })
+                    active_slots.append(
+                        {
+                            "time_slot_id": ov.time_slot_id,
+                            "course_id": matched_course.id,
+                            "course_name": matched_course.name,
+                            "code": matched_course.code,
+                            "teacher": matched_course.teacher,
+                            "color": matched_course.color,
+                            "credits": matched_course.credits,
+                            "notes": matched_course.notes,
+                            "course_group_id": matched_course.course_group_id,
+                            "meeting_url": matched_course.meeting_url,
+                            "reminder_minutes": matched_course.reminder_minutes,
+                            "day_of_week": ov.new_day_of_week or ov.day_of_week,
+                            "start_period": start_p,
+                            "end_period": end_p,
+                            "start_time": ov.new_start_time or s_time,
+                            "end_time": ov.new_end_time or e_time,
+                            "classroom": ov.new_classroom or matched_course.classroom,
+                            "original_classroom": matched_course.classroom,
+                            "week_pattern": "all",
+                            "status": "makeup",
+                            "override_reason": ov.reason or "补课",
+                            "override_id": ov.id,
+                        }
+                    )
 
         active_slots.sort(key=lambda s: (s["day_of_week"], s["start_period"]))
         return active_slots
@@ -804,7 +895,7 @@ class ScheduleStorage:
         self,
         semester: str = "2026-2027-1",
         week_number: Optional[int] = None,
-        completed: Optional[bool] = None
+        completed: Optional[bool] = None,
     ) -> List[AcademicEvent]:
         with self._lock:
             cur = self._conn.cursor()
@@ -845,7 +936,8 @@ class ScheduleStorage:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
-                cur.execute("""
+                cur.execute(
+                    """
                 INSERT INTO academic_events (
                     id, semester, title, event_type, due_date, due_time,
                     week_number, related_course_id, location, notes, is_completed,
@@ -864,12 +956,22 @@ class ScheduleStorage:
                     priority = excluded.priority,
                     is_deleted = 0,
                     deleted_at = NULL;
-                """, (
-                    event.id, event.semester, event.title, event.event_type,
-                    event.due_date, event.due_time, event.week_number,
-                    event.related_course_id, event.location, event.notes,
-                    1 if event.is_completed else 0, event.priority
-                ))
+                """,
+                    (
+                        event.id,
+                        event.semester,
+                        event.title,
+                        event.event_type,
+                        event.due_date,
+                        event.due_time,
+                        event.week_number,
+                        event.related_course_id,
+                        event.location,
+                        event.notes,
+                        1 if event.is_completed else 0,
+                        event.priority,
+                    ),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
@@ -882,13 +984,18 @@ class ScheduleStorage:
             cur = self._conn.cursor()
             try:
                 cur.execute("BEGIN TRANSACTION;")
-                cur.execute("SELECT is_completed FROM academic_events WHERE id = ? AND is_deleted = 0;", (event_id,))
+                cur.execute(
+                    "SELECT is_completed FROM academic_events WHERE id = ? AND is_deleted = 0;",
+                    (event_id,),
+                )
                 row = cur.fetchone()
                 if not row:
                     cur.execute("COMMIT;")
                     return False
                 new_val = 0 if row["is_completed"] else 1
-                cur.execute("UPDATE academic_events SET is_completed = ? WHERE id = ?;", (new_val, event_id))
+                cur.execute(
+                    "UPDATE academic_events SET is_completed = ? WHERE id = ?;", (new_val, event_id)
+                )
                 cur.execute("COMMIT;")
                 return bool(new_val)
             except Exception:
@@ -904,7 +1011,10 @@ class ScheduleStorage:
             try:
                 cur.execute("BEGIN TRANSACTION;")
                 now_iso = datetime.now(timezone.utc).isoformat()
-                cur.execute("UPDATE academic_events SET is_deleted = 1, deleted_at = ? WHERE id = ?;", (now_iso, event_id))
+                cur.execute(
+                    "UPDATE academic_events SET is_deleted = 1, deleted_at = ? WHERE id = ?;",
+                    (now_iso, event_id),
+                )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")

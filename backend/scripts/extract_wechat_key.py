@@ -3,16 +3,16 @@ Automated WeChat Key Extractor for macOS (Independent of WeChat version)
 Captures CCKeyDerivationPBKDF calls via LLDB, matches salt, and validates Page 1.
 """
 
-import os
+import subprocess
 import sys
 import time
-import subprocess
-import binascii
-import hashlib
 from pathlib import Path
 
 ACCOUNT_ID = "wxid_hxwpag2k3qi122_53e3"
-DB_PATH = Path.home() / f"Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/{ACCOUNT_ID}/db_storage/message/message_0.db"
+DB_PATH = (
+    Path.home()
+    / f"Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/{ACCOUNT_ID}/db_storage/message/message_0.db"
+)
 CONFIG_PATH = Path.home() / "Library/Application Support/wx-cli/config/keys.toml"
 
 if not DB_PATH.exists():
@@ -27,7 +27,11 @@ print(f"[*] Target message_0.db Salt: {target_salt.hex()}")
 _HOOK_NAME = "wechat_key_hook.py"
 lldb_script_path = (Path("/tmp") / _HOOK_NAME).resolve(strict=False)
 # 规范化后校验：必须在 /tmp 一级目录下、无 ..、文件名固定
-if lldb_script_path.parent != Path("/tmp") or ".." in lldb_script_path.parts or lldb_script_path.name != _HOOK_NAME:
+if (
+    lldb_script_path.parent != Path("/tmp")
+    or ".." in lldb_script_path.parts
+    or lldb_script_path.name != _HOOK_NAME
+):
     raise RuntimeError(f"unsafe hook script path: {lldb_script_path}")
 lldb_script_content = """import lldb
 import binascii
@@ -90,13 +94,7 @@ cmd = [
     "capture_keys",
 ]
 
-proc = subprocess.Popen(
-    cmd,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1
-)
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
 time.sleep(1)
 print("[*] Launching WeChat...")
@@ -109,7 +107,7 @@ start_time = time.time()
 target_salt_hex = target_salt.hex()
 
 try:
-    for line in iter(proc.stdout.readline, ''):
+    for line in iter(proc.stdout.readline, ""):
         line = line.strip()
         if "HOOK_EVENT:" in line:
             # Parse event
@@ -125,8 +123,10 @@ try:
                 elif p.startswith("salt="):
                     salt = p.split("=")[1]
 
-            print(f" -> Found PBKDF2: rounds={rounds}, salt={salt[:16]}..., pwd_len={len(pwd)//2}")
-            
+            print(
+                f" -> Found PBKDF2: rounds={rounds}, salt={salt[:16]}..., pwd_len={len(pwd) // 2}"
+            )
+
             # Match rounds and salt
             if rounds == 256000 and salt == target_salt_hex and len(pwd) == 64:
                 print(f"[+] MATCHED KEY for {ACCOUNT_ID}!")

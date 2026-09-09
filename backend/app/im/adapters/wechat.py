@@ -13,8 +13,8 @@ stable across every ingestion path (satisfies P1-IM-6-R1 & AT-6).
 from __future__ import annotations
 
 import asyncio
-import os
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -41,13 +41,13 @@ MSG_TYPE_MAP = {
     1: "text",
     3: "image",
     34: "voice",
-    37: "text",       # friend request
-    42: "text",       # card
+    37: "text",  # friend request
+    42: "text",  # card
     43: "video",
-    47: "image",      # sticker
-    48: "text",       # location
-    49: "link",       # app message (link/file/quote/notice)
-    50: "text",       # voip
+    47: "image",  # sticker
+    48: "text",  # location
+    49: "link",  # app message (link/file/quote/notice)
+    50: "text",  # voip
     10000: "notice",  # system message (recall, invite, etc.)
     10002: "notice",
 }
@@ -334,7 +334,9 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
     # IMSourceReader
     # -------------------------------------------------------------------------
 
-    async def read_history(self, limit: int = 50, before_cursor: Optional[str] = None) -> List[IMMessageItem]:
+    async def read_history(
+        self, limit: int = 50, before_cursor: Optional[str] = None
+    ) -> List[IMMessageItem]:
         """Historical backfill using explicit since/until windows (source-side locator dedupe)."""
         return []
 
@@ -342,7 +344,9 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
     # Normalization
     # -------------------------------------------------------------------------
 
-    def normalize_wx_item(self, item: Dict[str, Any], provenance_mode: str = "sse") -> Optional[IMIngestRecord]:
+    def normalize_wx_item(
+        self, item: Dict[str, Any], provenance_mode: str = "sse"
+    ) -> Optional[IMIngestRecord]:
         """
         Normalize one wx-cli timeline item into an IMIngestRecord.
 
@@ -376,7 +380,9 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
         is_self = True if direction == "outgoing" else (False if direction == "incoming" else None)
 
         sender_id = item.get("sender")
-        sender_name = self._clean_display_name(item.get("sender_display_name") or sender_id or "微信联系人")
+        sender_name = self._clean_display_name(
+            item.get("sender_display_name") or sender_id or "微信联系人"
+        )
 
         mentions = self._extract_mentions(text)
 
@@ -451,7 +457,10 @@ class WxCliAdapter(IMSourceReader, IMIngestDriver):
 
     @staticmethod
     def _is_focus_channel(channel_name: str) -> bool:
-        return any(kw in channel_name for kw in ["通知", "班", "学院", "教务", "课程", "科研", "实验室", "导师", "辅导"])
+        return any(
+            kw in channel_name
+            for kw in ["通知", "班", "学院", "教务", "课程", "科研", "实验室", "导师", "辅导"]
+        )
 
     @staticmethod
     def _extract_mentions(text: str) -> List[Dict[str, Any]]:

@@ -1,15 +1,16 @@
 """API: config / files (tree, content, save, create, status).
 P1-M2-2: 单次字节快照、per-path 锁、原子 replace、O_EXCL 创建。
 P1-M2-3: status 语义统一。P1-M2-4: operation-aware 路径边界。"""
+
 from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import os
 import threading
-import uuid
-import mimetypes
 import unicodedata
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -53,6 +54,7 @@ def _lock_for(path: str) -> threading.Lock:
 
 
 # ---------- models ----------
+
 
 class SaveRequest(BaseModel):
     path: str
@@ -141,6 +143,7 @@ def _atomic_write(full: Path, content: str) -> None:
 
 
 # ---------- endpoints ----------
+
 
 @router.get("/config")
 def get_config(conn=Depends(get_conn)):
@@ -291,6 +294,4 @@ def get_asset(
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'",
     }
-    return FileResponse(
-        full, media_type=media_type or "application/octet-stream", headers=headers
-    )
+    return FileResponse(full, media_type=media_type or "application/octet-stream", headers=headers)

@@ -1,4 +1,5 @@
 """App 运行时状态（config 单例）。"""
+
 from __future__ import annotations
 
 from .config import AppConfig

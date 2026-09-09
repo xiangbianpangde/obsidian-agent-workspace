@@ -19,7 +19,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -61,7 +60,7 @@ WECOM_TYPE_MAP = {
     34: "voice",
     43: "video",
     1001: "text",
-    1011: "notice",   # meeting notice
+    1011: "notice",  # meeting notice
     2001: "text",
     3001: "link",
     4001: "notice",
@@ -213,7 +212,7 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
             realtime=False,
             media="placeholder",
             nativeUnread=True,
-            reliableSelfIdentity=True,   # self user id is resolvable from user_table/company.db
+            reliableSelfIdentity=True,  # self user id is resolvable from user_table/company.db
             mentions=True,
             replies=False,
             recallEvents=False,
@@ -227,7 +226,9 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
 
         if snap is not None:
             snapshot_at = datetime.fromtimestamp(snap.stat().st_mtime, tz=timezone.utc).isoformat()
-            lag_ms = max(0, int((datetime.now(timezone.utc).timestamp() - snap.stat().st_mtime) * 1000))
+            lag_ms = max(
+                0, int((datetime.now(timezone.utc).timestamp() - snap.stat().st_mtime) * 1000)
+            )
             stale = lag_ms > 30 * 60 * 1000
 
         return IMSourceStatus(
@@ -364,7 +365,9 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
             read_days,
         )
 
-        pending_max_ts = max((int(r.message.occurred_at_epoch_ms or 0) // 1000 for r in records), default=0)
+        pending_max_ts = max(
+            (int(r.message.occurred_at_epoch_ms or 0) // 1000 for r in records), default=0
+        )
 
         if not records:
             self._connectivity = "live"
@@ -421,10 +424,12 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         if sess_db.exists():
             try:
                 # contextlib.closing：查询抛异常时连接也必须关闭（Sol P2，轮询每 3s 重试会累积泄漏）
-                with contextlib.closing(sqlite3.connect("file:" + str(sess_db) + "?mode=ro", uri=True)) as sc:
+                with contextlib.closing(
+                    sqlite3.connect("file:" + str(sess_db) + "?mode=ro", uri=True)
+                ) as sc:
                     for cid, name in sc.execute("SELECT id, name FROM conversation_table;"):
                         if cid:
-                            channel_names[str(cid)] = (name or str(cid))
+                            channel_names[str(cid)] = name or str(cid)
             except Exception as e:
                 logger.warning("WeCom session.db read failed: %s", e)
 
@@ -432,10 +437,12 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         user_names: Dict[int, str] = {}
         if user_db.exists():
             try:
-                with contextlib.closing(sqlite3.connect("file:" + str(user_db) + "?mode=ro", uri=True)) as uc:
+                with contextlib.closing(
+                    sqlite3.connect("file:" + str(user_db) + "?mode=ro", uri=True)
+                ) as uc:
                     for uid, name in uc.execute("SELECT id, name FROM user_table;"):
                         if uid is not None:
-                            user_names[int(uid)] = (name or str(uid))
+                            user_names[int(uid)] = name or str(uid)
             except Exception as e:
                 logger.warning("WeCom user.db read failed: %s", e)
 
@@ -521,7 +528,9 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         conv_id = str(row.get("conversation_id") or "unknown")
         channel_id = f"wecom:{conv_id}"
         channel_name = channel_names.get(conv_id) or self._fallback_channel_name(conv_id)
-        channel_type = "group" if (conv_id.startswith("R:") or conv_id.startswith("S:")) else "direct"
+        channel_type = (
+            "group" if (conv_id.startswith("R:") or conv_id.startswith("S:")) else "direct"
+        )
 
         send_time = int(row.get("send_time") or 0)
         occurred_iso = datetime.fromtimestamp(send_time, tz=timezone.utc).isoformat()
@@ -585,7 +594,10 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
             occurred_at=occurred_iso,
             occurred_at_epoch_ms=send_time * 1000,
             observed_at=datetime.now(timezone.utc).isoformat(),
-            provenance={"mode": "snapshot", "snapshot_id": self._active_snapshot.name if self._active_snapshot else None},
+            provenance={
+                "mode": "snapshot",
+                "snapshot_id": self._active_snapshot.name if self._active_snapshot else None,
+            },
             focus_tags=tags,
             focus_reasons=reasons,
         )
@@ -613,7 +625,23 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
     def _is_focus_channel(channel_name: str) -> bool:
         return any(
             kw in channel_name
-            for kw in ["通知", "班", "学院", "教务", "课程", "科研", "实验室", "导师", "辅导", "公告", "大学", "数学", "物理", "统计", "英语"]
+            for kw in [
+                "通知",
+                "班",
+                "学院",
+                "教务",
+                "课程",
+                "科研",
+                "实验室",
+                "导师",
+                "辅导",
+                "公告",
+                "大学",
+                "数学",
+                "物理",
+                "统计",
+                "英语",
+            ]
         )
 
     @staticmethod
@@ -627,9 +655,13 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
     # IMSourceReader
     # -------------------------------------------------------------------------
 
-    async def read_history(self, limit: int = 50, before_cursor: Optional[str] = None) -> List[IMMessageItem]:
+    async def read_history(
+        self, limit: int = 50, before_cursor: Optional[str] = None
+    ) -> List[IMMessageItem]:
         snap = self._latest_snapshot()
         if snap is None:
             return []
-        records = await asyncio.to_thread(self._read_snapshot_records, snap, before_cursor, self._backfill_days)
+        records = await asyncio.to_thread(
+            self._read_snapshot_records, snap, before_cursor, self._backfill_days
+        )
         return [r.message for r in records[:limit]]

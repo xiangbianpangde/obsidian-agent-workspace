@@ -166,7 +166,9 @@ export interface IMChannelSummary {
 在 P0 阶段坚决不引入复杂的黑盒 Agent 逻辑，采用确定性、透明、用户可配置的高亮规则：
 
 ```python
-def evaluate_focus_rule(msg: IMMessageItem, channel: IMChannelSummary) -> tuple[Optional[str], Optional[str]]:
+def evaluate_focus_rule(
+    msg: IMMessageItem, channel: IMChannelSummary
+) -> tuple[Optional[str], Optional[str]]:
     # 规则 1: 标记为学校频道的通知或 @全体成员
     if channel.is_focus or "通知" in channel.name or "班" in channel.name:
         for m in msg.mentions:
@@ -174,16 +176,16 @@ def evaluate_focus_rule(msg: IMMessageItem, channel: IMChannelSummary) -> tuple[
                 return ("mention_all", f"学校/班级群「{channel.name}」发布了 @全体成员")
         if msg.message_type == "notice" or "通知" in msg.text[:30]:
             return ("school", f"学校/班级群「{channel.name}」重要通知")
-            
+
     # 规则 2: @我
     for m in msg.mentions:
         if m.get("is_self"):
             return ("mention_self", f"在「{channel.name}」中被提到 (@你)")
-            
+
     # 规则 3: 重要人员私聊
     if channel.channel_type == "direct" and channel.is_focus:
         return ("direct_important", f"重要联系人「{channel.name}」发送了私聊")
-        
+
     return (None, None)
 ```
 

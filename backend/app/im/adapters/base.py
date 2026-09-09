@@ -4,9 +4,15 @@ Conforms strictly to docs/03-im-integration-v0.2.7.md
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from backend.app.im.models import IMCapabilities, IMIngestBatch, IMCommitReceipt, IMSourceStatus, IMMessageItem
+from backend.app.im.models import (
+    IMCapabilities,
+    IMCommitReceipt,
+    IMIngestBatch,
+    IMMessageItem,
+    IMSourceStatus,
+)
 
 
 class IMSourceAdapter(ABC):
@@ -32,7 +38,9 @@ class IMSourceReader(IMSourceAdapter):
     """Source reader for historical batch fetching."""
 
     @abstractmethod
-    async def read_history(self, limit: int = 50, before_cursor: Optional[str] = None) -> List[IMMessageItem]:
+    async def read_history(
+        self, limit: int = 50, before_cursor: Optional[str] = None
+    ) -> List[IMMessageItem]:
         pass
 
 

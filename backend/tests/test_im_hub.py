@@ -9,11 +9,9 @@ import json
 import os
 import shutil
 import sqlite3
-import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,10 +25,8 @@ from backend.app.im.journal import (
     IdentityConflictError,
     IMJournal,
     InvalidIngestEnvelopeError,
-    secure_harden_directory_and_files,
 )
 from backend.app.im.models import (
-    IMAttachment,
     IMIngestBatch,
     IMIngestRecord,
     IMMessageItem,
@@ -40,10 +36,10 @@ from backend.app.im.models import (
 )
 from backend.app.main import app
 
-
 # -----------------------------------------------------------------------------
 # Test Helpers
 # -----------------------------------------------------------------------------
+
 
 def make_sample_message(
     source: str = "wechat",
@@ -52,7 +48,7 @@ def make_sample_message(
     msg_id: str = "m1",
     text: str = "Hello",
     epoch_ms: int = 1725400000000,
-    reply_to: str = None
+    reply_to: str = None,
 ) -> IMMessageItem:
     return IMMessageItem(
         id=f"{source}_msg_{msg_id}",
@@ -77,13 +73,14 @@ def make_sample_message(
         observed_at=datetime.now(timezone.utc).isoformat(),
         provenance={"mode": "sse"},
         focus_tags=[],
-        focus_reasons=[]
+        focus_reasons=[],
     )
 
 
 # -----------------------------------------------------------------------------
 # AT-1: Capability Decoupling
 # -----------------------------------------------------------------------------
+
 
 def test_at1r_qq_snapshot_capability_and_reader_driver_shape():
     """AT-1R: QQ is a conservative snapshot Reader/Driver, never a realtime bot."""
@@ -107,6 +104,7 @@ def test_at1r_qq_snapshot_capability_and_reader_driver_shape():
 # -----------------------------------------------------------------------------
 # AT-2: Cross-Path Digest Consistency & Reply-To Identity Domain
 # -----------------------------------------------------------------------------
+
 
 def test_at2_cross_path_canonical_digest_and_reply_to():
     """
@@ -170,7 +168,9 @@ def test_at2_cross_path_canonical_digest_and_reply_to():
         assert rec_conflict.dedupe_key == rec_sse.dedupe_key
         assert compute_server_digest(rec_conflict.message) != digest_sse
 
-        batch_conflict = IMIngestBatch(source="wechat", account_id="wx_primary", records=[rec_conflict])
+        batch_conflict = IMIngestBatch(
+            source="wechat", account_id="wx_primary", records=[rec_conflict]
+        )
         with pytest.raises(IdentityConflictError):
             journal.commit_batch(batch_conflict)
 
@@ -181,27 +181,39 @@ def test_at2_cross_path_canonical_digest_and_reply_to():
 # AT-3: Batch Mixed Deduplication and Watermark Advancement
 # -----------------------------------------------------------------------------
 
+
 def test_at3_batch_mixed_dedupe_and_watermark():
     """AT-3: [existing A, new B, replay A] mixed batch -> A skipped, B inserted, watermark advanced."""
     with tempfile.TemporaryDirectory() as td:
         journal = IMJournal(Path(td) / "im_test.db")
 
         msg_a = make_sample_message(msg_id="msg_A", text="Message A")
-        rec_a = IMIngestRecord(source="wechat", account_id="acc_main", dedupe_key="key_A", dedupe_basis="native_message_id", message=msg_a)
+        rec_a = IMIngestRecord(
+            source="wechat",
+            account_id="acc_main",
+            dedupe_key="key_A",
+            dedupe_basis="native_message_id",
+            message=msg_a,
+        )
 
         # Pre-commit A
         journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc_main", records=[rec_a]))
 
         # Prepare mixed batch: [A, B, A]
         msg_b = make_sample_message(msg_id="msg_B", text="Message B")
-        rec_b = IMIngestRecord(source="wechat", account_id="acc_main", dedupe_key="key_B", dedupe_basis="native_message_id", message=msg_b)
-
-        wm = IMWatermark(kind="source_cursor", value="cursor_100", committed_at="2026-09-04T10:05:00Z")
-        mixed_batch = IMIngestBatch(
+        rec_b = IMIngestRecord(
             source="wechat",
             account_id="acc_main",
-            records=[rec_a, rec_b, rec_a],
-            new_watermark=wm
+            dedupe_key="key_B",
+            dedupe_basis="native_message_id",
+            message=msg_b,
+        )
+
+        wm = IMWatermark(
+            kind="source_cursor", value="cursor_100", committed_at="2026-09-04T10:05:00Z"
+        )
+        mixed_batch = IMIngestBatch(
+            source="wechat", account_id="acc_main", records=[rec_a, rec_b, rec_a], new_watermark=wm
         )
 
         receipt = journal.commit_batch(mixed_batch)
@@ -221,6 +233,7 @@ def test_at3_batch_mixed_dedupe_and_watermark():
 # AT-4: Forged Provided Digest Rejection
 # -----------------------------------------------------------------------------
 
+
 def test_at4_forged_provided_digest_rejection():
     """AT-4: Submitting forged provided_digest fails immediately with 400 and does not write."""
     with tempfile.TemporaryDirectory() as td:
@@ -233,11 +246,13 @@ def test_at4_forged_provided_digest_rejection():
             dedupe_key="key_forged",
             dedupe_basis="native_message_id",
             message=msg,
-            provided_digest="deadbeef" * 8  # Forged wrong hash
+            provided_digest="deadbeef" * 8,  # Forged wrong hash
         )
 
         with pytest.raises(ValueError, match="Provided digest mismatch"):
-            journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc_main", records=[rec]))
+            journal.commit_batch(
+                IMIngestBatch(source="wechat", account_id="acc_main", records=[rec])
+            )
 
         assert journal.get_current_head_seq() == 0
         journal.close()
@@ -246,6 +261,7 @@ def test_at4_forged_provided_digest_rejection():
 # -----------------------------------------------------------------------------
 # AT-5: Envelope-Message Identity Domain Mismatch Dual Branch
 # -----------------------------------------------------------------------------
+
 
 def test_at5_envelope_identity_domain_mismatch_dual_branch():
     """
@@ -257,18 +273,34 @@ def test_at5_envelope_identity_domain_mismatch_dual_branch():
 
         # Branch A: source mismatch
         msg_a = make_sample_message(source="qq", account_id="acc_1")
-        rec_a = IMIngestRecord(source="wechat", account_id="acc_1", dedupe_key="key_1", dedupe_basis="native_message_id", message=msg_a)
+        rec_a = IMIngestRecord(
+            source="wechat",
+            account_id="acc_1",
+            dedupe_key="key_1",
+            dedupe_basis="native_message_id",
+            message=msg_a,
+        )
 
         with pytest.raises(InvalidIngestEnvelopeError):
-            journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc_1", records=[rec_a]))
+            journal.commit_batch(
+                IMIngestBatch(source="wechat", account_id="acc_1", records=[rec_a])
+            )
         assert journal.get_current_head_seq() == 0
 
         # Branch B: account_id mismatch
         msg_b = make_sample_message(source="wechat", account_id="acc_2")
-        rec_b = IMIngestRecord(source="wechat", account_id="acc_1", dedupe_key="key_2", dedupe_basis="native_message_id", message=msg_b)
+        rec_b = IMIngestRecord(
+            source="wechat",
+            account_id="acc_1",
+            dedupe_key="key_2",
+            dedupe_basis="native_message_id",
+            message=msg_b,
+        )
 
         with pytest.raises(InvalidIngestEnvelopeError):
-            journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc_1", records=[rec_b]))
+            journal.commit_batch(
+                IMIngestBatch(source="wechat", account_id="acc_1", records=[rec_b])
+            )
         assert journal.get_current_head_seq() == 0
 
         journal.close()
@@ -277,6 +309,7 @@ def test_at5_envelope_identity_domain_mismatch_dual_branch():
 # -----------------------------------------------------------------------------
 # AT-6: Physical Locator Collision Negative Test
 # -----------------------------------------------------------------------------
+
 
 def test_at6_physical_locator_collision_negative_test():
     """
@@ -289,17 +322,35 @@ def test_at6_physical_locator_collision_negative_test():
 
         # Message 1
         key_1 = make_wechat_synthetic_key("wx_main", "physical_svr_id_101")
-        msg_1 = make_sample_message(account_id="wx_main", msg_id="101", text="收到", epoch_ms=1725400000000)
-        rec_1 = IMIngestRecord(source="wechat", account_id="wx_main", dedupe_key=key_1, dedupe_basis="synthetic_v1", message=msg_1)
+        msg_1 = make_sample_message(
+            account_id="wx_main", msg_id="101", text="收到", epoch_ms=1725400000000
+        )
+        rec_1 = IMIngestRecord(
+            source="wechat",
+            account_id="wx_main",
+            dedupe_key=key_1,
+            dedupe_basis="synthetic_v1",
+            message=msg_1,
+        )
 
         # Message 2 (exact same content, sender, and timestamp, but different physical id)
         key_2 = make_wechat_synthetic_key("wx_main", "physical_svr_id_102")
-        msg_2 = make_sample_message(account_id="wx_main", msg_id="102", text="收到", epoch_ms=1725400000000)
-        rec_2 = IMIngestRecord(source="wechat", account_id="wx_main", dedupe_key=key_2, dedupe_basis="synthetic_v1", message=msg_2)
+        msg_2 = make_sample_message(
+            account_id="wx_main", msg_id="102", text="收到", epoch_ms=1725400000000
+        )
+        rec_2 = IMIngestRecord(
+            source="wechat",
+            account_id="wx_main",
+            dedupe_key=key_2,
+            dedupe_basis="synthetic_v1",
+            message=msg_2,
+        )
 
         assert key_1 != key_2
 
-        receipt = journal.commit_batch(IMIngestBatch(source="wechat", account_id="wx_main", records=[rec_1, rec_2]))
+        receipt = journal.commit_batch(
+            IMIngestBatch(source="wechat", account_id="wx_main", records=[rec_1, rec_2])
+        )
         assert receipt.inserted_count == 2
         assert receipt.skipped_count == 0
         assert journal.get_current_head_seq() == 2
@@ -310,6 +361,7 @@ def test_at6_physical_locator_collision_negative_test():
 # -----------------------------------------------------------------------------
 # AT-7: Open Interval Replay & Dual Cursor Resolution
 # -----------------------------------------------------------------------------
+
 
 def test_at7_open_interval_replay_and_dual_cursor():
     """
@@ -324,7 +376,15 @@ def test_at7_open_interval_replay_and_dual_cursor():
         records = []
         for i in range(1, 11):
             m = make_sample_message(account_id="acc", msg_id=f"seq_{i}", text=f"Msg {i}")
-            records.append(IMIngestRecord(source="wechat", account_id="acc", dedupe_key=f"k_{i}", dedupe_basis="native_message_id", message=m))
+            records.append(
+                IMIngestRecord(
+                    source="wechat",
+                    account_id="acc",
+                    dedupe_key=f"k_{i}",
+                    dedupe_basis="native_message_id",
+                    message=m,
+                )
+            )
 
         journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc", records=records))
         assert journal.get_current_head_seq() == 10
@@ -341,6 +401,7 @@ def test_at7_open_interval_replay_and_dual_cursor():
 # AT-8: Resync Snapshot Exhaustive Pagination Gate
 # -----------------------------------------------------------------------------
 
+
 def test_at8_resync_snapshot_exhaustive_pagination():
     """
     AT-8: 137 backlog messages <= snapshot_head_seq=137 with limit=50.
@@ -352,8 +413,18 @@ def test_at8_resync_snapshot_exhaustive_pagination():
         # Commit 137 messages
         records = []
         for i in range(1, 138):
-            m = make_sample_message(account_id="acc", msg_id=f"m_{i}", text=f"Item {i}", epoch_ms=1725400000000 + i)
-            records.append(IMIngestRecord(source="wechat", account_id="acc", dedupe_key=f"k_{i}", dedupe_basis="native_message_id", message=m))
+            m = make_sample_message(
+                account_id="acc", msg_id=f"m_{i}", text=f"Item {i}", epoch_ms=1725400000000 + i
+            )
+            records.append(
+                IMIngestRecord(
+                    source="wechat",
+                    account_id="acc",
+                    dedupe_key=f"k_{i}",
+                    dedupe_basis="native_message_id",
+                    message=m,
+                )
+            )
 
         journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc", records=records))
         snapshot_head = journal.get_current_head_seq()
@@ -365,7 +436,9 @@ def test_at8_resync_snapshot_exhaustive_pagination():
         pages = 0
 
         while True:
-            items, next_cursor = journal.query_snapshot_page(snapshot_head_seq=snapshot_head, cursor=cursor, limit=50)
+            items, next_cursor = journal.query_snapshot_page(
+                snapshot_head_seq=snapshot_head, cursor=cursor, limit=50
+            )
             pages += 1
             all_fetched.extend(items)
             if next_cursor is None:
@@ -382,6 +455,7 @@ def test_at8_resync_snapshot_exhaustive_pagination():
 # -----------------------------------------------------------------------------
 # AT-9: Permission Hardening on Pre-existing Permissive Files
 # -----------------------------------------------------------------------------
+
 
 def test_at9_permission_hardening_existing_files():
     """
@@ -421,6 +495,7 @@ def test_at9_permission_hardening_existing_files():
 # Real wx-cli transport regression tests
 # -----------------------------------------------------------------------------
 
+
 def test_wx_cli_native_timeline_payload_normalization():
     """Native wx-cli fields must map to a stable workspace record."""
     adapter = WxCliAdapter(account_id="wxid_me")
@@ -454,6 +529,7 @@ def test_wx_cli_native_timeline_payload_normalization():
 
 def test_wx_cli_unreachable_is_not_reported_live():
     """Starting the adapter must not fabricate a live source status."""
+
     async def scenario():
         adapter = WxCliAdapter(base_url="http://127.0.0.1:9", poll_interval_secs=60)
         journal = IMJournal(Path(tempfile.mkdtemp()) / "im_test.db")
@@ -471,6 +547,7 @@ def test_wx_cli_unreachable_is_not_reported_live():
 # -----------------------------------------------------------------------------
 # AT-10: Snapshot Capture & WAL Integrity
 # -----------------------------------------------------------------------------
+
 
 def test_at10_snapshot_wal_integrity():
     """
@@ -525,6 +602,7 @@ def test_at10_snapshot_wal_integrity():
 # AT-11: Fault Injection on Atomic Publish & Quarantine
 # -----------------------------------------------------------------------------
 
+
 def test_at11_fault_injection_and_quarantine():
     """
     AT-11: When extraction/validation fails in staging, the staging directory is
@@ -532,6 +610,7 @@ def test_at11_fault_injection_and_quarantine():
     snapshots are never modified.
     """
     from backend.scripts.qq_snapshot.capture import _quarantine
+
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         staging_dir = root / "staging" / "20260908T120000-abcd1234ef56"
@@ -554,6 +633,7 @@ def test_at11_fault_injection_and_quarantine():
 # -----------------------------------------------------------------------------
 # AT-12: Permissions, Immutability & Path Isolation
 # -----------------------------------------------------------------------------
+
 
 def test_at12_permissions_and_path_isolation():
     """
@@ -588,6 +668,7 @@ def test_at12_permissions_and_path_isolation():
 # AT-13: Zero Key/Salt Leakage & Cache-Control: no-store
 # -----------------------------------------------------------------------------
 
+
 def test_at13_zero_leakage_and_global_no_store():
     """
     AT-13:
@@ -612,7 +693,9 @@ def test_at13_zero_leakage_and_global_no_store():
         assert "no-cache" in cc
 
     # 2. Check that if a real manifest exists, it has no key_hex or salt_hex
-    vault_current = Path.home() / "Library/Application Support/qq-local-vault/accounts/qq_primary/CURRENT"
+    vault_current = (
+        Path.home() / "Library/Application Support/qq-local-vault/accounts/qq_primary/CURRENT"
+    )
     if vault_current.exists():
         snap_id = vault_current.read_text().strip()
         manifest_path = vault_current.parent / "snapshots" / snap_id / "manifest.json"
@@ -626,6 +709,7 @@ def test_at13_zero_leakage_and_global_no_store():
 # -----------------------------------------------------------------------------
 # AT-14: Codec & Schema Drift Fail-Closed
 # -----------------------------------------------------------------------------
+
 
 def test_at14_schema_drift_fail_closed():
     """
@@ -669,6 +753,7 @@ def test_at14_schema_drift_fail_closed():
 # AT-15: Cross-Snapshot Dedupe & No-Delete Invariant
 # -----------------------------------------------------------------------------
 
+
 def test_at15_cross_snapshot_dedupe_and_no_delete():
     """
     AT-15:
@@ -680,34 +765,76 @@ def test_at15_cross_snapshot_dedupe_and_no_delete():
         journal = IMJournal(Path(td) / "im_test.db")
 
         # Snapshot 1
-        m1 = make_sample_message(source="qq", account_id="qq_acc", msg_id="101", text="Msg 1", epoch_ms=1788500001000)
-        m2 = make_sample_message(source="qq", account_id="qq_acc", msg_id="102", text="Msg 2", epoch_ms=1788500002000)
-        r1 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "101"), dedupe_basis="synthetic_v1", message=m1)
-        r2 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "102"), dedupe_basis="synthetic_v1", message=m2)
+        m1 = make_sample_message(
+            source="qq", account_id="qq_acc", msg_id="101", text="Msg 1", epoch_ms=1788500001000
+        )
+        m2 = make_sample_message(
+            source="qq", account_id="qq_acc", msg_id="102", text="Msg 2", epoch_ms=1788500002000
+        )
+        r1 = IMIngestRecord(
+            source="qq",
+            account_id="qq_acc",
+            dedupe_key=make_qq_synthetic_key("qq_acc", "group", "101"),
+            dedupe_basis="synthetic_v1",
+            message=m1,
+        )
+        r2 = IMIngestRecord(
+            source="qq",
+            account_id="qq_acc",
+            dedupe_key=make_qq_synthetic_key("qq_acc", "group", "102"),
+            dedupe_basis="synthetic_v1",
+            message=m2,
+        )
 
-        rcpt_1 = journal.commit_batch(IMIngestBatch(
-            source="qq", account_id="qq_acc", records=[r1, r2],
-            new_watermark=IMWatermark(kind="snapshot_version", value="snap_1", committed_at="2026-09-08T12:00:00Z")
-        ))
+        rcpt_1 = journal.commit_batch(
+            IMIngestBatch(
+                source="qq",
+                account_id="qq_acc",
+                records=[r1, r2],
+                new_watermark=IMWatermark(
+                    kind="snapshot_version", value="snap_1", committed_at="2026-09-08T12:00:00Z"
+                ),
+            )
+        )
         assert rcpt_1.inserted_count == 2
 
         # Snapshot 2: [m1, m2, m3]
-        m3 = make_sample_message(source="qq", account_id="qq_acc", msg_id="103", text="Msg 3", epoch_ms=1788500003000)
-        r3 = IMIngestRecord(source="qq", account_id="qq_acc", dedupe_key=make_qq_synthetic_key("qq_acc", "group", "103"), dedupe_basis="synthetic_v1", message=m3)
+        m3 = make_sample_message(
+            source="qq", account_id="qq_acc", msg_id="103", text="Msg 3", epoch_ms=1788500003000
+        )
+        r3 = IMIngestRecord(
+            source="qq",
+            account_id="qq_acc",
+            dedupe_key=make_qq_synthetic_key("qq_acc", "group", "103"),
+            dedupe_basis="synthetic_v1",
+            message=m3,
+        )
 
-        rcpt_2 = journal.commit_batch(IMIngestBatch(
-            source="qq", account_id="qq_acc", records=[r1, r2, r3],
-            new_watermark=IMWatermark(kind="snapshot_version", value="snap_2", committed_at="2026-09-08T12:05:00Z")
-        ))
+        rcpt_2 = journal.commit_batch(
+            IMIngestBatch(
+                source="qq",
+                account_id="qq_acc",
+                records=[r1, r2, r3],
+                new_watermark=IMWatermark(
+                    kind="snapshot_version", value="snap_2", committed_at="2026-09-08T12:05:00Z"
+                ),
+            )
+        )
         assert rcpt_2.inserted_count == 1
         assert rcpt_2.skipped_count == 2
         assert journal.get_current_head_seq() == 3
 
         # Snapshot 3: [m1, m3] (m2 omitted from upstream)
-        rcpt_3 = journal.commit_batch(IMIngestBatch(
-            source="qq", account_id="qq_acc", records=[r1, r3],
-            new_watermark=IMWatermark(kind="snapshot_version", value="snap_3", committed_at="2026-09-08T12:10:00Z")
-        ))
+        rcpt_3 = journal.commit_batch(
+            IMIngestBatch(
+                source="qq",
+                account_id="qq_acc",
+                records=[r1, r3],
+                new_watermark=IMWatermark(
+                    kind="snapshot_version", value="snap_3", committed_at="2026-09-08T12:10:00Z"
+                ),
+            )
+        )
         assert rcpt_3.inserted_count == 0
         assert rcpt_3.skipped_count == 2
 
@@ -722,6 +849,7 @@ def test_at15_cross_snapshot_dedupe_and_no_delete():
 # -----------------------------------------------------------------------------
 # AT-16: Conservative Normalization Invariants
 # -----------------------------------------------------------------------------
+
 
 def test_at16_conservative_normalization():
     """
@@ -754,7 +882,7 @@ def test_at16_conservative_normalization():
         group_names={str(2026001): "测试学习群"},
         buddy_names={},
         snapshot_id="snap_test",
-        observed_at="2026-09-08T12:00:00Z"
+        observed_at="2026-09-08T12:00:00Z",
     )
 
     assert rec is not None
@@ -770,6 +898,7 @@ def test_at16_conservative_normalization():
 # -----------------------------------------------------------------------------
 # AT-17: Workstation Zero Outbound & Removed Zhin Ingress
 # -----------------------------------------------------------------------------
+
 
 def test_at17_zhin_ingress_removed_and_im_errors_no_store():
     client = TestClient(app)
@@ -791,13 +920,16 @@ def test_at17_zhin_ingress_removed_and_im_errors_no_store():
         for method, operation in methods.items():
             if method.lower() in ("post", "put", "delete") and "/api/im/" in path:
                 # The ONLY allowed writes in IM Hub are mark seen and sync trigger (never outbound send)
-                assert path.endswith("/seen") or path.endswith("/sync"), f"unexpected mutative IM route: {method} {path}"
+                assert path.endswith("/seen") or path.endswith("/sync"), (
+                    f"unexpected mutative IM route: {method} {path}"
+                )
                 assert "send" not in path and "reply" not in path and "recall" not in path
 
 
 # -----------------------------------------------------------------------------
 # AT-18: Journal Legacy Data Preflight
 # -----------------------------------------------------------------------------
+
 
 def test_at18_journal_legacy_data_preflight():
     """
@@ -808,7 +940,9 @@ def test_at18_journal_legacy_data_preflight():
     if journal_path.exists():
         with sqlite3.connect(f"file:{journal_path}?mode=ro", uri=True) as conn:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM messages WHERE source='qq' AND account_id='qq_primary';")
+            cur.execute(
+                "SELECT COUNT(*) FROM messages WHERE source='qq' AND account_id='qq_primary';"
+            )
             count = cur.fetchone()[0]
             # Real primary account has not been polluted with legacy webhook items
             assert count == 0 or count > 0  # preflight passes
@@ -817,6 +951,7 @@ def test_at18_journal_legacy_data_preflight():
 # -----------------------------------------------------------------------------
 # AT-19: WeCom snapshot completeness gate (write-race regression)
 # -----------------------------------------------------------------------------
+
 
 def test_at19_wecom_latest_snapshot_requires_complete_manifest(tmp_path):
     """

@@ -1,6 +1,7 @@
 """P1-M2-5 regression tests: env 风格 secret pattern（单反斜杠修复验证）。
 运行: .venv/bin/python -m unittest backend.tests.test_secret_detector
 """
+
 from __future__ import annotations
 
 import sys

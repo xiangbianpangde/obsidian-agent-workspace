@@ -8,7 +8,7 @@ import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.app.config import load_config
@@ -58,6 +58,7 @@ def get_schedule_storage() -> ScheduleStorage:
 # -----------------------------------------------------------------------------
 # Request Schemas
 # -----------------------------------------------------------------------------
+
 
 class TimeSlotIn(BaseModel):
     id: Optional[str] = None
@@ -147,6 +148,7 @@ class ReminderMinutesIn(BaseModel):
 # Endpoints
 # -----------------------------------------------------------------------------
 
+
 @router.get("/current-week")
 def get_current_week_info(semester: str = Query("2026-2027-1")) -> Dict[str, Any]:
     storage = get_schedule_storage()
@@ -154,10 +156,7 @@ def get_current_week_info(semester: str = Query("2026-2027-1")) -> Dict[str, Any
 
 
 @router.get("/week/{week_number}")
-def get_week_schedule(
-    week_number: int,
-    semester: str = Query("2026-2027-1")
-) -> Dict[str, Any]:
+def get_week_schedule(week_number: int, semester: str = Query("2026-2027-1")) -> Dict[str, Any]:
     storage = get_schedule_storage()
     slots = storage.get_effective_week_schedule(week_number=week_number, semester=semester)
     week_info = storage.compute_current_week(semester=semester)
@@ -350,7 +349,7 @@ def save_calendar(payload: CalendarIn) -> Dict[str, Any]:
 def list_events(
     semester: str = Query("2026-2027-1"),
     week_number: Optional[int] = Query(None),
-    completed: Optional[bool] = Query(None)
+    completed: Optional[bool] = Query(None),
 ) -> Dict[str, Any]:
     storage = get_schedule_storage()
     events = storage.list_events(semester=semester, week_number=week_number, completed=completed)
@@ -396,11 +395,12 @@ def delete_event(event_id: str) -> Dict[str, Any]:
 
 @router.get("/reminders/upcoming")
 def get_reminders(
-    lookahead_minutes: int = Query(60, ge=5, le=180),
-    semester: str = Query("2026-2027-1")
+    lookahead_minutes: int = Query(60, ge=5, le=180), semester: str = Query("2026-2027-1")
 ) -> Dict[str, Any]:
     storage = get_schedule_storage()
-    reminders = get_upcoming_reminders(storage=storage, lookahead_minutes=lookahead_minutes, semester=semester)
+    reminders = get_upcoming_reminders(
+        storage=storage, lookahead_minutes=lookahead_minutes, semester=semester
+    )
     return {"reminders": reminders, "count": len(reminders)}
 
 

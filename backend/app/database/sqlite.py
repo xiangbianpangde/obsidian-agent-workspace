@@ -1,4 +1,5 @@
 """SQLite index: files / tags / file_tags / metadata + scan_runs / index_events."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -181,9 +182,7 @@ def remove_file(conn: sqlite3.Connection, path: str) -> None:
     conn.execute("DELETE FROM files WHERE path=?", (path,))
 
 
-def record_event(
-    conn: sqlite3.Connection, kind: str, path: str, note: str = ""
-) -> None:
+def record_event(conn: sqlite3.Connection, kind: str, path: str, note: str = "") -> None:
     conn.execute(
         "INSERT INTO index_events(ts, kind, path, note) VALUES(?,?,?,?)",
         (now_iso(), kind, path, note),
@@ -191,9 +190,7 @@ def record_event(
 
 
 def begin_scan(conn: sqlite3.Connection) -> int:
-    cur = conn.execute(
-        "INSERT INTO scan_runs(started_at) VALUES(?)", (now_iso(),)
-    )
+    cur = conn.execute("INSERT INTO scan_runs(started_at) VALUES(?)", (now_iso(),))
     return cur.lastrowid
 
 
@@ -216,7 +213,5 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "tags": conn.execute("SELECT COUNT(*) c FROM tags").fetchone()["c"],
         "metadata_rows": conn.execute("SELECT COUNT(*) c FROM metadata").fetchone()["c"],
         "events": conn.execute("SELECT COUNT(*) c FROM index_events").fetchone()["c"],
-        "last_scan": conn.execute(
-            "SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1"
-        ).fetchone(),
+        "last_scan": conn.execute("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone(),
     }

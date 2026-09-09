@@ -17,7 +17,6 @@ Maintains Sol security boundaries:
 from __future__ import annotations
 
 import argparse
-import glob
 import logging
 import os
 import signal
@@ -35,24 +34,22 @@ logging.basicConfig(
 logger = logging.getLogger("im_sync_daemon")
 
 # Sol P2: 用当前用户私有目录替代世界可写 /tmp 固定路径，杜绝 symlink 抢占/伪造触发
-TRIGGER_DIR = Path(os.environ.get("IM_SYNC_TRIGGER_DIR", str(Path.home() / ".personal-ai-workspace" / "run")))
+TRIGGER_DIR = Path(
+    os.environ.get("IM_SYNC_TRIGGER_DIR", str(Path.home() / ".personal-ai-workspace" / "run"))
+)
 TRIGGER_FILE = TRIGGER_DIR / "im_sync_trigger"
 DEFAULT_WECOM_DATA_ROOT = (
     Path.home()
     / "Library/Containers/com.tencent.WeWorkMac/Data/Library/Application Support/WXWork/Data/1688857608826794/Data"
 )
 DEFAULT_VAULT_CLI = (
-    Path.home()
-    / "Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/vault_cli.py"
+    Path.home() / "Projects/vendor/yichen-skills/yichen-wecom-local-vault/scripts/vault_cli.py"
 )
 PYTHON_VENV = Path(__file__).resolve().parents[2] / ".venv/bin/python"
 
 
 def find_qq_db_dir() -> Optional[Path]:
-    qq_root = (
-        Path.home()
-        / "Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ"
-    )
+    qq_root = Path.home() / "Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ"
     if not qq_root.is_dir():
         return None
     for pattern in ("nt_qq_*/nt_db", "nt_db"):
@@ -125,6 +122,7 @@ class IMSyncDaemon:
             )
             stale = entries[:-keep] if len(entries) > keep else []
             import shutil as _shutil
+
             for victim in stale:
                 # Never touch an incomplete write (no manifest) or CURRENT target
                 if not (victim / "manifest.json").is_file():
@@ -249,7 +247,9 @@ class IMSyncDaemon:
                 wecom_mtime = get_latest_mtime(self.wecom_dir, "message")
                 if wecom_mtime > self.last_wecom_mtime:
                     if now - self.last_wecom_sync >= self.wecom_debounce:
-                        diff = wecom_mtime - self.last_wecom_mtime  # 先算差值再推进（Sol P2：原日志恒为 +0.0s）
+                        diff = (
+                            wecom_mtime - self.last_wecom_mtime
+                        )  # 先算差值再推进（Sol P2：原日志恒为 +0.0s）
                         self.last_wecom_mtime = wecom_mtime
                         if not self.sync_wecom(reason=f"mtime_change (+{diff:.1f}s)"):
                             self.last_wecom_mtime = 0.0  # 同步失败回滚，下轮重试该变更
@@ -277,7 +277,9 @@ class IMSyncDaemon:
 def main() -> None:
     parser = argparse.ArgumentParser(description="IM Sync Daemon for WeCom and QQ")
     parser.add_argument("--interval", type=float, default=3.0, help="Poll interval in seconds")
-    parser.add_argument("--wecom-debounce", type=float, default=3.0, help="WeCom debounce in seconds")
+    parser.add_argument(
+        "--wecom-debounce", type=float, default=3.0, help="WeCom debounce in seconds"
+    )
     parser.add_argument("--qq-debounce", type=float, default=6.0, help="QQ debounce in seconds")
     args = parser.parse_args()
 

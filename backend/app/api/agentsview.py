@@ -4,6 +4,7 @@ P1-AV-2 隐私硬边界:
 所有返回会话内容或元数据的端点统一注入 Cache-Control: no-store, no-cache, must-revalidate,
 彻底阻断本地及代理层缓存任何用户提示词、代码或敏感输出。
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
@@ -88,9 +89,7 @@ def get_session_messages(
 ):
     """有界分页回溯会话消息流 (Read-Through Only, no-store, P1-AV-2/3)。"""
     try:
-        data = get_adapter().get_messages(
-            session_id, from_ordinal=from_ordinal, limit=limit
-        )
+        data = get_adapter().get_messages(session_id, from_ordinal=from_ordinal, limit=limit)
         return JSONResponse(data, headers=_NO_STORE_HEADERS)
     except AgentsViewError as e:
         raise HTTPException(e.status_code, {"code": e.code, "message": e.message}) from None

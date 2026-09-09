@@ -4,6 +4,7 @@
   .venv/bin/python -m backend.scripts.scan            # 全量扫描并统计
   .venv/bin/python -m backend.scripts.scan --watch    # 扫描后启动 watchdog
 """
+
 from __future__ import annotations
 
 import sys

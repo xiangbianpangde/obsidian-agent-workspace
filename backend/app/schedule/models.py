@@ -8,21 +8,21 @@ Implements:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional
 
 
 @dataclass
 class CourseTimeSlot:
     """Represents a scheduled period slot for a course."""
+
     id: str
     course_id: str
     day_of_week: int  # 1 = Monday ... 7 = Sunday
     start_period: int  # 1 .. 11
-    end_period: int    # 1 .. 11
-    start_time: str    # "08:00"
-    end_time: str      # "09:40"
+    end_period: int  # 1 .. 11
+    start_time: str  # "08:00"
+    end_time: str  # "09:40"
     week_pattern: Literal["all", "odd", "even", "custom"] = "all"
     start_week: int = 1
     end_week: int = 16
@@ -34,6 +34,7 @@ class CourseTimeSlot:
 @dataclass
 class Course:
     """A university course in a specific semester."""
+
     id: str
     name: str
     code: str = ""
@@ -44,8 +45,8 @@ class Course:
     color: str = "#3b82f6"  # Hex color for UI
     notes: str = ""
     course_group_id: Optional[str] = None  # Linked WeCom/QQ channel ID
-    meeting_url: Optional[str] = None      # Tencent Meeting or Zoom link
-    reminder_minutes: int = 15             # Default 15 mins before class
+    meeting_url: Optional[str] = None  # Tencent Meeting or Zoom link
+    reminder_minutes: int = 15  # Default 15 mins before class
     time_slots: List[CourseTimeSlot] = field(default_factory=list)
     is_deleted: bool = False
     deleted_at: Optional[str] = None
@@ -59,6 +60,7 @@ class CourseOverride:
     Does NOT modify the base semester schedule.
     Zero Delete: revoked overrides are preserved with is_revoked=True.
     """
+
     id: str
     time_slot_id: str  # Precise slot occurrence binding
     course_id: str
@@ -81,7 +83,7 @@ class CourseOverride:
 class HolidayRule:
     name: str
     start_date: str  # "YYYY-MM-DD"
-    end_date: str    # "YYYY-MM-DD"
+    end_date: str  # "YYYY-MM-DD"
     is_off: bool = True
     makeup_days: List[Dict[str, str]] = field(default_factory=list)
 
@@ -101,6 +103,7 @@ class AcademicCalendar:
 @dataclass
 class AcademicEvent:
     """Integrated academic and personal events linked with the schedule."""
+
     id: str
     semester: str
     title: str

@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Literal, Optional
-
 
 # -----------------------------------------------------------------------------
 # Capability & Adapter Contracts
 # -----------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class IMCapabilities:
@@ -76,6 +76,7 @@ class IMSourceStatus:
 # Normalized Entities & DTOs
 # -----------------------------------------------------------------------------
 
+
 @dataclass
 class IMAttachment:
     type: Literal["image", "voice", "video", "file"]
@@ -100,7 +101,9 @@ class IMMessageItem:
     sender_role: Optional[str]
     is_self: Optional[bool]  # None if indeterminate (e.g. WeCom)
     text: str
-    message_type: Literal["text", "image", "voice", "video", "file", "link", "notice", "mixed", "unknown"]
+    message_type: Literal[
+        "text", "image", "voice", "video", "file", "link", "notice", "mixed", "unknown"
+    ]
     mentions: List[Dict[str, Any]]
     reply_to: Optional[str]  # MUST be source-side locator or None; NEVER workspace ID (P1-IM-6-R4)
     attachments: List[IMAttachment]
@@ -133,12 +136,13 @@ class IMChannelSummary:
 # Canonical Facts & Digest Computation (P1-IM-6-R2 & P1-IM-6-R4)
 # -----------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class CanonicalMentionFact:
     id: Optional[str]
     name: Optional[str]
     is_self: Optional[bool]  # Normalized: None if not explicitly boolean
-    is_all: Optional[bool]   # Normalized: None if not explicitly boolean
+    is_all: Optional[bool]  # Normalized: None if not explicitly boolean
 
 
 @dataclass(frozen=True)
@@ -160,7 +164,9 @@ class CanonicalIMPayloadV1:
     is_self: Optional[bool]
     reply_to: Optional[str]
     text: str
-    message_type: Literal["text", "image", "voice", "video", "file", "link", "notice", "mixed", "unknown"]
+    message_type: Literal[
+        "text", "image", "voice", "video", "file", "link", "notice", "mixed", "unknown"
+    ]
     mentions: List[CanonicalMentionFact]
     attachments: List[CanonicalAttachmentFact]
     occurred_at_epoch_ms: int
@@ -174,7 +180,7 @@ def build_canonical_payload(msg: IMMessageItem) -> CanonicalIMPayloadV1:
     """
     # Normalize mentions
     norm_mentions: List[CanonicalMentionFact] = []
-    for m in (msg.mentions or []):
+    for m in msg.mentions or []:
         raw_is_self = m.get("is_self")
         norm_is_self = raw_is_self if isinstance(raw_is_self, bool) else None
         raw_is_all = m.get("is_all")
@@ -190,7 +196,7 @@ def build_canonical_payload(msg: IMMessageItem) -> CanonicalIMPayloadV1:
 
     # Normalize attachments (exclude local_ref and availability)
     norm_attachments: List[CanonicalAttachmentFact] = []
-    for att in (msg.attachments or []):
+    for att in msg.attachments or []:
         att_type = att.type if isinstance(att, IMAttachment) else att.get("type", "file")
         att_name = (att.name if isinstance(att, IMAttachment) else att.get("name")) or None
         att_mime = (att.mime if isinstance(att, IMAttachment) else att.get("mime")) or None
@@ -242,6 +248,7 @@ def compute_server_digest(msg: IMMessageItem) -> str:
 # -----------------------------------------------------------------------------
 # Ingestion Envelope & Batch (P1-IM-6-R3 & AT-5)
 # -----------------------------------------------------------------------------
+
 
 @dataclass
 class IMIngestRecord:

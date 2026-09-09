@@ -1,5 +1,6 @@
 """Vault scanner: walker -> exclude -> secret detector -> parser -> SQLite batch.
 P1-M2-1: coordinator 原子化（begin_scan/end_scan/dispatch），事件在显式事务中重放。"""
+
 from __future__ import annotations
 
 import os

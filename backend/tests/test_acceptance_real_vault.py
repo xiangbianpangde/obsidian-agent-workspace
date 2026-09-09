@@ -2,10 +2,10 @@
 仅在本地存在真实 Vault (/Users/xbpd/Documents/xbpd_obsidian) 时运行；
 外部开源 CI / 审核环境若无真实库则安全跳过，不阻塞通用构建。
 """
+
 from __future__ import annotations
 
 import hashlib
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -14,10 +14,10 @@ _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from fastapi.testclient import TestClient
 from app.config import load_config
 from app.main import app
 from app.state import init_state
+from fastapi.testclient import TestClient
 
 
 class TestAcceptanceRealVault(unittest.TestCase):

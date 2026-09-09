@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .storage import ScheduleStorage
@@ -48,23 +48,25 @@ def get_upcoming_reminders(
         # Trigger strictly based on the course's configured reminder_minutes window
         reminder_threshold = s.get("reminder_minutes") or 15
         if 0 <= diff_mins <= reminder_threshold:
-            reminders.append({
-                "course_name": s["course_name"],
-                "classroom": s["classroom"],
-                "original_classroom": s.get("original_classroom"),
-                "teacher": s["teacher"],
-                "start_time": s["start_time"],
-                "end_time": s["end_time"],
-                "start_period": s["start_period"],
-                "end_period": s["end_period"],
-                "minutes_until_start": int(diff_mins),
-                "is_relocated": s["status"] == "relocated",
-                "is_rescheduled": s["status"] == "rescheduled",
-                "meeting_url": s.get("meeting_url"),
-                "notes": s.get("notes"),
-                "status": s["status"],
-                "override_reason": s.get("override_reason"),
-            })
+            reminders.append(
+                {
+                    "course_name": s["course_name"],
+                    "classroom": s["classroom"],
+                    "original_classroom": s.get("original_classroom"),
+                    "teacher": s["teacher"],
+                    "start_time": s["start_time"],
+                    "end_time": s["end_time"],
+                    "start_period": s["start_period"],
+                    "end_period": s["end_period"],
+                    "minutes_until_start": int(diff_mins),
+                    "is_relocated": s["status"] == "relocated",
+                    "is_rescheduled": s["status"] == "rescheduled",
+                    "meeting_url": s.get("meeting_url"),
+                    "notes": s.get("notes"),
+                    "status": s["status"],
+                    "override_reason": s.get("override_reason"),
+                }
+            )
 
     reminders.sort(key=lambda r: r["minutes_until_start"])
     return reminders

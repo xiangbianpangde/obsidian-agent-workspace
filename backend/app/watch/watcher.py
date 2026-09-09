@@ -1,5 +1,6 @@
 """Watchdog: 增量监听 CREATE/MODIFY/MOVE；DELETE 只记录 tombstone（v0.2 §7）。
 P1-M2-1: 专用 connection + 原子 coordinator（CREATE/MODIFY/MOVE/DELETE 全部过协调）+ per-path debounce。"""
+
 from __future__ import annotations
 
 import logging
@@ -22,7 +23,9 @@ class ScanCoordinator:
 
     def __init__(self):
         self._mutex = threading.Lock()
-        self._event_lock = threading.Lock()  # Sol P2: 序列化事件处理与扫描起点，杜绝 check→process 窗口与扫描交错
+        self._event_lock = (
+            threading.Lock()
+        )  # Sol P2: 序列化事件处理与扫描起点，杜绝 check→process 窗口与扫描交错
         self._scanning = False
         self._pending: deque = deque()
 
@@ -54,8 +57,13 @@ class ScanCoordinator:
 
 
 class VaultEventHandler(FileSystemEventHandler):
-    def __init__(self, cfg: AppConfig, conn, debounce_ms: int = 500,
-                 coordinator: ScanCoordinator | None = None):
+    def __init__(
+        self,
+        cfg: AppConfig,
+        conn,
+        debounce_ms: int = 500,
+        coordinator: ScanCoordinator | None = None,
+    ):
         self.cfg = cfg
         self.conn = conn
         self.debounce_ms = debounce_ms
