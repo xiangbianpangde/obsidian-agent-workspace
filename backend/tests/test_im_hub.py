@@ -777,6 +777,12 @@ def test_at17_zhin_ingress_removed_and_im_errors_no_store():
     assert response.status_code == 404
     assert "no-store" in response.headers.get("Cache-Control", "")
 
+    # Test /api/im/sync trigger endpoint
+    sync_resp = client.post("/api/im/sync")
+    assert sync_resp.status_code == 200
+    assert sync_resp.json().get("status") == "ok"
+    assert "no-store" in sync_resp.headers.get("Cache-Control", "")
+
     # Check OpenAPI schema for zero outbound send/reply/recall endpoints
     schema = app.openapi()
     paths = schema.get("paths", {})
@@ -784,8 +790,9 @@ def test_at17_zhin_ingress_removed_and_im_errors_no_store():
     for path, methods in paths.items():
         for method, operation in methods.items():
             if method.lower() in ("post", "put", "delete") and "/api/im/" in path:
-                # The ONLY allowed write in IM Hub is mark seen
-                assert path.endswith("/seen"), f"unexpected mutative IM route: {method} {path}"
+                # The ONLY allowed writes in IM Hub are mark seen and sync trigger (never outbound send)
+                assert path.endswith("/seen") or path.endswith("/sync"), f"unexpected mutative IM route: {method} {path}"
+                assert "send" not in path and "reply" not in path and "recall" not in path
 
 
 # -----------------------------------------------------------------------------
@@ -805,3 +812,44 @@ def test_at18_journal_legacy_data_preflight():
             count = cur.fetchone()[0]
             # Real primary account has not been polluted with legacy webhook items
             assert count == 0 or count > 0  # preflight passes
+
+
+# -----------------------------------------------------------------------------
+# AT-19: WeCom snapshot completeness gate (write-race regression)
+# -----------------------------------------------------------------------------
+
+def test_at19_wecom_latest_snapshot_requires_complete_manifest(tmp_path):
+    """
+    AT-19: vault_cli.py writes manifest.json LAST. _latest_snapshot() must
+    ignore snapshot directories that lack a parseable, complete manifest —
+    otherwise the poller races the decrypt process, ingests half-written
+    snapshots (missing user.db), produces fallback sender names and poisons
+    the journal with digest conflicts.
+    """
+    root = tmp_path / "wecom-snapshots"
+    root.mkdir()
+
+    # Case 1: in-progress snapshot (message.db only, no manifest yet)
+    in_progress = root / "20260101-000000-000-inprogress"
+    in_progress.mkdir()
+    (in_progress / "message.db").write_bytes(b"partial")
+
+    # Case 2: complete snapshot (older name, but has full manifest)
+    complete = root / "20251231-000000-000-complete"
+    complete.mkdir()
+    (complete / "message.db").write_bytes(b"data")
+    (complete / "manifest.json").write_text(
+        json.dumps({"version": 1, "results": [{"database": "message.db", "status": "ok"}]}),
+        encoding="utf-8",
+    )
+
+    # Case 3: corrupted manifest (invalid JSON) -> must be ignored too
+    corrupted = root / "20260102-000000-000-corrupt"
+    corrupted.mkdir()
+    (corrupted / "message.db").write_bytes(b"data")
+    (corrupted / "manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    adapter = WeComSnapshotAdapter(snapshot_root=root)
+    latest = adapter._latest_snapshot()
+    assert latest is not None
+    assert latest.name == "20251231-000000-000-complete"

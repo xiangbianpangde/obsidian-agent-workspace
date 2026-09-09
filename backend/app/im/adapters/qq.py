@@ -144,7 +144,7 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
         self,
         account_id: str = "qq_primary",
         snapshot_root: Optional[str | Path] = None,
-        poll_interval_secs: float = 15.0,
+        poll_interval_secs: float = 3.0,
         stale_after_secs: int = 30 * 60,
     ):
         if not ACCOUNT_RE.fullmatch(account_id):

@@ -2281,6 +2281,7 @@
 
     async function loadImHubData() {
       try {
+        api('/im/sync', { method: 'POST' }).catch(() => {});
         await Promise.all([
           loadImStatus(),
           loadImOverview(),
@@ -2886,7 +2887,10 @@
       }
     });
 
-    el.btnRefreshIm.addEventListener('click', () => {
+    el.btnRefreshIm.addEventListener('click', async () => {
+      try {
+        await api('/im/sync', { method: 'POST' });
+      } catch (e) {}
       loadImHubData();
     });
 

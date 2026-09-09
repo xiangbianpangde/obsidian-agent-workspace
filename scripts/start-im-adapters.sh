@@ -7,6 +7,7 @@ echo "=========================================="
 echo " 个人工作台 · 统一消息中心 (IM Hub) 启动器"
 echo "=========================================="
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WX_CLI="${HOME}/.local/bin/wx-cli"
 
 # ---------------------------------------------------------------------------
@@ -70,14 +71,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. 工作台
+# 4. 企业微信与 QQ 自动实时同步守护进程 (im_sync_daemon)
 # ---------------------------------------------------------------------------
 echo ""
-echo "[4/4] 启动个人工作台..."
+echo "[4/5] 检查企微与 QQ 自动同步守护进程..."
+if pgrep -f "im_sync_daemon.py" >/dev/null 2>&1; then
+  echo "      ✓ 自动同步守护进程已在运行"
+else
+  echo "      → 启动自动同步守护进程 (文件变更自动增量快照)..."
+  nohup "${ROOT_DIR}/.venv/bin/python" "${ROOT_DIR}/backend/scripts/im_sync_daemon.py" >/tmp/im_sync_daemon.log 2>&1 &
+  sleep 1
+  if pgrep -f "im_sync_daemon.py" >/dev/null 2>&1; then
+    echo "      ✓ 自动同步守护进程已启动 (/tmp/im_sync_daemon.log)"
+  else
+    echo "      ⚠ 自动同步守护进程启动异常，可稍后手动检查"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5. 工作台
+# ---------------------------------------------------------------------------
+echo ""
+echo "[5/5] 启动个人工作台..."
 if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8787/api/im/status 2>/dev/null | grep -q "200"; then
   echo "      ✓ 工作台已在运行 (http://127.0.0.1:8787)"
 else
-  cd "$(dirname "$0")/.."
+  cd "${ROOT_DIR}"
   nohup .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8787 >/tmp/workspace_serve.log 2>&1 &
   sleep 5
   echo "      ✓ 工作台已启动 (http://127.0.0.1:8787)"

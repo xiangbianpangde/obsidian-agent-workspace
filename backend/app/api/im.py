@@ -178,6 +178,20 @@ async def mark_channel_seen(channel_id: str, response: Response) -> Dict[str, An
     return {"status": "ok", "channel_id": channel_id}
 
 
+@router.post("/api/im/sync")
+async def trigger_im_sync(response: Response) -> Dict[str, Any]:
+    """Request an on-demand snapshot sync via loopback trigger file."""
+    import time
+    from pathlib import Path
+    apply_no_store(response)
+    trigger = Path("/tmp/im_sync_trigger")
+    try:
+        trigger.write_text(str(time.time()), encoding="utf-8")
+        return {"status": "ok", "message": "sync_requested"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
 @router.get("/api/im/events")
 async def get_im_events(
     request: Request,

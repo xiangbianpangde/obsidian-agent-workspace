@@ -610,9 +610,27 @@ def capture_snapshot(account_alias: str, source_root: Path | None = None, vault_
             if profile is None:
                 raise QQSnapshotError("QQ_SNAPSHOT_CODEC_UNSUPPORTED")
 
-            key_payload = _capture_live_keys(pids[0], source_root, wrapper_digest)
-            if key_payload.get("profile_id") != profile.profile_id:
-                raise QQSnapshotError("QQ_SNAPSHOT_CODEC_UNSUPPORTED")
+            # Check private/keys.json cache (0600) to avoid slow LLDB memory scan on repeated captures
+            key_cache = account_root / "private" / "keys.json"
+            key_payload = None
+            if key_cache.is_file():
+                try:
+                    _validate_private_regular(key_cache)
+                    cached = json.loads(key_cache.read_text(encoding="utf-8"))
+                    if cached.get("wrapper_sha256") == wrapper_digest and cached.get("profile_id") == profile.profile_id:
+                        key_payload = cached
+                except Exception:
+                    key_payload = None
+
+            if key_payload is None:
+                key_payload = _capture_live_keys(pids[0], source_root, wrapper_digest)
+                if key_payload.get("profile_id") != profile.profile_id:
+                    raise QQSnapshotError("QQ_SNAPSHOT_CODEC_UNSUPPORTED")
+                # Persist to private/keys.json with 0600 permissions
+                try:
+                    _atomic_json(key_cache, key_payload)
+                except Exception:
+                    pass
 
             source_quiesced_at = _freeze_clone(source_root, source_clone, pids)
             _ensure_private_dir(export_dir)

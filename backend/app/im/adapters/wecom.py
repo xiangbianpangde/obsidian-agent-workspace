@@ -16,6 +16,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -175,7 +176,7 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         self,
         account_id: str = "wecom_primary",
         snapshot_root: Optional[str | Path] = None,
-        poll_interval_secs: float = 15.0,
+        poll_interval_secs: float = 3.0,
         backfill_days: int = 14,
     ):
         self._account_id = account_id
@@ -191,6 +192,7 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         self._ingested_snapshots: set = set()
         self._last_observed_at: Optional[str] = None
         self._last_watermark_val: Optional[str] = None
+        self._max_seen_ts: int = 0  # highest send_time (unix secs) committed to journal
         self._connectivity = "offline"
         self._last_error: Optional[str] = None
         self._self_user_ids: set = set()
@@ -250,12 +252,32 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
     # -------------------------------------------------------------------------
 
     def _latest_snapshot(self) -> Optional[Path]:
+        """Return newest snapshot that is FULLY written.
+
+        vault_cli.py writes manifest.json last as the atomic completeness
+        marker. Accepting directories with only message.db would race the
+        decrypt process and ingest half-written snapshots (missing user.db /
+        session.db), producing fallback sender names and therefore
+        IdentityConflictError in the journal. Require a parseable manifest.
+        """
         if not self._snapshot_root.is_dir():
             return None
-        candidates = [
-            p for p in self._snapshot_root.iterdir()
-            if p.is_dir() and (p / "message.db").exists()
-        ]
+        candidates = []
+        for p in self._snapshot_root.iterdir():
+            if not p.is_dir() or not (p / "message.db").exists():
+                continue
+            manifest = p / "manifest.json"
+            if not manifest.is_file():
+                continue
+            try:
+                with manifest.open("r", encoding="utf-8") as handle:
+                    parsed = json.load(handle)
+                if not isinstance(parsed, dict) or not parsed.get("results"):
+                    continue
+            except (OSError, ValueError):
+                # Partially-written or unreadable manifest -> not complete yet
+                continue
+            candidates.append(p)
         if not candidates:
             return None
         return max(candidates, key=lambda p: p.name)
@@ -282,8 +304,13 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         self._sink = None
 
     async def _poll_loop(self) -> None:
-        # Initial backfill
-        await self._ingest_snapshot(days_back=self._backfill_days)
+        # Initial backfill — wrapped so a transient error cannot kill the task
+        try:
+            await self._ingest_snapshot(days_back=self._backfill_days)
+        except Exception as e:
+            self._last_error = str(e)
+            self._connectivity = "degraded"
+            logger.warning("WeCom initial backfill error: %s", e)
 
         while self._running:
             try:
@@ -308,22 +335,41 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         self._active_snapshot = snap
         snap_key = snap.name
 
-        # First pass on this snapshot: full backfill. Later passes: incremental by cursor.
+        # Published snapshots are immutable: if this exact snapshot is already
+        # fully committed, there is nothing new to read. Re-reading it every
+        # tick would re-normalize the entire table and re-commit thousands of
+        # idempotent records per poll (and reintroduce digest-drift conflicts).
+        if snap_key == self._last_watermark_val:
+            self._connectivity = "live"
+            self._last_observed_at = datetime.now(timezone.utc).isoformat()
+            return 0
+
         is_new_snapshot = snap_key not in self._ingested_snapshots
+
+        # Read cursor: snapshot names are NOT timestamps. For the first pass
+        # over a brand-new snapshot use the sliding backfill window; afterwards
+        # read incrementally from the highest send_time committed so far.
+        if is_new_snapshot and not self._max_seen_ts:
+            read_cursor = None
+            read_days = days_back or self._backfill_days
+        else:
+            read_cursor = str(self._max_seen_ts) if self._max_seen_ts else None
+            read_days = 0
 
         records = await asyncio.to_thread(
             self._read_snapshot_records,
             snap,
-            self._last_watermark_val if not is_new_snapshot else None,
-            days_back if is_new_snapshot else 0,
+            read_cursor,
+            read_days,
         )
 
-        self._ingested_snapshots.add(snap_key)
+        pending_max_ts = max((int(r.message.occurred_at_epoch_ms or 0) // 1000 for r in records), default=0)
 
         if not records:
             self._connectivity = "live"
             self._last_watermark_val = snap_key
             self._last_observed_at = datetime.now(timezone.utc).isoformat()
+            self._ingested_snapshots.add(snap_key)
             return 0
 
         # Watermark: snapshot version (bounded rebuildability)
@@ -341,7 +387,14 @@ class WeComSnapshotAdapter(IMSourceReader, IMIngestDriver):
         )
         receipt = await self._sink.commit(batch)
 
+        # Mark ingested only AFTER a successful commit: if commit raised
+        # (e.g. IdentityConflictError), the next tick must re-evaluate this
+        # snapshot as new, otherwise the watermark and the ingested-set
+        # diverge and every following poll re-reads the entire history.
+        self._ingested_snapshots.add(snap_key)
         self._last_watermark_val = snap_key
+        if pending_max_ts > (self._max_seen_ts or 0):
+            self._max_seen_ts = pending_max_ts
         self._last_observed_at = datetime.now(timezone.utc).isoformat()
         self._connectivity = "live"
         return receipt.inserted_count

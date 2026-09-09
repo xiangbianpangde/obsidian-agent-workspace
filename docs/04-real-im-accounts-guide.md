@@ -125,6 +125,8 @@ QQ_SNAPSHOT_OK qqsnap-v1-dee898e87a48d9bc28a350a8 messages=9115
 
 工作台中的 `QQSnapshotAdapter` 会自动只读加载该快照并导入 IM Journal。后续如需更新 QQ 消息，只需再次运行一次上述提取命令。
 
+> **自动同步（推荐）**：`im_sync_daemon` 守护进程会监听 QQ / 企业微信本地数据库文件变更，自动在后台执行快照提取（QQ 使用 `private/keys.json` 密钥缓存，日常提取约 5 秒，无需再次内存扫描），并自动清理旧快照（默认保留最近 24 份，可用 `IM_SNAPSHOT_KEEP` 环境变量调整，设为 `0` 禁用清理）。收到新消息后一般 **≤20 秒** 内自动出现在工作台。
+
 ---
 
 ## 四、一键启动
@@ -133,12 +135,16 @@ QQ_SNAPSHOT_OK qqsnap-v1-dee898e87a48d9bc28a350a8 messages=9115
 ./scripts/start-im-adapters.sh
 ```
 
+该脚本会依次：① 启动微信 `wx-cli` 只读服务；② 校验企微 / QQ 快照可用性；③ 启动 `im_sync_daemon` 自动同步守护进程（日志：`/tmp/im_sync_daemon.log`）；④ 启动工作台。
+
 或手动启动工作台：
 
 ```bash
 .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8787
+nohup .venv/bin/python backend/scripts/im_sync_daemon.py >/tmp/im_sync_daemon.log 2>&1 &
 ```
 
+前端 IM Hub 进入页面或点击刷新按钮时会自动调用 `POST /api/im/sync` 触发一次即时同步（通过 `/tmp/im_sync_trigger` 通知守护进程）。
 打开 <http://127.0.0.1:8787> → 点击顶部 **【统一消息中心 (IM Hub)】**。
 
 ---
