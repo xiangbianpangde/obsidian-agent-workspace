@@ -11,6 +11,14 @@
 import { api } from './api.js';
 import { PaperLayout } from './layout.js';
 import { PdfBridge, PDFJS_VERSION } from './pdf-bridge.js';
+import { MarkdownPane } from './markdown-pane.js';
+import { NoteEditor } from './note-pane.js';
+import {
+  AnnotationList,
+  makePdfAnchor,
+  makeMarkdownAnchor,
+} from './annotations.js';
+import { assembleAiContext } from './ai-context.js';
 
 const STATUS_LABELS = {
   UNREAD: '未看',
@@ -32,6 +40,9 @@ export class PaperWorkbench {
     this.root = root;
     this.layout = null;
     this.pdf = null;
+    this.markdown = null;
+    this.note = null;
+    this.annotations = null;
     this.papers = [];
     this.selected = null;
     this.sources = [];
@@ -52,14 +63,28 @@ export class PaperWorkbench {
       pdfHost: this.root.querySelector('[data-role="pdf-host"]'),
       markdownHost: this.root.querySelector('[data-role="markdown-host"]'),
       noteHost: this.root.querySelector('[data-role="note-host"]'),
+      annHost: this.root.querySelector('[data-role="annotation-host"]'),
       btnLeft: this.root.querySelector('[data-role="toggle-left"]'),
       btnRight: this.root.querySelector('[data-role="toggle-right"]'),
       emptyState: this.root.querySelector('[data-role="empty-state"]'),
       viewerVersion: this.root.querySelector('[data-role="pdfjs-version"]'),
+      statusButton: this.root.querySelector('[data-role="status-button"]'),
     };
 
     this.layout = new PaperLayout(this.root.querySelector('[data-role="grid"]'));
     this.pdf = new PdfBridge(this.el.pdfHost);
+    this.markdown = new MarkdownPane(this.el.markdownHost);
+    this.note = new NoteEditor(this.el.noteHost, {
+      load: () => api.getNote(this.selected.paper_id),
+      save: (content, hash) => api.saveNote(this.selected.paper_id, content, hash),
+      create: (content) => api.createNote(this.selected.paper_id, content),
+    });
+    this.note.mount();
+    this.annotations = new AnnotationList(this.el.annHost, {
+      list: () => api.listAnnotations(this.selected.paper_id),
+      onJump: (item) => this.jumpToAnnotation(item),
+    });
+    this.annotations.mount();
 
     this.el.viewerVersion.textContent = `PDF.js ${PDFJS_VERSION}`;
     this.el.btnLeft.addEventListener('click', () => this.layout.toggle('left'));
@@ -68,8 +93,14 @@ export class PaperWorkbench {
       this.statusFilter = this.el.statusFilter.value || null;
       this.loadPapers();
     });
+    this.el.statusButton.addEventListener('click', () => this.advanceStatus());
 
-    // Keep the viewer alive across pane resizes; only notify, never reload.
+    // Selection availability drives the annotation button; the panes do not
+    // know about the list, so the workbench is the one place that joins them.
+    this.annotations.addEventListener('addrequest', () => this.createAnnotationFromSelection());
+    document.addEventListener('selectionchange', () => this._refreshSelectionState());
+    this.el.markdownHost.addEventListener('mouseup', () => this._refreshSelectionState());
+
     this.root.addEventListener('layoutresize', () => {
       if (this.pdf?.iframe) this.pdf.iframe.style.height = '100%';
     });
@@ -120,6 +151,10 @@ export class PaperWorkbench {
   }
 
   async selectPaper(paperId) {
+    // Do not silently drop unsaved work when switching papers.
+    if (this.note?.hasUnsavedWork()) {
+      await this.note.flush();
+    }
     try {
       const [paper, sources] = await Promise.all([
         api.getPaper(paperId),
@@ -127,26 +162,190 @@ export class PaperWorkbench {
       ]);
       this.selected = paper;
       this.sources = sources.sources || [];
+      this.activeSourceId = null;
 
       this.el.emptyState.hidden = true;
       this.el.title.textContent = paper.title || paper.display_title || '未命名';
-      this.el.meta.textContent = [
-        STATUS_LABELS[paper.status] || paper.status,
-        paper.category_relpath,
-        `${this.sources.length} 个来源`,
-      ]
-        .filter(Boolean)
-        .join(' · ');
-
+      this._renderMeta();
       this._renderPaperList();
       this._renderSources();
+      this._renderStatusButton();
 
+      // Mark READING only once a readable source actually loads, never on a
+      // mere list click (ADR-007).
       const primary = this.sources.find((s) => s.media_kind === 'PDF');
-      if (primary) await this.openSource(primary.source_id);
+      if (primary) {
+        await this.openSource(primary.source_id);
+        await this.markOpened();
+      } else {
+        const md = this.sources.find((s) => s.media_kind === 'MARKDOWN');
+        if (md) await this.openSource(md.source_id);
+      }
+
+      await Promise.all([this.note.load(), this.annotations.load()]);
     } catch (error) {
       this.el.title.textContent = '加载失败';
       this.el.meta.textContent = error.message;
     }
+  }
+
+  _renderMeta() {
+    const paper = this.selected;
+    if (!paper) return;
+    const parts = [
+      STATUS_LABELS[paper.status] || paper.status,
+      paper.category_relpath,
+      `${this.sources.length} 个来源`,
+    ].filter(Boolean);
+    this.el.meta.textContent = parts.join(' · ');
+  }
+
+  _renderStatusButton() {
+    const paper = this.selected;
+    if (!paper || !this.el.statusButton) return;
+    const next = { UNREAD: 'READING', READING: 'COMPLETED', COMPLETED: 'READING' }[paper.status];
+    const nextLabel = { UNREAD: '开始阅读', READING: '标记看完', COMPLETED: '重新阅读' }[paper.status];
+    this.el.statusButton.textContent = nextLabel;
+    this.el.statusButton.dataset.next = next;
+  }
+
+  /** UNREAD -> READING fires on a successful source load, not on a list click. */
+  async markOpened() {
+    if (!this.selected) return;
+    if (this.selected.status === 'COMPLETED') {
+      // Opening a finished paper must not downgrade it.
+      return;
+    }
+    if (this.selected.status !== 'UNREAD') return;
+    try {
+      await api.setStatus(this.selected.paper_id, 'READING', 'first_load');
+      this.selected.status = 'READING';
+      this._renderMeta();
+      this._renderStatusButton();
+      this._renderPaperList();
+    } catch (error) {
+      console.warn('状态更新失败:', error.message);
+    }
+  }
+
+  /** COMPLETED only ever comes from an explicit user action. */
+  async advanceStatus() {
+    if (!this.selected) return;
+    const next = this.el.statusButton.dataset.next;
+    if (!next) return;
+    try {
+      const result = await api.setStatus(this.selected.paper_id, next, 'user_action');
+      this.selected.status = result.status;
+      this._renderMeta();
+      this._renderStatusButton();
+      this._renderPaperList();
+    } catch (error) {
+      this.el.meta.textContent = `状态更新失败：${error.message}`;
+    }
+  }
+
+  _refreshSelectionState() {
+    const available = !!(this.pdf?.getSelection() || this.markdown?.getSelection());
+    this.annotations?.setSelectionAvailable(available);
+  }
+
+  /** Record an annotation from whatever the user currently has selected. */
+  async createAnnotationFromSelection() {
+    if (!this.selected) return;
+    const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+    if (!source) return;
+
+    const isPdf = source.media_kind === 'PDF';
+    const selection = isPdf ? this.pdf.getSelection() : this.markdown.getSelection();
+    if (!selection?.exact) {
+      this.el.meta.textContent = '请先选中一段文本再添加标注';
+      return;
+    }
+
+    const anchor = isPdf
+      ? makePdfAnchor({
+          pageIndex: selection.pageIndex,
+          selectedText: selection.exact,
+          prefix: selection.prefix,
+          suffix: selection.suffix,
+        })
+      : makeMarkdownAnchor({
+          headingPath: selection.headingPath,
+          selectedText: selection.exact,
+          prefix: selection.prefix,
+          suffix: selection.suffix,
+        });
+
+    try {
+      await api.createAnnotation(this.selected.paper_id, {
+        source_id: source.source_id,
+        kind: 'HIGHLIGHT',
+        anchor,
+        selected_text: selection.exact,
+        source_version: source.source_version,
+      });
+      await this.annotations.load();
+      this._refreshSelectionState();
+    } catch (error) {
+      this.el.meta.textContent = `标注保存失败：${error.message}`;
+    }
+  }
+
+  /** Jump to an annotation. P0 supports this without repainting highlights. */
+  jumpToAnnotation(item) {
+    if (item.anchor_type === 'PDF_TEXT') {
+      const page = Number(item.page_index);
+      if (Number.isFinite(page)) this.pdf.goToPage(page);
+      return;
+    }
+    if (item.anchor_type === 'MARKDOWN_TEXT' && item.heading_path_json) {
+      try {
+        const path = JSON.parse(item.heading_path_json);
+        const target = Array.isArray(path) ? path[path.length - 1] : null;
+        if (target) this.markdown.scrollToHeading?.(target);
+      } catch {
+        /* heading path is best effort */
+      }
+    }
+  }
+
+  /**
+   * Build the P1 context envelope locally.
+   *
+   * Exposed on the instance so the contract can be exercised now; nothing here
+   * calls a model or touches the network (ADR-009).
+   */
+  buildAiContext() {
+    if (!this.selected) return null;
+    const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+    const pdfSelection = this.pdf.getSelection();
+    const mdSelection = this.markdown.getSelection();
+    const selection = pdfSelection || mdSelection || null;
+
+    return assembleAiContext({
+      paper: this.selected,
+      focus: source
+        ? {
+            pane: source.media_kind === 'PDF' ? 'PDF' : 'MARKDOWN',
+            sourceId: source.source_id,
+            sourceVersion: source.source_version,
+            locator:
+              source.media_kind === 'PDF'
+                ? { page_index: this.pdf.getCurrentPage() }
+                : { heading_path: this.markdown.currentHeadingPath() },
+            selection,
+          }
+        : null,
+      sourceRefs: this.sources.map((s) => ({
+        sourceId: s.source_id,
+        role: s.role,
+        sha256: s.sha256,
+        sourceVersion: s.source_version,
+      })),
+      note: this.selected.note_id
+        ? { noteId: this.selected.note_id, sha256: null, content: this.note.getText() }
+        : null,
+    });
   }
 
   _renderSources() {
@@ -180,8 +379,14 @@ export class PaperWorkbench {
       this.el.markdownHost.innerHTML =
         '<p class="paper-muted">切换到翻译来源以查看对照阅读</p>';
     } else {
-      this.el.markdownHost.innerHTML = `<p class="paper-muted">Markdown 渲染将在后续步骤接入：${escapeHtml(source.rel_path)}</p>`;
+      try {
+        const text = await api.sourceText(sourceId);
+        this.markdown.setContent(text, { sourceId });
+      } catch (error) {
+        this.el.markdownHost.innerHTML = `<p class="paper-error">译文加载失败：${escapeHtml(error.message)}</p>`;
+      }
     }
+    this._refreshSelectionState();
   }
 }
 
@@ -197,6 +402,7 @@ const SHELL_HTML = `
       <option value="COMPLETED">看完</option>
     </select>
     <span class="paper-spacer"></span>
+    <button type="button" class="paper-status-btn" data-role="status-button">开始阅读</button>
     <span class="paper-version" data-role="pdfjs-version"></span>
     <button type="button" class="paper-icon-btn" data-role="toggle-right" title="折叠/展开笔记栏" aria-label="折叠笔记栏">≡</button>
   </header>
@@ -234,9 +440,9 @@ const SHELL_HTML = `
 
     <aside class="paper-pane paper-notes">
       <div class="paper-pane-head"><span>阅读笔记</span></div>
-      <div class="paper-pane-body" data-role="note-host">
-        <p class="paper-muted">笔记编辑器将在后续步骤接入</p>
-      </div>
+      <div class="paper-pane-body paper-note-host" data-role="note-host"></div>
+      <div class="paper-pane-head paper-ann-head"><span>标注</span></div>
+      <div class="paper-pane-body paper-ann-host" data-role="annotation-host"></div>
     </aside>
   </div>
 

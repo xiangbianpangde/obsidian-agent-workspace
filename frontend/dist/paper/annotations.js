@@ -1,0 +1,214 @@
+/**
+ * Annotation collection.
+ *
+ * The anchor vocabulary is frozen by ADR-008 and must match the sidecar schema
+ * exactly. Two properties matter more than anything else here:
+ *
+ *  - **PDF anchors store normalised crop-box coordinates, never CSS pixels.**
+ *    Pixel values break the moment the window resizes, the zoom changes or the
+ *    display DPI differs. The text quote is stored alongside as a second-chance
+ *    locator for when coordinates alone cannot resolve.
+ *
+ *  - **Markdown anchors store a heading path plus a text quote, never a DOM
+ *    selector.** Re-rendering, KaTeX, tables and code blocks all rewrite the
+ *    DOM, so a selector-based anchor would silently rot.
+ *
+ * P0 records annotations and lets you jump to one. Re-anchoring and repainting
+ * highlights on every open is P0.5 (ADR-008).
+ */
+
+export const ANNOTATION_KINDS = {
+  HIGHLIGHT: '高亮',
+  COMMENT: '批注',
+  THOUGHT: '感想',
+  INNOVATION: '创新点',
+  QUESTION: '疑问',
+  CONCLUSION: '重要结论',
+};
+
+export const ANCHOR_SCHEMA_VERSION = 1;
+
+/** Build a PDF anchor from a viewer selection. */
+export function makePdfAnchor({ pageIndex, selectedText, prefix = '', suffix = '' }) {
+  return {
+    type: 'PDF_TEXT',
+    // Internal representation is always 0-based; the UI shows page+1.
+    page_index: Math.max(0, Math.floor(Number(pageIndex) || 0)),
+    page_label: String((Number(pageIndex) || 0) + 1),
+    rotation: 0,
+    // Coordinates are filled in by the viewer integration once quad detection
+    // lands; the text quote already makes the anchor resolvable.
+    quad_points_normalized: [],
+    text_quote: {
+      exact: selectedText || '',
+      prefix: prefix || null,
+      suffix: suffix || null,
+    },
+  };
+}
+
+/** Build a Markdown anchor from a pane selection. */
+export function makeMarkdownAnchor({ headingPath = [], selectedText, prefix = '', suffix = '' }) {
+  return {
+    type: 'MARKDOWN_TEXT',
+    heading_path: Array.isArray(headingPath) ? headingPath.filter(Boolean) : [],
+    block_fingerprint: null,
+    text_position: null,
+    text_quote: {
+      exact: selectedText || '',
+      prefix: prefix || null,
+      suffix: suffix || null,
+    },
+  };
+}
+
+/**
+ * Validate an anchor against the frozen shape.
+ * @returns {{ok: boolean, reason?: string}}
+ */
+export function validateAnchor(anchor) {
+  if (!anchor || typeof anchor !== 'object') return { ok: false, reason: 'anchor missing' };
+  if (anchor.type === 'PDF_TEXT') {
+    if (!Number.isInteger(anchor.page_index) || anchor.page_index < 0) {
+      return { ok: false, reason: 'page_index must be a non-negative integer' };
+    }
+    if (!Array.isArray(anchor.quad_points_normalized)) {
+      return { ok: false, reason: 'quad_points_normalized must be an array' };
+    }
+    for (const point of anchor.quad_points_normalized) {
+      if (typeof point?.x !== 'number' || typeof point?.y !== 'number') {
+        return { ok: false, reason: 'normalised points need numeric x/y' };
+      }
+      if (point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+        return { ok: false, reason: 'normalised coordinates must be within 0..1' };
+      }
+    }
+    if (!anchor.text_quote?.exact) {
+      return { ok: false, reason: 'text_quote.exact is the mandatory fallback locator' };
+    }
+    return { ok: true };
+  }
+  if (anchor.type === 'MARKDOWN_TEXT') {
+    if (!Array.isArray(anchor.heading_path)) {
+      return { ok: false, reason: 'heading_path must be an array' };
+    }
+    if (!anchor.text_quote?.exact) {
+      return { ok: false, reason: 'text_quote.exact is the mandatory fallback locator' };
+    }
+    return { ok: true };
+  }
+  return { ok: false, reason: `unknown anchor type: ${anchor.type}` };
+}
+
+/**
+ * Annotation list bound to a paper.
+ *
+ * The list is the P0 deliverable. Creating one from a selection and jumping
+ * back to it works; persistent highlight overlay is explicitly deferred.
+ */
+export class AnnotationList extends EventTarget {
+  /**
+   * @param {HTMLElement} host
+   * @param {{list: Function, create?: Function, onJump?: Function}} io
+   */
+  constructor(host, io) {
+    super();
+    if (!host) throw new Error('annotation host element is required');
+    this.host = host;
+    this.io = io;
+    this.items = [];
+  }
+
+  mount() {
+    this.host.innerHTML = `
+      <div class="paper-ann">
+        <div class="paper-ann-bar">
+          <span class="paper-ann-count" data-ann="count">0 条标注</span>
+          <span class="paper-spacer"></span>
+          <button type="button" class="paper-ann-btn" data-ann="add" disabled>从选中文本添加</button>
+        </div>
+        <div class="paper-ann-list" data-ann="list"></div>
+      </div>`;
+    this.el = {
+      count: this.host.querySelector('[data-ann="count"]'),
+      list: this.host.querySelector('[data-ann="list"]'),
+      add: this.host.querySelector('[data-ann="add"]'),
+    };
+    this.el.add.addEventListener('click', () => this._emit('addrequest'));
+  }
+
+  setSelectionAvailable(available) {
+    if (this.el?.add) this.el.add.disabled = !available;
+  }
+
+  async load() {
+    try {
+      const payload = await this.io.list();
+      // Orphaned annotations are shown but marked: their source changed, so
+      // their anchor no longer resolves and pretending otherwise would be a
+      // false association (ADR-008).
+      this.items = (payload?.annotations || []).filter((a) => !a.deleted_at);
+      this._render();
+    } catch (error) {
+      this.el.list.innerHTML = `<p class="paper-error">标注加载失败：${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  _render() {
+    this.el.count.textContent = `${this.items.length} 条标注`;
+    if (!this.items.length) {
+      this.el.list.innerHTML = '<p class="paper-muted">还没有标注。选中原文或译文后添加。</p>';
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const item of this.items) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'paper-ann-item';
+      if (item.orphaned_at) card.classList.add('is-orphaned');
+
+      const label = ANNOTATION_KINDS[item.kind] || item.kind;
+      const locator =
+        item.anchor_type === 'PDF_TEXT'
+          ? `第 ${(item.page_index ?? 0) + 1} 页`
+          : (safeHeading(item.heading_path_json) || '译文');
+
+      card.innerHTML = `
+        <span class="paper-ann-head">
+          <span class="paper-ann-kind">${escapeHtml(label)}</span>
+          <span class="paper-ann-loc">${escapeHtml(locator)}</span>
+          ${item.orphaned_at ? '<span class="paper-ann-orphan">原文已变更</span>' : ''}
+        </span>
+        <span class="paper-ann-quote">${escapeHtml(item.selected_text || '')}</span>
+        ${item.body_markdown ? `<span class="paper-ann-body">${escapeHtml(item.body_markdown)}</span>` : ''}`;
+
+      card.addEventListener('click', () => this.io.onJump?.(item));
+      fragment.appendChild(card);
+    }
+    this.el.list.replaceChildren(fragment);
+  }
+
+  _emit(type, detail) {
+    this.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+}
+
+function safeHeading(json) {
+  if (!json) return '';
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) && parsed.length ? parsed[parsed.length - 1] : '';
+  } catch {
+    return '';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[ch]);
+}

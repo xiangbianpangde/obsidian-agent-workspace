@@ -16,6 +16,7 @@ Authority split (ADR-007) is visible in the shapes here:
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,12 +26,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..state import get_cfg
-from . import storage as paper_storage
+from . import ANNOTATION_STORE_FILENAME, storage as paper_storage
+from .contracts import validate_annotations
 from .models import (
     Paper,
     PaperNote,
     PaperSource,
     PaperStatus,
+    new_annotation_id,
     new_note_id,
     utc_now,
 )
@@ -42,6 +45,16 @@ from .writer import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Frozen by ADR-008 alongside the sidecar schema.
+ANNOTATION_KINDS = {
+    "HIGHLIGHT",
+    "COMMENT",
+    "THOUGHT",
+    "INNOVATION",
+    "QUESTION",
+    "CONCLUSION",
+}
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -65,6 +78,29 @@ def _storage() -> paper_storage.PaperStorage:
 def _service() -> VaultWriteService:
     cfg = get_cfg()
     return VaultWriteService(cfg.vault_root)
+
+
+def _papers_root_ptr() -> Path:
+    cfg = get_cfg()
+    root = cfg.papers_root_or_default
+    try:
+        return root.relative_to(cfg.vault_root)
+    except ValueError:
+        return Path(".")
+
+
+def _paper_rel(paper: Paper, *parts: str) -> str:
+    """Build a Vault-relative path for a file inside a paper folder.
+
+    ``folder_relpath`` is relative to the **papers root**, while
+    ``VaultWriteService`` resolves against the **vault root**. Conflating the
+    two silently writes files to the wrong directory — e.g. a note would land
+    in ``Vault/方向分类/...`` instead of ``Vault/论文根/方向分类/...``.
+    This is the single place that joins them.
+    """
+    base = _papers_root_ptr()
+    tail = Path(paper.folder_relpath).joinpath(*parts)
+    return str(base / tail) if str(base) != "." else str(tail)
 
 
 def _papers_root() -> Path:
@@ -287,9 +323,7 @@ def get_note(paper_id: str):
         return _no_store({"paper_id": paper_id, "exists": False, "note": None})
 
     try:
-        data, current_hash = _service().read(
-            str(Path(paper.folder_relpath) / note.rel_path)
-        )
+        data, current_hash = _service().read(_paper_rel(paper, note.rel_path))
     except Exception as exc:
         return _no_store(
             {
@@ -326,7 +360,7 @@ def create_note(paper_id: str, body: NoteCreate):
     if not rel.endswith(".md"):
         raise HTTPException(400, "note path must end with .md")
 
-    full_rel = str(Path(paper.folder_relpath) / rel)
+    full_rel = _paper_rel(paper, rel)
     # Seed the frontmatter with the stable ids so the note can be re-identified
     # if the file is renamed. Status is deliberately NOT written here: it is
     # SQLite-owned and must never be duplicated into the Vault (ADR-007).
@@ -385,7 +419,7 @@ def save_note(paper_id: str, body: NoteSave):
     if note is None:
         raise HTTPException(404, "note not found; create it first")
 
-    full_rel = str(Path(paper.folder_relpath) / note.rel_path)
+    full_rel = _paper_rel(paper, note.rel_path)
     try:
         result = _service().save(full_rel, body.content, expected_hash=body.expected_hash)
     except ConflictError as exc:
@@ -407,6 +441,183 @@ def save_note(paper_id: str, body: NoteSave):
             "backup_path": result.backup_path,
         }
     )
+
+
+# -------------------------------------------------------------- annotations
+
+
+class AnnotationCreate(BaseModel):
+    source_id: str
+    kind: str
+    anchor: Dict[str, Any]
+    body_markdown: str = ""
+    selected_text: Optional[str] = None
+    source_sha256: Optional[str] = None
+    source_version: int = 1
+
+
+def _sidecar_relpath(paper: Paper) -> str:
+    return _paper_rel(paper, ANNOTATION_STORE_FILENAME)
+
+
+def _read_sidecar(paper: Paper) -> Dict[str, Any]:
+    """Read the authoritative annotation sidecar (ADR-008).
+
+    A missing sidecar is legal: a paper with no annotations yet has none, and
+    creating an empty one on read would write to the Vault without cause.
+    """
+    rel = _sidecar_relpath(paper)
+    try:
+        data, digest = _service().read(rel)
+    except Exception:
+        return {"schema_version": 1, "paper_id": paper.paper_id, "annotations": [], "_hash": None}
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        logger.warning("annotation sidecar is not valid JSON: %s", rel)
+        return {"schema_version": 1, "paper_id": paper.paper_id, "annotations": [], "_hash": digest, "_corrupt": True}
+    parsed["_hash"] = digest
+    return parsed
+
+
+def _write_sidecar(paper: Paper, document: Dict[str, Any], expected_hash: Optional[str]) -> Any:
+    payload = {k: v for k, v in document.items() if not k.startswith("_")}
+    payload["schema_version"] = payload.get("schema_version", 1)
+    payload["paper_id"] = paper.paper_id
+
+    # Validate against the frozen schema before it reaches the Vault: a
+    # malformed sidecar would be authoritative and unreadable at the same time.
+    try:
+        validate_annotations(payload)
+    except Exception as exc:
+        raise HTTPException(400, f"annotation document violates the frozen schema: {exc}") from exc
+
+    rel = _sidecar_relpath(paper)
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    service = _service()
+    if expected_hash is None:
+        try:
+            return service.create(rel, text)
+        except AlreadyExistsError:
+            # Sidecar appeared between read and write; re-read and retry as save.
+            current = _read_sidecar(paper)
+            return service.save(rel, text, expected_hash=current.get("_hash"))
+    try:
+        return service.save(rel, text, expected_hash=expected_hash)
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _reindex_annotations(storage: Any, paper: Paper, document: Dict[str, Any]) -> None:
+    rows = []
+    for item in document.get("annotations", []):
+        anchor = item.get("anchor") or {}
+        heading_path = anchor.get("heading_path")
+        rows.append(
+            {
+                "annotation_id": item["annotation_id"],
+                "source_id": item["source_id"],
+                "kind": item["kind"],
+                "anchor_type": anchor.get("type", "UNKNOWN"),
+                "page_index": anchor.get("page_index"),
+                "heading_path_json": json.dumps(heading_path, ensure_ascii=False)
+                if heading_path
+                else None,
+                "selected_text": item.get("selected_text"),
+                "body_markdown": item.get("body_markdown"),
+                "source_sha256": item.get("source_sha256", "0" * 64),
+                "source_version": item.get("source_version", 1),
+                "orphaned_at": item.get("orphaned_at"),
+                "deleted_at": item.get("deleted_at"),
+                "created_at": item["created_at"],
+                "updated_at": item["updated_at"],
+            }
+        )
+    storage.replace_annotations_index(paper.paper_id, rows)
+
+
+@router.get("/papers/{paper_id}/annotations")
+def list_annotations(paper_id: str):
+    storage = _storage()
+    paper = _require_paper(storage, paper_id)
+    document = _read_sidecar(paper)
+    return _no_store(
+        {
+            "paper_id": paper_id,
+            "sidecar_hash": document.get("_hash"),
+            "corrupt": bool(document.get("_corrupt")),
+            "annotations": [
+                a for a in document.get("annotations", [])
+            ],
+        }
+    )
+
+
+@router.post("/papers/{paper_id}/annotations")
+def create_annotation(paper_id: str, body: AnnotationCreate):
+    storage = _storage()
+    paper = _require_paper(storage, paper_id)
+
+    if body.kind not in ANNOTATION_KINDS:
+        raise HTTPException(400, f"unknown annotation kind: {body.kind}")
+
+    document = _read_sidecar(paper)
+    anchors = {a.get("annotation_id") for a in document.get("annotations", [])}
+    annotation_id = new_annotation_id()
+    while annotation_id in anchors:  # pragma: no cover - astronomically unlikely
+        annotation_id = new_annotation_id()
+
+    now = utc_now()
+    record = {
+        "annotation_id": annotation_id,
+        "source_id": body.source_id,
+        "kind": body.kind,
+        "body_markdown": body.body_markdown or "",
+        "selected_text": body.selected_text,
+        "anchor_schema_version": 1,
+        "anchor": body.anchor,
+        "source_sha256": body.source_sha256 or "0" * 64,
+        "source_version": body.source_version,
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
+        "orphaned_at": None,
+        "revision": 1,
+    }
+    document.setdefault("annotations", []).append(record)
+
+    result = _write_sidecar(paper, document, document.get("_hash"))
+    _reindex_annotations(storage, paper, document)
+    return _no_store(
+        {"ok": True, "annotation_id": annotation_id, "sidecar_hash": result.new_hash}
+    )
+
+
+@router.delete("/papers/{paper_id}/annotations/{annotation_id}")
+def delete_annotation(paper_id: str, annotation_id: str):
+    """Soft delete.
+
+    ADR-002 applies here exactly as elsewhere: the record stays in the array
+    with a `deleted_at` stamp so history is never destroyed.
+    """
+    storage = _storage()
+    paper = _require_paper(storage, paper_id)
+    document = _read_sidecar(paper)
+
+    target = next(
+        (a for a in document.get("annotations", []) if a.get("annotation_id") == annotation_id),
+        None,
+    )
+    if target is None:
+        raise HTTPException(404, f"unknown annotation: {annotation_id}")
+
+    target["deleted_at"] = utc_now()
+    target["updated_at"] = target["deleted_at"]
+    target["revision"] = int(target.get("revision", 1)) + 1
+
+    result = _write_sidecar(paper, document, document.get("_hash"))
+    _reindex_annotations(storage, paper, document)
+    return _no_store({"ok": True, "deleted_at": target["deleted_at"], "sidecar_hash": result.new_hash})
 
 
 # ------------------------------------------------------------------ config

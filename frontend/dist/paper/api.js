@@ -107,8 +107,35 @@ export const api = {
     });
   },
 
+  /** Raw text of a markdown source (translations, MinerU extractions). */
+  sourceText(sourceId) {
+    return fetch(`${SOURCES}/${encodeURIComponent(sourceId)}/content`, {
+      cache: 'no-store',
+      headers: { Accept: 'text/markdown, text/plain, */*' },
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.text();
+    });
+  },
+
   listAnnotations(paperId) {
     return request(`${BASE}/papers/${encodeURIComponent(paperId)}/annotations`);
+  },
+
+  createAnnotation(paperId, payload) {
+    return request(`${BASE}/papers/${encodeURIComponent(paperId)}/annotations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Soft delete: the record keeps a `deleted_at` stamp (ADR-002). */
+  deleteAnnotation(paperId, annotationId) {
+    return request(
+      `${BASE}/papers/${encodeURIComponent(paperId)}/annotations/${encodeURIComponent(annotationId)}`,
+      { method: 'DELETE' }
+    );
   },
 
   /** Update the launch config so the workspace can be re-opened as configured. */

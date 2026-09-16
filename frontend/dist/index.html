@@ -1668,6 +1668,50 @@
       el.preview.innerHTML = html;
     }
 
+    // ==================== 渲染管线对外桥（供 ES module 子系统复用） ====================
+    // 论文工作台等独立模块需要同一套 Markdown 渲染能力。复制一份会造成两套
+    // 消毒规则并行且逐渐漂移，因此只暴露一条受控路径：调用方传入原始 Markdown，
+    // 拿回<b>已消毒</b>的 HTML。KaTeX/DOMPurify 的配置仍由本文件单一拥有。
+    window.WorkspaceMarkdown = {
+      /**
+       * @param {string} raw 原始 Markdown（可含 frontmatter）
+       * @returns {{html: string, error: string|null}} 已消毒 HTML
+       */
+      render(raw) {
+        try {
+          let content = String(raw || '');
+          if (content.startsWith('---')) {
+            const end = content.indexOf('---', 3);
+            if (end !== -1) content = content.substring(end + 3).trim();
+          }
+          let processed = renderLatex(content);
+          let html = marked.parse(processed);
+          if (typeof renderSpecialEmbeds === 'function') html = renderSpecialEmbeds(html);
+
+          if (!window.DOMPurify) {
+            return { html: '', error: 'DOMPurify 缺失，已暂停渲染富文本' };
+          }
+          html = DOMPurify.sanitize(html, {
+            ADD_TAGS: [
+              'math', 'annotation', 'semantics', 'mrow', 'mi', 'mn', 'mo',
+              'msup', 'msub', 'mfrac', 'msqrt', 'mspace', 'mtext', 'mover',
+              'munder', 'munderover', 'mtable', 'mtr', 'mtd', 'mpadded'
+            ],
+            ADD_ATTR: ['aria-hidden', 'encoding', 'style', 'display', 'target', 'loading', 'data-wikilink']
+          });
+          return { html, error: null };
+        } catch (err) {
+          return { html: '', error: String(err && err.message ? err.message : err) };
+        }
+      },
+      /** 拆出首个标题，供目录/锚点使用。 */
+      firstHeading(raw) {
+        const m = /^#{1,6}\s+(.+)$/m.exec(String(raw || ''));
+        return m ? m[1].trim() : '';
+      },
+      escapeHtml,
+    };
+
     el.previewPane.addEventListener('click', (e) => {
       const link = e.target.closest('[data-wikilink]');
       if (link) {

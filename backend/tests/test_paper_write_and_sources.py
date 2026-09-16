@@ -386,11 +386,17 @@ def test_pdf_endpoint_never_modifies_the_file(pdf_app):
     assert pdf_path.stat().st_mtime_ns == mtime
 
 
-def test_pdf_endpoint_rejects_non_pdf_source(pdf_app):
-    """A markdown source must not be served by the PDF endpoint."""
+def test_pdf_endpoint_rejects_markdown_source(pdf_app):
+    """The byte-range PDF endpoint must stay PDF-only.
+
+    Markdown is served by the separate /text endpoint; routing it through the
+    range endpoint would apply byte-range semantics to a rendered document.
+    """
     client, _, storage, _ = pdf_app
     other = new_source_id()
     paper = storage.list_papers()[0]
+    md_path = pdf_app[3].parent / "x_全文翻译.md"
+    md_path.write_text("# 译文", encoding="utf-8")
     storage.upsert_source(
         PaperSource(
             source_id=other,
@@ -399,7 +405,36 @@ def test_pdf_endpoint_rejects_non_pdf_source(pdf_app):
             rel_path="x_全文翻译.md",
         )
     )
+    # Present on disk, but the PDF endpoint must still refuse it.
     assert client.get(f"/api/paper-sources/{other}/content").status_code == 415
+
+
+def test_markdown_source_is_served_by_text_endpoint(pdf_app):
+    """Markdown goes through /text as text/plain, never as active markup."""
+    client, _, storage, pdf_path = pdf_app
+    other = new_source_id()
+    paper = storage.list_papers()[0]
+    (pdf_path.parent / "x_全文翻译.md").write_text("# 译文\n\n内容", encoding="utf-8")
+    storage.upsert_source(
+        PaperSource(
+            source_id=other,
+            paper_id=paper.paper_id,
+            role=SourceRole.TRANSLATION_FULL,
+            rel_path="x_全文翻译.md",
+        )
+    )
+    response = client.get(f"/api/paper-sources/{other}/text")
+    assert response.status_code == 200
+    assert response.text.startswith("# 译文")
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_text_endpoint_rejects_pdf_source(pdf_app):
+    """And the /text endpoint must refuse a PDF in turn."""
+    client, sid, _, _ = pdf_app
+    assert client.get(f"/api/paper-sources/{sid}/text").status_code == 415
 
 
 # ---------------------------------------------------------------------------

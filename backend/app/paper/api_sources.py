@@ -38,7 +38,6 @@ from fastapi.responses import FileResponse, StreamingResponse
 from ..state import get_cfg
 from . import storage as paper_storage
 from .models import MediaKind, PaperSource
-from .writer import VaultWriteService
 
 router = APIRouter(prefix="/api/paper-sources", tags=["paper-sources"])
 
@@ -133,8 +132,8 @@ def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
     source = storage.get_source(source_id)
     if source is None or not source.active:
         raise HTTPException(404, f"unknown paper source: {source_id}")
-    if source.media_kind is not MediaKind.PDF:
-        raise HTTPException(415, "source is not a PDF")
+    if source.media_kind not in (MediaKind.PDF, MediaKind.MARKDOWN):
+        raise HTTPException(415, "source is not readable")
 
     paper = storage.get_paper(source.paper_id)
     if paper is None:
@@ -143,7 +142,6 @@ def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
     cfg = get_cfg()
     # folder_relpath 相对于 papers 扫描根，而非 Vault 根（两者可不同）。
     # 安全边界仍必须以 Vault 为上限，且 papers 根本身必须落在 Vault 内。
-    service = VaultWriteService(cfg.vault_root)
     papers_root = cfg.papers_root_or_default
     try:
         papers_root.relative_to(cfg.vault_root)
@@ -162,6 +160,33 @@ def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
     return source, resolved
 
 
+@router.get("/{source_id}/text")
+def get_source_text(source_id: str):
+    """Raw Markdown for a translation or extraction source.
+
+    Returned as text/plain so it is never interpreted as active markup by the
+    browser. The frontend renders it through the host page's sanitising
+    pipeline, which is the single owner of that decision.
+    """
+    source, full = _get_source_or_404(source_id)
+    if source.media_kind is not MediaKind.MARKDOWN:
+        raise HTTPException(415, "source is not a Markdown document")
+    if full.stat().st_size > 8 * 1024 * 1024:
+        raise HTTPException(413, "markdown source is too large to render")
+    try:
+        text = full.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(500, f"cannot read source: {exc}") from exc
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/{source_id}/content")
 def get_source_content(
     source_id: str,
@@ -170,6 +195,10 @@ def get_source_content(
     range_header: Optional[str] = Header(None, alias="Range"),
 ):
     source, full = _get_source_or_404(source_id)
+    # Byte-range semantics are PDF-specific. Markdown is served by /text, so
+    # refusing here keeps one code path per media kind.
+    if source.media_kind is not MediaKind.PDF:
+        raise HTTPException(415, "use /text for Markdown sources")
 
     # Version pinning: if the caller pinned a version and the binding moved on,
     # refuse rather than serving bytes from a different revision of the file.
@@ -231,6 +260,8 @@ def head_source_content(
 ):
     """HEAD must expose exactly the same headers, with no body."""
     source, full = _get_source_or_404(source_id)
+    if source.media_kind is not MediaKind.PDF:
+        raise HTTPException(415, "use /text for Markdown sources")
     if version is not None and version != source.source_version:
         raise HTTPException(412, f"source version changed: requested {version}")
     stat = full.stat()
