@@ -9,3 +9,11 @@ sample-vault/.obsidian/
 /tmp/
 .personal-ai-workspace/
 .note-skills/
+
+# 本地工具与实验残留（非产品交付物）
+.coverage
+.mimosa/
+.v2c/
+.video_agent/
+assignment-hub-replica/
+*.log

@@ -1,0 +1,57 @@
+[project]
+name = "obsidian-agent-workspace"
+version = "0.1.0"
+description = "Personal Knowledge Workspace: Vault Intelligence + Governed Operation + Multi-IM Stream"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-frontmatter>=1.1.0",
+    "watchdog>=4.0",
+    "PyYAML>=6.0",
+    "httpx>=0.27.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "frontend/dist",
+    "sample-vault",
+    "data",
+    "backend/scripts/qq_snapshot",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear（常见 bug 模式）
+    "UP",  # pyupgrade（py312 现代化）
+    "SIM", # flake8-simplify
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501", # 行超长：渐进收紧，先不阻塞
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/*" = ["B011"]
+
+[tool.mypy]
+# 从 backend/ 目录运行：`cd backend && ../.venv/bin/python -m mypy --config-file ../pyproject.toml app`
+# （代码模块根是 `app.*`，从项目根运行会与 mypy_path 产生双重模块名冲突）
+python_version = "3.12"
+exclude = ["scripts", "tests"]
+# 基线阶段从宽起步，后续逐步收紧
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
