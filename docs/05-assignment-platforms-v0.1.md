@@ -1,7 +1,19 @@
 # 05 - 作业平台接入设计（学习通 + 数你最灵）v0.1
 
-> 状态：**探索完成，待评审**
+> 状态：**已实现（S1–S4 全部落地）**
+> 分支：`feat/assignment-hub`　worktree：`/Users/xbpd/Projects/workbench-assignment`
 > 目标：在个人工作台中**只读聚合**两个作业平台的作业/任务列表，统一展示与到期提醒；不自动答题、不代交作业。
+
+### 实现状态（S1–S4）
+
+| 步骤 | 状态 | 落点 |
+|---|---|---|
+| S1 guard/storage/models + 凭证 API | ✅ 完成 | `guard.py`（SSRF 拦截：localhost/私网/白名单外）、`storage.py`（Fernet 加密 + `0700`/`0600`、零删除）、`api/assignment.py` |
+| S2 学习通适配器 | ✅ 完成 | `adapters/chaoxing.py`——课程列表 → 作业列表 → 详情页三跳，解析失败标 `status=unknown` 不 crash |
+| S3 数你最灵适配器 | ✅ 完成 | `adapters/smartestu.py`——`cookies:` CDP 通道（2026-09 新协议唯一稳定路径）与 `<jwt>` 双模式 |
+| S4 聚合 API + 前端工作区 + 到期提醒 | ✅ 完成 | 前端第五核【作业中心】；`sync_lock` 并发互斥；文档 §4.3 的 **1 次/5 分钟**频率上限已实现（`ASSIGNMENT_SYNC_MIN_INTERVAL`） |
+
+> 与初版设计的差异：`refresh:<jwt>` 模式已被平台废弃（服务端不再接受 `POST /api/auth/refresh`），构造期即拒绝并提示改用 `cookies:`。
 
 ---
 
