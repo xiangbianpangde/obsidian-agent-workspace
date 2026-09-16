@@ -1,3 +1,4 @@
+.venv
 .venv/
 node_modules/
 data/
@@ -10,7 +11,7 @@ sample-vault/.obsidian/
 .personal-ai-workspace/
 .note-skills/
 
-# 本地工具与实验残留（非产品交付物）
+# 本地工具与实验残留（非产品交付物 / local tooling & experiment residue）
 .coverage
 .mimosa/
 .v2c/

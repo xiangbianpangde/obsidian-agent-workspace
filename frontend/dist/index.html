@@ -92,6 +92,10 @@
         <i data-lucide="calendar-days" class="w-3.5 h-3.5 mr-1.5 text-amber-400"></i>课程与校历 (Schedule)
         <span id="badge-schedule-week" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-amber-950 text-amber-300 rounded-full border border-amber-800/50">第2周</span>
       </button>
+      <button id="nav-mode-assignment" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
+        <i data-lucide="clipboard-check" class="w-3.5 h-3.5 mr-1.5 text-rose-400"></i>作业中心 (Assignment)
+        <span id="badge-assignment-due" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-rose-950 text-rose-300 rounded-full border border-rose-800/50">0</span>
+      </button>
     </div>
 
     <div class="flex items-center space-x-4 text-xs">
@@ -141,6 +145,21 @@
         </button>
         <button id="btn-open-add-course" class="bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 rounded flex items-center transition shadow-sm text-xs cursor-pointer">
           <i data-lucide="plus" class="w-3.5 h-3.5 mr-1"></i>添加课程
+        </button>
+      </div>
+
+      <!-- 作业中心模式下的顶栏统计与快捷操作 -->
+      <div id="assignment-header-stats" class="hidden flex items-center space-x-2.5 text-xs text-slate-400 shrink-0">
+        <span id="assignment-stat-summary" class="whitespace-nowrap">未交 <b id="stat-assignment-due" class="text-rose-300 font-mono">-</b> · 已提交 <b id="stat-assignment-done" class="text-emerald-300 font-mono">-</b></span>
+        <span>·</span>
+        <button id="btn-assignment-import-chaoxing" title="粘贴已登录浏览器的 Cookie" class="bg-[#242432] hover:bg-[#323244] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3c3c50] text-xs cursor-pointer">
+          <i data-lucide="key-round" class="w-3.5 h-3.5 mr-1 text-blue-400"></i>学习通凭证
+        </button>
+        <button id="btn-assignment-import-smartestu" title="粘贴 DevTools 里的 Bearer Token" class="bg-[#242432] hover:bg-[#323244] text-slate-200 px-2.5 py-1 rounded flex items-center transition border border-[#3c3c50] text-xs cursor-pointer">
+          <i data-lucide="key-round" class="w-3.5 h-3.5 mr-1 text-teal-400"></i>数你最灵凭证
+        </button>
+        <button id="btn-assignment-sync" class="bg-rose-600 hover:bg-rose-500 text-white px-2.5 py-1 rounded flex items-center transition shadow-sm text-xs cursor-pointer">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1"></i>一键同步
         </button>
       </div>
     </div>
@@ -748,6 +767,71 @@
     </div>
   </div>
 
+  <!-- ======================== 工作区 5: 作业中心 (Assignment Hub, 只读聚合) ======================== -->
+  <div id="workspace-assignment" class="flex-1 flex flex-col overflow-hidden hidden bg-[#141418]">
+    <!-- 顶部工具栏 -->
+    <div class="bg-[#1c1c24] border-b border-[#2b2b38] px-6 py-2.5 shrink-0 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+      <div class="flex items-center space-x-2 text-xs">
+        <span class="flex items-center space-x-1.5 text-slate-300 font-medium">
+          <i data-lucide="clipboard-check" class="w-4 h-4 text-rose-400"></i>作业任务
+        </span>
+        <select id="select-assignment-platform" class="bg-[#242430] border border-[#383848] rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-rose-500 cursor-pointer">
+          <option value="">全部平台</option>
+          <option value="chaoxing">学习通</option>
+          <option value="smartestu">数你最灵</option>
+        </select>
+        <select id="select-assignment-status" class="bg-[#242430] border border-[#383848] rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-rose-500 cursor-pointer">
+          <option value="">全部状态</option>
+          <option value="unsubmitted">未提交</option>
+          <option value="submitted">已提交</option>
+          <option value="graded">已批改</option>
+          <option value="unknown">状态未知</option>
+        </select>
+        <label class="flex items-center space-x-1.5 text-slate-400 cursor-pointer">
+          <input type="checkbox" id="chk-assignment-stale" class="accent-rose-500 cursor-pointer">
+          <span>显示已失效</span>
+        </label>
+      </div>
+      <div id="assignment-cred-status" class="flex items-center space-x-2 text-[11px] text-slate-400"></div>
+    </div>
+
+    <!-- 任务列表主体 -->
+    <div class="flex-1 overflow-y-auto p-5">
+      <div id="assignment-reminder-banner" class="hidden mb-4 flex items-center space-x-2 text-xs bg-rose-950/70 border border-rose-600/50 text-rose-200 px-3.5 py-2 rounded-lg shadow-sm">
+        <i data-lucide="alarm-clock" class="w-3.5 h-3.5 text-rose-400 animate-bounce shrink-0"></i>
+        <span id="assignment-reminder-text" class="font-medium"></span>
+      </div>
+      <div id="assignment-task-list" class="grid gap-3">
+        <div id="assignment-empty-state" class="text-center text-slate-500 py-16 text-sm">
+          <i data-lucide="inbox" class="w-10 h-10 mx-auto mb-3 text-slate-600"></i>
+          <p>暂无作业数据。请先导入平台凭证，然后点击顶栏「一键同步」。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 平台凭证导入 Modal -->
+  <div id="modal-assignment-credential" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-xl shadow-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between border-b border-[#333342] pb-3">
+        <h3 class="text-sm font-bold text-slate-100 flex items-center">
+          <i data-lucide="key-round" class="w-4 h-4 mr-2 text-blue-400"></i><span id="assignment-cred-modal-title">导入平台凭证</span>
+        </h3>
+        <button id="btn-close-cred-modal" class="text-slate-400 hover:text-slate-200 cursor-pointer"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <p id="assignment-cred-modal-help" class="text-slate-300 leading-relaxed"></p>
+        <textarea id="assignment-cred-input" rows="4" placeholder="" class="w-full bg-[#1a1a22] border border-[#383848] rounded px-3 py-2 text-slate-200 font-mono text-xs outline-none focus:border-blue-500 resize-none"></textarea>
+        <p class="text-slate-500 leading-relaxed">凭证仅保存在本机 <code class="text-slate-400">~/.personal-ai-workspace/assignment/</code>（Fernet 加密 + 0600 权限），接口永不回显明文。工作台对平台<strong class="text-rose-300">绝对只读</strong>，不会提交任何作业。</p>
+        <div class="flex items-center justify-end space-x-2">
+          <button id="btn-cred-cancel" class="px-3 py-1.5 rounded border border-[#3c3c50] text-slate-300 hover:bg-[#2e2e40] transition cursor-pointer">取消</button>
+          <button id="btn-cred-save" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded font-medium transition cursor-pointer">验证并保存</button>
+        </div>
+        <p id="assignment-cred-feedback" class="hidden"></p>
+      </div>
+    </div>
+  </div>
+
   <!-- 导入课表 Modal -->
   <div id="modal-import-schedule" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-xl shadow-2xl p-5 space-y-4">
@@ -948,6 +1032,10 @@
       workspaceSchedule: document.getElementById('workspace-schedule'),
       scheduleHeaderStats: document.getElementById('schedule-header-stats'),
       badgeScheduleWeek: document.getElementById('badge-schedule-week'),
+      navModeAssignment: document.getElementById('nav-mode-assignment'),
+      workspaceAssignment: document.getElementById('workspace-assignment'),
+      assignmentHeaderStats: document.getElementById('assignment-header-stats'),
+      badgeAssignmentDue: document.getElementById('badge-assignment-due'),
       workspaceObsidian: document.getElementById('workspace-obsidian'),
       workspaceAgentsview: document.getElementById('workspace-agentsview'),
       workspaceIm: document.getElementById('workspace-im'),
@@ -1202,6 +1290,9 @@
       if (el.scheduleHeaderStats) el.scheduleHeaderStats.classList.add('hidden');
       if (el.workspaceSchedule) el.workspaceSchedule.classList.add('hidden');
       if (el.navModeSchedule) el.navModeSchedule.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+      if (el.workspaceAssignment) el.workspaceAssignment.classList.add('hidden');
+      if (el.assignmentHeaderStats) el.assignmentHeaderStats.classList.add('hidden');
+      if (el.navModeAssignment) el.navModeAssignment.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
 
       if (mode === 'obsidian') {
         el.navModeObsidian.className = 'px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm';
@@ -1222,6 +1313,11 @@
         if (el.workspaceSchedule) el.workspaceSchedule.classList.remove('hidden');
         if (el.scheduleHeaderStats) el.scheduleHeaderStats.classList.remove('hidden');
         if (typeof loadScheduleData === 'function') loadScheduleData();
+      } else if (mode === 'assignment') {
+        if (el.navModeAssignment) el.navModeAssignment.className = 'px-3 py-1 rounded bg-rose-600 text-white font-medium flex items-center transition shadow-sm';
+        if (el.workspaceAssignment) el.workspaceAssignment.classList.remove('hidden');
+        if (el.assignmentHeaderStats) el.assignmentHeaderStats.classList.remove('hidden');
+        if (typeof loadAssignmentData === 'function') loadAssignmentData();
       }
       lucide.createIcons();
     }
@@ -1230,6 +1326,7 @@
     el.navModeAgentsview.addEventListener('click', () => setWorkspaceMode('agentsview'));
     el.navModeIm.addEventListener('click', () => setWorkspaceMode('im'));
     if (el.navModeSchedule) el.navModeSchedule.addEventListener('click', () => setWorkspaceMode('schedule'));
+    if (el.navModeAssignment) el.navModeAssignment.addEventListener('click', () => setWorkspaceMode('assignment'));
 
     // ======================== Obsidian 核心逻辑 ========================
     async function loadConfig() {
@@ -3556,6 +3653,212 @@
         renderAcademicEvents(state.schedule.events);
       });
     });
+
+    // ======================== 作业中心 (Assignment Hub, 只读聚合) ========================
+    const assignmentState = {
+      tasks: [],
+      credentials: null,
+      platformFilter: '',
+      statusFilter: '',
+      includeStale: false,
+      credModalPlatform: null,
+      loaded: false
+    };
+
+    const PLATFORM_META = {
+      chaoxing: { label: '学习通', badge: 'bg-blue-950 text-blue-300 border-blue-800/50', help: '在已登录学习通的浏览器里按 F12 → Application → Cookies → i.chaoxing.com，复制整串 Cookie 粘贴到下面（至少包含 _uid/UID 和 fid）。' },
+      smartestu: { label: '数你最灵', badge: 'bg-teal-950 text-teal-300 border-teal-800/50', help: '方式一（推荐，长期有效）：登录数你最灵后按 F12 → Application → Cookies → smartestu.cn，复制 refreshToken 的值，并在下面开头加上 "refresh:" 前缀粘贴。工作台会自动换取临时 token 并保存轮换后的新 refreshToken（此后浏览器端该会话会下线）。方式二（短期）：Network 里任一请求的 Authorization 头 Bearer 后面的 token，数小时内有效。' }
+    };
+
+    const TASK_STATUS_META = {
+      unsubmitted: { label: '未提交', cls: 'bg-rose-950 text-rose-300 border-rose-800/50' },
+      submitted: { label: '已提交', cls: 'bg-emerald-950 text-emerald-300 border-emerald-800/50' },
+      graded: { label: '已批改', cls: 'bg-purple-950 text-purple-300 border-purple-800/50' },
+      unknown: { label: '状态未知', cls: 'bg-slate-800 text-slate-400 border-slate-700' }
+    };
+
+    async function loadAssignmentData(force = false) {
+      try {
+        const [credData, taskQs] = await Promise.all([
+          api('/assignment/credentials'),
+          api('/assignment/tasks?include_stale=' + (assignmentState.includeStale ? 'true' : 'false') + (assignmentState.platformFilter ? '&platform=' + assignmentState.platformFilter : '') + (assignmentState.statusFilter ? '&status=' + assignmentState.statusFilter : ''))
+        ]);
+        assignmentState.credentials = credData.platforms;
+        assignmentState.tasks = taskQs.tasks || [];
+        assignmentState.loaded = true;
+        renderAssignmentCredentials();
+        renderAssignmentTasks();
+        renderAssignmentBadge();
+      } catch (err) {
+        console.error('加载作业数据失败:', err);
+      }
+      lucide.createIcons();
+    }
+
+    function renderAssignmentBadge() {
+      if (!el.badgeAssignmentDue) return;
+      const dueSoon = assignmentState.tasks.filter(t => {
+        if (!t.due_at || t.status === 'submitted' || t.status === 'graded' || t.is_stale) return false;
+        return t.due_at > Date.now() - 86400000 && t.due_at < Date.now() + 48 * 3600000;
+      }).length;
+      el.badgeAssignmentDue.textContent = String(dueSoon);
+      el.badgeAssignmentDue.className = 'ml-1.5 px-1.5 py-0.2 text-[10px] rounded-full border ' + (dueSoon > 0 ? 'bg-rose-600 text-white border-rose-500' : 'bg-rose-950 text-rose-300 border-rose-800/50');
+      const unsubmitted = assignmentState.tasks.filter(t => t.status === 'unsubmitted').length;
+      const done = assignmentState.tasks.filter(t => t.status === 'submitted' || t.status === 'graded').length;
+      const statDue = document.getElementById('stat-assignment-due');
+      const statDone = document.getElementById('stat-assignment-done');
+      if (statDue) statDue.textContent = String(unsubmitted);
+      if (statDone) statDone.textContent = String(done);
+      // 到期提醒横幅（48h 内最近的一条）
+      const banner = document.getElementById('assignment-reminder-banner');
+      const bannerText = document.getElementById('assignment-reminder-text');
+      if (banner && bannerText) {
+        const upcoming = assignmentState.tasks
+          .filter(t => t.due_at && t.status === 'unsubmitted' && t.due_at > Date.now())
+          .sort((a, b) => a.due_at - b.due_at)[0];
+        if (upcoming) {
+          const hours = Math.round((upcoming.due_at - Date.now()) / 3600000);
+          banner.classList.remove('hidden');
+          banner.classList.add('flex');
+          bannerText.textContent = '作业即将到期: ' + upcoming.title + ' (' + (upcoming.course_name || '未知课程') + ' · ' + (hours >= 1 ? hours + ' 小时后' : '马上') + ')';
+        } else {
+          banner.classList.add('hidden');
+          banner.classList.remove('flex');
+        }
+      }
+    }
+
+    function renderAssignmentCredentials() {
+      const box = document.getElementById('assignment-cred-status');
+      if (!box || !assignmentState.credentials) return;
+      box.innerHTML = Object.entries(assignmentState.credentials).map(([p, s]) => {
+        const meta = PLATFORM_META[p] || { label: p };
+        const dot = s.configured
+          ? (s.last_validation_ok === false ? 'bg-rose-500' : 'bg-emerald-500')
+          : 'bg-slate-600';
+        const label = meta.label + (s.configured ? (s.last_validation_ok === false ? ': 凭证失效' : ': 已配置') : ': 未配置');
+        return '<span class="flex items-center space-x-1"><span class="w-1.5 h-1.5 rounded-full ' + dot + '"></span>' + label + '</span>';
+      }).join('<span class="text-slate-600">·</span>');
+    }
+
+    function formatDue(ms) {
+      if (!ms) return '截止时间未知';
+      const d = new Date(ms);
+      const diff = ms - Date.now();
+      const overdue = diff < 0;
+      const absH = Math.abs(diff) / 3600000;
+      let rel;
+      if (absH < 1) rel = Math.max(1, Math.round(absH * 60)) + ' 分钟';
+      else if (absH < 48) rel = Math.round(absH) + ' 小时';
+      else rel = Math.round(absH / 24) + ' 天';
+      const pad = n => String(n).padStart(2, '0');
+      const time = pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+      return time + (overdue ? ' (已过期 ' + rel + ')' : ' (还剩 ' + rel + ')');
+    }
+
+    function renderAssignmentTasks() {
+      const list = document.getElementById('assignment-task-list');
+      if (!list) return;
+      const tasks = assignmentState.tasks;
+      document.getElementById('assignment-empty-state');
+      if (!tasks.length) {
+        list.innerHTML = '<div class="text-center text-slate-500 py-16 text-sm"><i data-lucide="inbox" class="w-10 h-10 mx-auto mb-3 text-slate-600"></i><p>暂无作业数据。请先导入平台凭证，然后点击顶栏「一键同步」。</p></div>';
+        return;
+      }
+      list.innerHTML = tasks.map(t => {
+        const meta = PLATFORM_META[t.platform] || { label: t.platform, badge: 'bg-slate-800 text-slate-300 border-slate-700' };
+        const st = TASK_STATUS_META[t.status] || TASK_STATUS_META.unknown;
+        const dueSoon = t.due_at && t.status === 'unsubmitted' && t.due_at - Date.now() < 24 * 3600000 && t.due_at > 0;
+        const cardCls = dueSoon ? 'border-rose-700/60 bg-[#1e1518]' : 'border-[#2c2c3c] bg-[#1a1a22]';
+        const staleTag = t.is_stale ? '<span class="ml-1 text-[10px] text-slate-500">(已失效)</span>' : '';
+        const scoreTag = (t.score !== null && t.score !== undefined) ? '<span class="text-purple-300 font-mono text-xs">' + escapeHtml(String(t.score)) + ' 分</span>' : '';
+        const link = /^https:\/\//.test(t.detail_url || '')
+          ? '<a href="' + escapeHtml(t.detail_url) + '" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 text-xs flex items-center shrink-0">打开平台 <i data-lucide="external-link" class="w-3 h-3 ml-0.5"></i></a>'
+          : '';
+        return '<div class="' + cardCls + ' border rounded-xl p-4 flex items-start justify-between gap-4 shadow-sm hover:border-[#3c3c50] transition">' +
+          '<div class="min-w-0 flex-1">' +
+            '<div class="flex items-center space-x-2 mb-1.5 flex-wrap">' +
+              '<span class="px-1.5 py-0.5 text-[10px] rounded border font-medium ' + meta.badge + '">' + meta.label + '</span>' +
+              '<span class="px-1.5 py-0.5 text-[10px] rounded border font-medium ' + st.cls + '">' + st.label + '</span>' +
+              '<span class="text-[11px] text-slate-400">' + escapeHtml(t.course_name || '未分类课程') + '</span>' + staleTag +
+            '</div>' +
+            '<div class="text-sm font-semibold text-slate-100 truncate">' + escapeHtml(t.title) + '</div>' +
+            '<div class="mt-1.5 flex items-center space-x-3 text-xs ' + (dueSoon ? 'text-rose-300 font-medium' : 'text-slate-400') + '">' +
+              '<span class="flex items-center"><i data-lucide="clock" class="w-3 h-3 mr-1"></i>' + formatDue(t.due_at) + '</span>' + scoreTag +
+            '</div>' +
+          '</div>' + link +
+        '</div>';
+      }).join('');
+    }
+
+    function openCredentialModal(platform) {
+      const modal = document.getElementById('modal-assignment-credential');
+      if (!modal) return;
+      assignmentState.credModalPlatform = platform;
+      const meta = PLATFORM_META[platform];
+      document.getElementById('assignment-cred-modal-title').textContent = '导入' + meta.label + '凭证';
+      document.getElementById('assignment-cred-modal-help').textContent = meta.help;
+      document.getElementById('assignment-cred-feedback').classList.add('hidden');
+      document.getElementById('assignment-cred-input').value = '';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeCredentialModal() {
+      const modal = document.getElementById('modal-assignment-credential');
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function saveCredential() {
+      const platform = assignmentState.credModalPlatform;
+      const value = document.getElementById('assignment-cred-input').value.trim();
+      const feedback = document.getElementById('assignment-cred-feedback');
+      if (!platform || !value) return;
+      feedback.classList.remove('hidden');
+      feedback.className = 'text-xs text-slate-400';
+      feedback.textContent = '正在向平台验证凭证…';
+      try {
+        await api('/assignment/credentials/' + platform, { method: 'POST', body: JSON.stringify({ credential: value }) });
+        feedback.className = 'text-xs text-emerald-400';
+        feedback.textContent = '验证通过，凭证已加密保存。';
+        setTimeout(() => { closeCredentialModal(); loadAssignmentData(true); }, 600);
+      } catch (err) {
+        feedback.className = 'text-xs text-rose-400';
+        feedback.textContent = '验证失败: ' + err.message;
+      }
+    }
+
+    async function assignmentSyncAll() {
+      const btn = document.getElementById('btn-assignment-sync');
+      if (!btn) return;
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 mr-1 animate-spin"></i>同步中…';
+      try {
+        const data = await api('/assignment/sync-all', { method: 'POST' });
+        const okCount = (data.results || []).filter(r => r.ok).length;
+        const failMsg = (data.results || []).filter(r => !r.ok).map(r => r.platform + ': ' + (r.message || r.error)).join('; ');
+        if (failMsg) alert('同步完成 ' + okCount + '/2。\n失败: ' + failMsg);
+        await loadAssignmentData(true);
+      } catch (err) {
+        alert('同步失败: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1"></i>一键同步';
+        lucide.createIcons();
+      }
+    }
+
+    document.getElementById('btn-assignment-import-chaoxing').addEventListener('click', () => openCredentialModal('chaoxing'));
+    document.getElementById('btn-assignment-import-smartestu').addEventListener('click', () => openCredentialModal('smartestu'));
+    document.getElementById('btn-assignment-sync').addEventListener('click', assignmentSyncAll);
+    document.getElementById('btn-close-cred-modal').addEventListener('click', closeCredentialModal);
+    document.getElementById('btn-cred-cancel').addEventListener('click', closeCredentialModal);
+    document.getElementById('btn-cred-save').addEventListener('click', saveCredential);
+    document.getElementById('select-assignment-platform').addEventListener('change', (e) => { assignmentState.platformFilter = e.target.value; loadAssignmentData(true); });
+    document.getElementById('select-assignment-status').addEventListener('change', (e) => { assignmentState.statusFilter = e.target.value; loadAssignmentData(true); });
+    document.getElementById('chk-assignment-stale').addEventListener('change', (e) => { assignmentState.includeStale = e.target.checked; loadAssignmentData(true); });
 
   </script>
 </body>
