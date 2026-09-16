@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-workspace.local/schemas/ai-context.v1.schema.json",
+  "title": "AIContextV1",
+  "description": "Frozen P1 interface. P0 defines and contract-tests this shape but never calls a model and never egresses. Every payload carries source/note hashes so downstream answers are traceable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "assembled_at", "paper", "focus", "source_refs", "resource_versions"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "assembled_at": { "type": "string", "format": "date-time" },
+    "paper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paper_id", "title", "tags", "status"],
+      "properties": {
+        "paper_id": { "type": "string", "pattern": "^pw_" },
+        "title": { "type": "string", "maxLength": 512 },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["UNREAD", "READING", "COMPLETED"] }
+      }
+    },
+    "focus": {
+      "type": ["object", "null"],
+      "description": "Where the user currently is. Uses the same anchor vocabulary as annotations so 'explain this passage' resolves identically for PDF and Markdown.",
+      "additionalProperties": false,
+      "required": ["pane", "source_id"],
+      "properties": {
+        "pane": { "type": "string", "enum": ["PDF", "MARKDOWN", "NOTE"] },
+        "source_id": { "type": "string", "pattern": "^src_" },
+        "source_version": { "type": "integer", "minimum": 0 },
+        "source_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "locator": {
+          "type": ["object", "null"],
+          "description": "Shape depends on pane: PDF uses page_index; MARKDOWN uses heading_path/block_id.",
+          "additionalProperties": true
+        },
+        "selection": {
+          "oneOf": [
+            { "$ref": "#/$defs/textQuote" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "source_refs": {
+      "type": "array",
+      "description": "Bounded excerpts, never the whole paper. Assembler must honor a byte or token budget.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id", "role", "sha256"],
+        "properties": {
+          "source_id": { "type": "string", "pattern": "^src_" },
+          "role": {
+            "type": "string",
+            "enum": [
+              "ORIGINAL_PDF",
+              "SUPPLEMENTAL_PDF",
+              "TRANSLATION_FULL",
+              "TRANSLATION_GUIDE",
+              "EXTRACTED_MARKDOWN",
+              "OTHER_MARKDOWN"
+            ]
+          },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "excerpt": { "type": ["string", "null"], "maxLength": 65536 }
+        }
+      }
+    },
+    "note": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["note_id", "sha256"],
+          "properties": {
+            "note_id": { "type": "string", "pattern": "^note_" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "content": { "type": ["string", "null"], "maxLength": 262144 }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "annotations": {
+      "type": "array",
+      "description": "Relevant annotations only. Orphaned ones are excluded because their anchors no longer resolve.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["annotation_id", "source_id", "kind", "anchor"],
+        "properties": {
+          "annotation_id": { "type": "string", "pattern": "^ann_" },
+          "source_id": { "type": "string", "pattern": "^src_" },
+          "kind": {
+            "type": "string",
+            "enum": ["HIGHLIGHT", "COMMENT", "THOUGHT", "INNOVATION", "QUESTION", "CONCLUSION"]
+          },
+          "anchor": { "type": "object", "additionalProperties": true },
+          "body_markdown": { "type": ["string", "null"], "maxLength": 65536 },
+          "selected_text": { "type": ["string", "null"], "maxLength": 8192 }
+        }
+      }
+    },
+    "resource_versions": {
+      "type": "array",
+      "description": "Version stamps proving exactly which bytes the context was assembled from.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource_id", "source_version", "sha256"],
+        "properties": {
+          "resource_id": { "type": "string" },
+          "source_version": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "budget": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "used_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "textQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exact"],
+      "properties": {
+        "exact": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "prefix": { "type": ["string", "null"], "maxLength": 512 },
+        "suffix": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    }
+  }
+}

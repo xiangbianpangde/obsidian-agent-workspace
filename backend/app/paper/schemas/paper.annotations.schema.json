@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-workspace.local/schemas/paper.annotations.schema.json",
+  "title": "PaperAnnotationsSidecar",
+  "description": "Authoritative annotation store, one JSON sidecar per paper folder. See ADR-008.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "paper_id", "annotations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "paper_id": {
+      "type": "string",
+      "pattern": "^pw_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "annotations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/annotation" }
+    }
+  },
+  "$defs": {
+    "textQuote": {
+      "type": "object",
+      "description": "W3C-style text quote. Mandatory second-chance locator when coordinates fail after reflow or version change.",
+      "additionalProperties": false,
+      "required": ["exact"],
+      "properties": {
+        "exact": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "prefix": { "type": ["string", "null"], "maxLength": 512 },
+        "suffix": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    },
+    "pdfAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "page_index", "quad_points_normalized", "text_quote"],
+      "properties": {
+        "type": { "const": "PDF_TEXT" },
+        "page_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Internally always 0-based. UI may display page_label."
+        },
+        "page_label": { "type": ["string", "null"], "maxLength": 32 },
+        "rotation": { "type": "integer", "enum": [0, 90, 180, 270] },
+        "quad_points_normalized": {
+          "type": "array",
+          "description": "Coordinates normalized against the PDF crop box. Raw CSS pixels are forbidden: they break on zoom, window resize and DPI change.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y"],
+            "properties": {
+              "x": { "type": "number", "minimum": 0, "maximum": 1 },
+              "y": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "text_quote": { "$ref": "#/$defs/textQuote" }
+      }
+    },
+    "markdownAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "heading_path", "text_quote"],
+      "properties": {
+        "type": { "const": "MARKDOWN_TEXT" },
+        "heading_path": {
+          "type": "array",
+          "description": "Structural locator. A DOM selector alone is forbidden: re-rendering, KaTeX, tables and code blocks all mutate the DOM.",
+          "items": { "type": "string", "maxLength": 512 }
+        },
+        "block_fingerprint": { "type": ["string", "null"], "maxLength": 128 },
+        "text_position": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "text_quote": { "$ref": "#/$defs/textQuote" }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "annotation_id",
+        "source_id",
+        "kind",
+        "anchor_schema_version",
+        "anchor",
+        "source_sha256",
+        "source_version",
+        "created_at",
+        "updated_at",
+        "revision"
+      ],
+      "properties": {
+        "annotation_id": {
+          "type": "string",
+          "pattern": "^ann_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["HIGHLIGHT", "COMMENT", "THOUGHT", "INNOVATION", "QUESTION", "CONCLUSION"]
+        },
+        "body_markdown": { "type": "string", "maxLength": 65536 },
+        "selected_text": { "type": ["string", "null"], "maxLength": 8192 },
+        "anchor_schema_version": { "const": 1 },
+        "anchor": {
+          "oneOf": [
+            { "$ref": "#/$defs/pdfAnchor" },
+            { "$ref": "#/$defs/markdownAnchor" }
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Source hash at anchoring time. A mismatch moves this annotation to ORPHANED; it must never keep rendering at stale coordinates."
+        },
+        "source_version": { "type": "integer", "minimum": 0 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "deleted_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Soft delete. Physical removal from the array is forbidden (ADR-002)."
+        },
+        "orphaned_at": { "type": ["string", "null"], "format": "date-time" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

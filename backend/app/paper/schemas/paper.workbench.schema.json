@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://personal-ai-workspace.local/schemas/paper.workbench.schema.json",
+  "title": "PaperWorkbenchManifest",
+  "description": "Versioned in-folder manifest binding a Paper aggregate to its Vault sources. See ADR-006.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "paper_id", "sources", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Manifest schema version. Bump only with a migration path."
+    },
+    "paper_id": {
+      "type": "string",
+      "pattern": "^pw_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Stable random UUIDv4 identity. Never derived from path, title, or PDF hash (ADR-006)."
+    },
+    "title_override": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "User-supplied display title. When null, title is derived from folder name then source stem."
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Paper 1:N PaperSource. A paper may legally have multiple PDFs and multiple translations.",
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "note": {
+      "oneOf": [
+        { "$ref": "#/$defs/noteBinding" },
+        { "type": "null" }
+      ],
+      "description": "Optional note binding. A paper without a note is legal."
+    },
+    "annotation_store": {
+      "type": "string",
+      "description": "Relative path (no ..) to the annotation sidecar. See ADR-008.",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "tags": {
+      "type": "array",
+      "description": "Paper-level semantic tags. Note-level tags live in the note frontmatter (ADR-007).",
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "uniqueItems": true
+    },
+    "external_ids": {
+      "type": "object",
+      "description": "Optional external identifiers. Never used as the Paper identity.",
+      "additionalProperties": false,
+      "properties": {
+        "arxiv": { "type": ["string", "null"] },
+        "doi": { "type": ["string", "null"] }
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "inactive_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Soft-removal marker. Physical deletion of a Paper is forbidden (ADR-002)."
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Path relative to the manifest's own folder. Absolute paths and '..' traversal are forbidden so the binding survives folder renames and category moves.",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
+      "not": { "pattern": "^[A-Za-z]:[\\\\/]" }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "role", "path", "primary", "active"],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "description": "Stable random UUIDv4. Used as the only resource API key (never the path)."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "ORIGINAL_PDF",
+            "SUPPLEMENTAL_PDF",
+            "TRANSLATION_FULL",
+            "TRANSLATION_GUIDE",
+            "EXTRACTED_MARKDOWN",
+            "OTHER_MARKDOWN"
+          ],
+          "description": "Explicit role. Guide vs full translation vs MinerU extraction must not collapse into one scalar field."
+        },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "primary": {
+          "type": "boolean",
+          "description": "At most one primary per role family. Default display prefers TRANSLATION_FULL > TRANSLATION_GUIDE > EXTRACTED_MARKDOWN > OTHER_MARKDOWN."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "false marks a superseded binding without deleting it (zero-delete)."
+        }
+      }
+    },
+    "noteBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["note_id", "path"],
+      "properties": {
+        "note_id": {
+          "type": "string",
+          "pattern": "^note_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "path": { "$ref": "#/$defs/relativePath" }
+      }
+    }
+  }
+}

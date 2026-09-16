@@ -111,13 +111,17 @@ personal-workspace/
 ├── README.md
 ├── config.yaml              # vault.path / templates.dir / security
 ├── backend/                 # FastAPI（app/api|scanner|database|template|security）
-├── frontend/                # Vite React（FileExplorer | Editor | TagPanel）
+├── frontend/                # 单文件 SPA（dist/index.html，无构建系统；见下方修订说明）
 ├── sample-vault/            # 复现用小 Vault（不含真实内容）
 ├── docs/                    # 方案与勘察材料
 └── data/                    # SQLite + backups（gitignore）
 ```
 
 前端三栏：文件树 | 编辑器（CodeMirror + 渲染预览切换）| 标签面板（标签统计、状态分布、按标签筛选、文件状态编辑）。
+
+> **修订说明（2026-09-16）**：本节此前写作「Vite React」，与真实实现不符。前端实际为**单个 HTML 文件** `frontend/dist/index.html`（约 3.9k 行、200KB），**无构建系统**，通过 CDN 引入 Tailwind / lucide / marked / highlight.js / KaTeX / DOMPurify，直接编辑生效。
+>
+> 后续新增子系统（见 ADR-009）必须拆为浏览器原生 ES Module 子目录（如 `frontend/dist/paper/`），**禁止继续向该单文件堆叠代码**。
 
 ## 9. P0 验收标准（可测）
 
