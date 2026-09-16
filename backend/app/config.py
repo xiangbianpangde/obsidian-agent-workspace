@@ -24,6 +24,11 @@ class AppConfig:
     debounce_ms: int = 500
     agentsview_db_path: Path | None = None
     agentsview_cli_path: Path | None = None
+    # 论文工作台（ADR-006）：文件系统扫描根目录。
+    # 扫描器产出的 folder_relpath 是相对此根的；而 Vault 安全边界是 vault_path。
+    # 两者必须显式区分，否则解析出的物理路径会缺少中间目录层级。
+    papers_root: Path | None = None
+    papers_max_depth: int = 6
     raw: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -35,10 +40,17 @@ class AppConfig:
             self.agentsview_db_path = self.agentsview_db_path.expanduser().resolve()
         if self.agentsview_cli_path:
             self.agentsview_cli_path = self.agentsview_cli_path.expanduser().resolve()
+        if self.papers_root:
+            self.papers_root = self.papers_root.expanduser().resolve()
 
     @property
     def vault_root(self) -> Path:
         return self.vault_path
+
+    @property
+    def papers_root_or_default(self) -> Path:
+        """论文扫描根：未配置时回退到 Vault 根。"""
+        return self.papers_root or self.vault_path
 
 
 def load_config(path: Path | str | None = None) -> AppConfig:
@@ -69,9 +81,16 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     srv = raw.get("server", {}) or {}
     wd = raw.get("watchdog", {}) or {}
     av = raw.get("agentsview", {}) or {}
+    pp = raw.get("papers", {}) or {}
 
     av_db = Path(av.get("database")).expanduser() if av.get("database") else None
     av_cli = Path(av.get("cli_path")).expanduser() if av.get("cli_path") else None
+
+    # papers.root 相对 vault.path 或绝对路径
+    papers_root = None
+    if pp.get("root"):
+        cand = Path(pp["root"]).expanduser()
+        papers_root = cand if cand.is_absolute() else (vault_path / cand)
 
     return AppConfig(
         vault_path=vault_path,
@@ -88,5 +107,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         debounce_ms=int(wd.get("debounce_ms", 500)),
         agentsview_db_path=av_db,
         agentsview_cli_path=av_cli,
+        papers_root=papers_root,
+        papers_max_depth=int(pp.get("max_depth", 6)),
         raw=raw,
     )

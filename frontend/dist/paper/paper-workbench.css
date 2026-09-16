@@ -1,0 +1,223 @@
+/* Paper Workbench — four-pane layout.
+   Scoped to .paper-workbench so it cannot leak into the host page, which has
+   its own Tailwind-based dark theme. */
+
+.paper-workbench {
+  --splitter: 6px;
+  --pw-bg: #141418;
+  --pw-panel: #1a1a22;
+  --pw-panel-2: #1c1c24;
+  --pw-border: #2b2b38;
+  --pw-text: #e2e8f0;
+  --pw-muted: #94a3b8;
+  --pw-accent: #38bdf8;
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--pw-bg);
+  color: var(--pw-text);
+  font-size: 13px;
+}
+
+.paper-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--pw-panel-2);
+  border-bottom: 1px solid var(--pw-border);
+  flex: 0 0 auto;
+}
+
+.paper-toolbar-title { font-weight: 600; }
+.paper-spacer { flex: 1 1 auto; }
+.paper-version { color: var(--pw-muted); font-size: 11px; font-family: ui-monospace, monospace; }
+
+.paper-icon-btn {
+  background: transparent;
+  border: 1px solid var(--pw-border);
+  color: var(--pw-text);
+  border-radius: 6px;
+  width: 28px;
+  height: 26px;
+  cursor: pointer;
+  line-height: 1;
+}
+.paper-icon-btn:hover { background: rgba(56, 189, 248, 0.12); border-color: var(--pw-accent); }
+
+.paper-select {
+  background: var(--pw-bg);
+  color: var(--pw-text);
+  border: 1px solid var(--pw-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+/* The grid owns all pane sizing. Collapsed panes become 0px columns so the
+   centre reading area expands automatically. */
+.paper-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 260px var(--splitter) 1fr var(--splitter) 1fr var(--splitter) 340px;
+}
+
+.paper-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--pw-panel);
+  overflow: hidden;
+}
+
+.paper-grid[data-left-collapsed='true'] .paper-sidebar,
+.paper-grid[data-right-collapsed='true'] .paper-notes {
+  display: none;
+}
+
+.paper-paper-meta {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--pw-muted);
+  margin-left: auto;
+  text-align: right;
+}
+
+.paper-pane-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--pw-border);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--pw-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.paper-pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The PDF host must not scroll: the viewer manages its own scrolling, and a
+   nested scroller swallows wheel events meant for page turns. */
+.paper-pdf-host { overflow: hidden; position: relative; }
+
+.paper-pdf-frame { width: 100%; height: 100%; display: block; border: 0; }
+
+.paper-splitter {
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+}
+.paper-splitter::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--pw-border);
+  transition: background 120ms ease;
+}
+.paper-splitter:hover::after,
+.paper-splitter:focus-visible::after { background: var(--pw-accent); }
+.paper-splitter:focus-visible { outline: none; }
+.paper-grid[data-dragging='true'] { user-select: none; cursor: col-resize; }
+.paper-grid[data-dragging='true'] .paper-splitter::after { background: var(--pw-accent); }
+
+/* Sidebar list */
+.paper-sidebar .paper-pane-body { padding: 6px; }
+
+.paper-count {
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.14);
+  color: var(--pw-accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.paper-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--pw-text);
+  cursor: pointer;
+  font: inherit;
+}
+.paper-item:hover { background: rgba(148, 163, 184, 0.08); }
+.paper-item.is-active { background: rgba(56, 189, 248, 0.12); border-color: var(--pw-accent); }
+
+.paper-item-title { font-weight: 500; line-height: 1.35; }
+.paper-item-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--pw-muted); }
+
+.paper-status {
+  border-radius: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--pw-border);
+}
+.paper-status[data-status='UNREAD'] { color: #94a3b8; }
+.paper-status[data-status='READING'] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); }
+.paper-status[data-status='COMPLETED'] { color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
+
+.paper-badge {
+  border: 1px solid var(--pw-border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+/* Source tabs */
+.paper-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--pw-border);
+}
+
+.paper-source-tab {
+  background: transparent;
+  border: 1px solid var(--pw-border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--pw-muted);
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+}
+.paper-source-tab:hover { color: var(--pw-text); }
+.paper-source-tab.is-active {
+  color: var(--pw-accent);
+  background: var(--pw-panel-2);
+  border-color: var(--pw-accent);
+}
+
+.paper-muted { color: var(--pw-muted); padding: 12px; }
+.paper-error { color: #f87171; padding: 12px; }
+
+.paper-empty {
+  position: absolute;
+  inset: 52px 0 0;
+  display: grid;
+  place-items: center;
+  color: var(--pw-muted);
+  pointer-events: none;
+}
+.paper-empty[hidden] { display: none; }

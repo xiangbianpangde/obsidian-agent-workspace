@@ -52,3 +52,9 @@ server:
 agentsview:
   database: ~/.agentsview/sessions.db
   cli_path: /Users/xbpd/.local/bin/agentsview
+
+papers:
+  # 论文工作台扫描根（相对 vault.path 或绝对路径）。
+  # 扫描器产出的 folder_relpath 相对此根；Vault 安全边界仍为 vault.path。
+  root: 02. 🟡 归类 Arrange/论文
+  max_depth: 6     # 异常保护，非业务规则

@@ -33,6 +33,7 @@ from .models import (
     PaperStatus,
     SourceRole,
     WorkspaceState,
+    new_paper_id,
     utc_now,
 )
 
@@ -268,6 +269,24 @@ class PaperStorage:
         return target
 
     # ------------------------------------------------------------------ papers
+    def resolve_identity(self, folder_relpath: str) -> str:
+        """Return the stable paper_id for a folder, minting one on first sight.
+
+        Discovery is deliberately identity-free (ADR-006): the scanner emits
+        ``paper_id=""`` on every run. The indexer must therefore look up an
+        existing identity by folder before inserting, otherwise a rescan would
+        mint a fresh UUID and collide on the folder uniqueness constraint —
+        losing the status and workspace state tied to the old identity.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT paper_id FROM papers WHERE folder_relpath = ?",
+                (folder_relpath,),
+            ).fetchone()
+        if row is not None:
+            return row["paper_id"]
+        return new_paper_id()
+
     def upsert_paper(self, paper: Paper, allow_folder_move: bool = False) -> bool:
         """Insert or update a paper.
 

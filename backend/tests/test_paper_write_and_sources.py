@@ -264,6 +264,13 @@ def pdf_app(vault: Path, tmp_path: Path):
 
     class _Cfg:
         vault_root = vault
+        # The endpoint resolves folder_relpath against the papers root, which
+        # may differ from the vault root; the stub must expose both.
+        papers_root = vault
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
 
     app_state._state["cfg"] = _Cfg()
 

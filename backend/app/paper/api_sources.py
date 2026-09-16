@@ -136,14 +136,30 @@ def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
     if source.media_kind is not MediaKind.PDF:
         raise HTTPException(415, "source is not a PDF")
 
-    service = VaultWriteService(get_cfg().vault_root)
     paper = storage.get_paper(source.paper_id)
     if paper is None:
         raise HTTPException(404, f"unknown paper for source: {source_id}")
-    full = service.resolve(f"{paper.folder_relpath}/{source.rel_path}")
-    if not full.is_file():
+
+    cfg = get_cfg()
+    # folder_relpath 相对于 papers 扫描根，而非 Vault 根（两者可不同）。
+    # 安全边界仍必须以 Vault 为上限，且 papers 根本身必须落在 Vault 内。
+    service = VaultWriteService(cfg.vault_root)
+    papers_root = cfg.papers_root_or_default
+    try:
+        papers_root.relative_to(cfg.vault_root)
+    except ValueError as exc:
+        raise HTTPException(500, "papers root escapes the vault; refusing to serve") from exc
+
+    full = papers_root / paper.folder_relpath / source.rel_path
+    resolved = full.resolve(strict=False)
+    try:
+        resolved.relative_to(cfg.vault_root)
+    except ValueError as exc:
+        raise HTTPException(400, "resolved source path escapes the vault") from exc
+
+    if not resolved.is_file():
         raise HTTPException(404, f"source file is missing on disk: {source.rel_path}")
-    return source, full
+    return source, resolved
 
 
 @router.get("/{source_id}/content")

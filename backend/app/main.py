@@ -16,6 +16,8 @@ from .api import im as im_api
 from .api import schedule as schedule_api
 from .api import tags as tags_api
 from .api import templates as templates_api
+from .paper import api as paper_api
+from .paper import api_sources as paper_sources_api
 from .config import PROJECT_ROOT, load_config
 from .database import sqlite
 from .state import get_cfg, init_state
@@ -65,6 +67,7 @@ async def im_no_store_middleware(request: Request, call_next):
         or request.url.path.startswith("/internal/im")
         or request.url.path.startswith("/api/schedule")
         or request.url.path.startswith("/api/assignment")
+        or request.url.path.startswith("/api/paper")
     ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
@@ -78,6 +81,8 @@ app.include_router(agentsview_api.router, prefix="/api/agentsview", tags=["agent
 app.include_router(im_api.router)
 app.include_router(schedule_api.router)
 app.include_router(assignment_api.router)
+app.include_router(paper_api.router)
+app.include_router(paper_sources_api.router)
 
 
 @app.get("/api/health")

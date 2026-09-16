@@ -62,6 +62,8 @@
     .katex-display { margin: 1rem 0; overflow-x: auto; overflow-y: hidden; padding: 6px 0; }
     .katex { font-size: 1.1em; color: #f3e8ff; }
   </style>
+  <!-- 论文工作台样式：作用域限定于 .paper-workbench，不泄漏到宿主页 -->
+  <link rel="stylesheet" href="/static/paper/paper-workbench.css">
 </head>
 <body class="bg-[#18181b] text-slate-200 h-screen flex flex-col select-none overflow-hidden font-sans">
 
@@ -95,6 +97,9 @@
       <button id="nav-mode-assignment" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
         <i data-lucide="clipboard-check" class="w-3.5 h-3.5 mr-1.5 text-rose-400"></i>作业中心 (Assignment)
         <span id="badge-assignment-due" class="ml-1.5 px-1.5 py-0.2 text-[10px] bg-rose-950 text-rose-300 rounded-full border border-rose-800/50">0</span>
+      </button>
+      <button id="nav-mode-paper" class="px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition">
+        <i data-lucide="book-open-text" class="w-3.5 h-3.5 mr-1.5 text-indigo-400"></i>论文工作台 (Papers)
       </button>
     </div>
 
@@ -810,6 +815,11 @@
     </div>
   </div>
 
+  <!-- ======================== 工作区 6: 论文工作台 (Paper Workbench, P0) ========================
+       PDF Bridge / 标注 / 四栏布局均为独立 ES module（ADR-009：禁止继续向单文件堆叠）。
+       frontend/dist/paper/ 下自成模块边界，宿主页仅提供挂载点。 -->
+  <div id="workspace-paper" class="flex-1 overflow-hidden hidden bg-[#141418]"></div>
+
   <!-- 平台凭证导入 Modal -->
   <div id="modal-assignment-credential" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="bg-[#24242c] border border-[#383848] w-full max-w-lg rounded-xl shadow-2xl p-5 space-y-4">
@@ -1034,6 +1044,8 @@
       badgeScheduleWeek: document.getElementById('badge-schedule-week'),
       navModeAssignment: document.getElementById('nav-mode-assignment'),
       workspaceAssignment: document.getElementById('workspace-assignment'),
+      navModePaper: document.getElementById('nav-mode-paper'),
+      workspacePaper: document.getElementById('workspace-paper'),
       assignmentHeaderStats: document.getElementById('assignment-header-stats'),
       badgeAssignmentDue: document.getElementById('badge-assignment-due'),
       workspaceObsidian: document.getElementById('workspace-obsidian'),
@@ -1293,6 +1305,8 @@
       if (el.workspaceAssignment) el.workspaceAssignment.classList.add('hidden');
       if (el.assignmentHeaderStats) el.assignmentHeaderStats.classList.add('hidden');
       if (el.navModeAssignment) el.navModeAssignment.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+      if (el.navModePaper) el.navModePaper.className = 'px-3 py-1 rounded text-slate-400 hover:text-slate-200 font-medium flex items-center transition';
+      if (el.workspacePaper) el.workspacePaper.classList.add('hidden');
 
       if (mode === 'obsidian') {
         el.navModeObsidian.className = 'px-3 py-1 rounded bg-purple-600 text-white font-medium flex items-center transition shadow-sm';
@@ -1318,6 +1332,12 @@
         if (el.workspaceAssignment) el.workspaceAssignment.classList.remove('hidden');
         if (el.assignmentHeaderStats) el.assignmentHeaderStats.classList.remove('hidden');
         if (typeof loadAssignmentData === 'function') loadAssignmentData();
+      } else if (mode === 'paper') {
+        if (el.navModePaper) el.navModePaper.className = 'px-3 py-1 rounded bg-indigo-600 text-white font-medium flex items-center transition shadow-sm';
+        if (el.workspacePaper) {
+          el.workspacePaper.classList.remove('hidden');
+          mountPaperWorkbenchOnce();
+        }
       }
       lucide.createIcons();
     }
@@ -1327,6 +1347,22 @@
     el.navModeIm.addEventListener('click', () => setWorkspaceMode('im'));
     if (el.navModeSchedule) el.navModeSchedule.addEventListener('click', () => setWorkspaceMode('schedule'));
     if (el.navModeAssignment) el.navModeAssignment.addEventListener('click', () => setWorkspaceMode('assignment'));
+    if (el.navModePaper) el.navModePaper.addEventListener('click', () => setWorkspaceMode('paper'));
+
+    // 论文工作台按需懒加载：模块与 8.4MB 的 vendored PDF.js 不应拖累首屏。
+    let _paperModulePromise = null;
+    function mountPaperWorkbenchOnce() {
+      if (!_paperModulePromise) {
+        _paperModulePromise = import('/static/paper/main.js')
+          .then((mod) => mod.mountPaperWorkbench('workspace-paper'))
+          .catch((err) => {
+            console.error('论文工作台模块加载失败:', err);
+            const host = document.getElementById('workspace-paper');
+            if (host) host.innerHTML = '<p class="p-6 text-rose-400 text-sm">论文工作台加载失败：' + (err && err.message ? err.message : err) + '</p>';
+          });
+      }
+      return _paperModulePromise;
+    }
 
     // ======================== Obsidian 核心逻辑 ========================
     async function loadConfig() {
