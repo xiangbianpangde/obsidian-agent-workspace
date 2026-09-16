@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from typing import Any
 
 from .adapters.chaoxing import ChaoxingAdapter
@@ -18,6 +20,35 @@ logger = logging.getLogger(__name__)
 sync_lock = threading.Lock()
 
 PLATFORMS = ("chaoxing", "smartestu")
+
+# 风控（docs/05 §4.3）：默认上限 1 次/5 分钟。学习通对高频请求有限制，
+# 手动同步是同步触发的唯一入口，前端不提供自动轮询。可用环境变量关闭
+# （设为 0）以便本地调试。
+SYNC_MIN_INTERVAL_SECONDS = int(os.environ.get("ASSIGNMENT_SYNC_MIN_INTERVAL", "300"))
+
+
+class SyncThrottled(Exception):
+    """同步被频率限制拦截。携带距可重试的剩余秒数。"""
+
+    def __init__(self, platform: str, retry_after: int):
+        self.platform = platform
+        self.retry_after = retry_after
+        super().__init__(f"sync throttled for {platform}; retry in {retry_after}s")
+
+
+def _throttle_remaining(storage: AssignmentStorage, platform: str) -> int:
+    """返回还需等待的秒数；0 表示可以同步。"""
+    if SYNC_MIN_INTERVAL_SECONDS <= 0:
+        return 0
+    last = storage.last_sync(platform)
+    if not last:
+        return 0
+    started_ms = last.get("started_at")
+    if not started_ms:
+        return 0
+    elapsed = time.time() - (int(started_ms) / 1000.0)
+    remaining = SYNC_MIN_INTERVAL_SECONDS - int(elapsed)
+    return max(0, remaining)
 
 
 def build_adapter(platform: str, credential: str):
@@ -57,6 +88,23 @@ def validate_and_store_credential(
 
 def sync_platform(storage: AssignmentStorage, platform: str) -> dict[str, Any]:
     """Pulls tasks for one platform, upserts, marks stale; journalized."""
+    if platform not in PLATFORMS:
+        return {
+            "platform": platform,
+            "ok": False,
+            "error": "unknown_platform",
+            "task_count": 0,
+        }
+    remaining = _throttle_remaining(storage, platform)
+    if remaining > 0:
+        return {
+            "platform": platform,
+            "ok": False,
+            "error": "throttled",
+            "message": f"同步过于频繁，请 {remaining} 秒后重试",
+            "retry_after": remaining,
+            "task_count": 0,
+        }
     credential = storage.get_credential(platform)
     if credential is None:
         return {

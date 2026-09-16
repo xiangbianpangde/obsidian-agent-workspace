@@ -528,3 +528,107 @@ class TestAssignmentAPI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ------------------------------------------------------- sync rate limiting
+class TestSyncThrottle(unittest.TestCase):
+    """docs/05 §4.3: sync is capped at 1 per 5 minutes to respect platform
+    rate limits. Manual sync is the only trigger; there is no auto-polling."""
+
+    def _storage(self):
+        import tempfile
+        from pathlib import Path
+        from backend.app.assignment.storage import AssignmentStorage
+
+        return AssignmentStorage(Path(tempfile.mkdtemp()) / "a.db")
+
+    def test_first_sync_is_not_throttled(self):
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        self.assertEqual(sm._throttle_remaining(storage, "chaoxing"), 0)
+
+    def test_immediate_resync_is_throttled(self):
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        sync_id = storage.start_sync("chaoxing")
+        storage.finish_sync(sync_id, ok=True, task_count=1, message="ok")
+        remaining = sm._throttle_remaining(storage, "chaoxing")
+        self.assertGreater(remaining, 0)
+
+    def test_throttled_sync_reports_retry_after(self):
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        sync_id = storage.start_sync("chaoxing")
+        storage.finish_sync(sync_id, ok=True, task_count=1, message="ok")
+        result = sm.sync_platform(storage, "chaoxing")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "throttled")
+        self.assertGreater(result["retry_after"], 0)
+
+    def test_throttle_expires_after_window(self):
+        import sqlite3
+        import time
+
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        sync_id = storage.start_sync("chaoxing")
+        storage.finish_sync(sync_id, ok=True, task_count=1, message="ok")
+        conn = sqlite3.connect(storage.db_path)
+        conn.execute(
+            "UPDATE sync_journal SET started_at = ?",
+            (int((time.time() - sm.SYNC_MIN_INTERVAL_SECONDS - 100) * 1000),),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(sm._throttle_remaining(storage, "chaoxing"), 0)
+
+    def test_throttle_is_per_platform(self):
+        """A chaoxing sync must not block smartestu."""
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        sync_id = storage.start_sync("chaoxing")
+        storage.finish_sync(sync_id, ok=True, task_count=1, message="ok")
+        self.assertGreater(sm._throttle_remaining(storage, "chaoxing"), 0)
+        self.assertEqual(sm._throttle_remaining(storage, "smartestu"), 0)
+
+    def test_unknown_platform_is_rejected_without_touching_network(self):
+        from backend.app.assignment import sync as sm
+
+        storage = self._storage()
+        result = sm.sync_platform(storage, "not_a_platform")
+        self.assertEqual(result["error"], "unknown_platform")
+
+
+class TestSyncThrottleHTTP(unittest.TestCase):
+    def test_sync_endpoint_returns_429_when_throttled(self):
+        import tempfile
+        from pathlib import Path
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import backend.app.api.assignment as api
+        from backend.app.assignment.storage import AssignmentStorage
+
+        storage = AssignmentStorage(Path(tempfile.mkdtemp()) / "a.db")
+        sync_id = storage.start_sync("chaoxing")
+        storage.finish_sync(sync_id, ok=True, task_count=1, message="ok")
+
+        app = FastAPI()
+        app.include_router(api.router)
+        original = api.get_storage
+        api.get_storage = lambda: storage
+        try:
+            client = TestClient(app)
+            response = client.post("/api/assignment/sync/chaoxing")
+            self.assertEqual(response.status_code, 429)
+            self.assertIn("retry-after", {k.lower() for k in response.headers})
+            self.assertEqual(response.json()["error"], "throttled")
+            self.assertIn("no-store", response.headers.get("cache-control", ""))
+        finally:
+            api.get_storage = original

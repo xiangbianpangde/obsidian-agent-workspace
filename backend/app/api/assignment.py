@@ -90,6 +90,16 @@ def sync_one(platform: str) -> JSONResponse:
     if platform not in PLATFORMS:
         raise HTTPException(status_code=404, detail=f"unknown platform: {platform}")
     result = sync_platform(get_storage(), platform)
+    if result.get("error") == "throttled":
+        # 风控：文档 §4.3 要求 1 次/5 分钟上限。429 让调用方拿到 retry_after
+        # 而不是把节流误认为平台故障。
+        return _apply_no_store(
+            JSONResponse(
+                content=result,
+                status_code=429,
+                headers={"Retry-After": str(result.get("retry_after", 0))},
+            )
+        )
     code = 200 if result.get("ok") else 502
     return _apply_no_store(JSONResponse(content=result, status_code=code))
 
@@ -97,6 +107,16 @@ def sync_one(platform: str) -> JSONResponse:
 @router.post("/sync-all")
 def sync_everything() -> JSONResponse:
     results = sync_all(get_storage())
+    throttled = [r for r in results if r.get("error") == "throttled"]
+    if throttled and len(throttled) == len(results):
+        retry_after = min(r.get("retry_after", 0) for r in throttled)
+        return _apply_no_store(
+            JSONResponse(
+                content={"results": results},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+        )
     any_ok = any(r.get("ok") for r in results)
     return _apply_no_store(
         JSONResponse(content={"results": results}, status_code=200 if any_ok else 502)
