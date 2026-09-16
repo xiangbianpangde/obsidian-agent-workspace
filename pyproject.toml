@@ -55,3 +55,6 @@ no_implicit_optional = true
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
+# 让测试无需外部 PYTHONPATH 即可导入 backend.app.*：
+# pre-push 钩子以裸 `pytest -q` 调用，不携带任何环境变量。
+pythonpath = ["."]
