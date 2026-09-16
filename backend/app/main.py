@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import agentsview as agentsview_api
+from .api import assignment as assignment_api
 from .api import files as files_api
 from .api import im as im_api
 from .api import schedule as schedule_api
@@ -63,6 +64,7 @@ async def im_no_store_middleware(request: Request, call_next):
         request.url.path.startswith("/api/im")
         or request.url.path.startswith("/internal/im")
         or request.url.path.startswith("/api/schedule")
+        or request.url.path.startswith("/api/assignment")
     ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
@@ -75,6 +77,7 @@ app.include_router(templates_api.router, prefix="/api", tags=["templates"])
 app.include_router(agentsview_api.router, prefix="/api/agentsview", tags=["agentsview"])
 app.include_router(im_api.router)
 app.include_router(schedule_api.router)
+app.include_router(assignment_api.router)
 
 
 @app.get("/api/health")
