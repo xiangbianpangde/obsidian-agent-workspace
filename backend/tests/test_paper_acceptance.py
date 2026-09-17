@@ -1217,18 +1217,154 @@ def test_scenario_egress_is_blocked_before_the_dom_attach():
     assert "this.host.innerHTML = `<article" not in pane
 
 
-def test_scenario_workspace_conflict_does_not_clear_the_version():
-    """CRITICAL: clearing the version turned a conflict into a silent overwrite.
+def test_scenario_workspace_conflict_reloads_the_version_behaviourally():
+    """CRITICAL: the 409 path must re-read the version, verified by running it.
 
-    Sending null makes the server skip its check, so the next flush would
-    clobber the other tab's newer position.
+    Two earlier versions of this check were worthless. The first asserted the
+    string "stateVersion = null" was absent from a source slice. The second
+    asserted the string "_reloadVersion" was present — but the method did not
+    exist, so the conflict path threw a TypeError at runtime and the test still
+    passed. Grepping source text is not verification; the behaviour has to run.
+
+    This drives the real module under Node with a save that returns 409 and
+    asserts the version was re-read from the server.
     """
-    tracker = _frontend_module("workspace-state.js")
-    conflict_block = tracker[tracker.index("error.status === 409") :][:400]
-    assert "this.stateVersion = null" not in conflict_block, (
-        "the conflict path must not clear the version"
+    import json as _json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to exercise the browser module")
+
+    module = REPO_ROOT / "frontend" / "dist" / "paper" / "workspace-state.js"
+    script = f"""
+import {{ WorkspaceStateTracker }} from '{module}';
+
+let loadCalls = 0;
+const tracker = new WorkspaceStateTracker({{
+  load: async () => {{ loadCalls += 1; return {{ state: {{ state_version: 7 }} }}; }},
+  save: async () => {{ const e = new Error('conflict'); e.status = 409; throw e; }},
+}});
+
+tracker.paperId = 'pw_test';
+tracker.stateVersion = 3;
+tracker.state = {{ source_positions: {{}} }};
+tracker._dirty = true;
+
+const result = await tracker.flush();
+await new Promise((r) => setTimeout(r, 50));
+
+console.log(JSON.stringify({{
+  reason: result && result.reason,
+  loadCalls,
+  version: tracker.stateVersion,
+}}));
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
-    assert "_reloadVersion" in tracker, "the conflict path must re-read the version"
+    assert completed.returncode == 0, (
+        f"the module must run without throwing: {completed.stderr[-400:]}"
+    )
+    payload = _json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert payload["reason"] == "version-conflict"
+    assert payload["loadCalls"] >= 1, "the conflict path must consult the server"
+    assert payload["version"] == 7, (
+        f"the version must be re-read, not cleared (got {payload['version']})"
+    )
+
+
+def test_scenario_note_binding_survives_a_database_rebuild(tmp_path: Path, monkeypatch):
+    """CRITICAL: the manifest's note binding must be consumed, not just written.
+
+    The earlier test only asserted the manifest contained a note id. Nothing
+    read it back, so after a rebuild the note was gone, the reader showed "no
+    note", and creating one returned 409 permanently. Writing the binding is only
+    half the chain; this asserts the whole loop.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import backend.app.paper.api as paper_api
+    import backend.app.state as app_state
+    from backend.app.paper.models import Paper, PaperSource, SourceRole, new_paper_id, new_source_id
+    from backend.scripts import paper_index as indexer
+
+    vault = tmp_path / "vault"
+    papers_root = vault / "论文根"
+    paper_dir = papers_root / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_V1)
+
+    papers_root_ = papers_root
+
+    class _Cfg:
+        vault_path = vault
+        vault_root = vault
+        papers_root = papers_root_
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+
+    pid, sid = new_paper_id(), new_source_id()
+    first_db = tmp_path / "first.db"
+    storage = PaperStorage(first_db)
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="t"))
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="a.pdf",
+            sha256="a" * 64,
+        )
+    )
+
+    monkeypatch.setattr(paper_api, "_storage", lambda: storage)
+    app = FastAPI()
+    app.include_router(paper_api.router)
+    client = TestClient(app)
+
+    created = client.post(f"/api/paper/papers/{pid}/note", json={"content": "# 我的笔记\n"})
+    assert created.status_code == 200, created.text
+    note_id = created.json()["note_id"]
+
+    manifest = paper_dir / "paper.workbench.json"
+    assert manifest.is_file()
+
+    storage.close()
+    first_db.unlink(missing_ok=True)
+    Path(str(first_db) + "-wal").unlink(missing_ok=True)
+    Path(str(first_db) + "-shm").unlink(missing_ok=True)
+
+    # Rebuild from the Vault alone.
+    rebuilt_db = tmp_path / "second.db"
+    monkeypatch.setattr(indexer, "load_config", lambda: _Cfg())
+    monkeypatch.setattr(indexer, "PaperStorage", lambda *a, **k: PaperStorage(rebuilt_db))
+    report = indexer.index_papers(dry_run=False)
+    assert report.get("notes_restored") == 1, "the manifest's note binding must be consumed"
+
+    rebuilt = PaperStorage(rebuilt_db)
+    row = rebuilt.get_note_for_paper(pid)
+    assert row is not None, "the note row must be restored from the manifest"
+    assert row.note_id == note_id, "the restored id must match the original"
+
+    monkeypatch.setattr(paper_api, "_storage", lambda: rebuilt)
+    app2 = FastAPI()
+    app2.include_router(paper_api.router)
+    payload = TestClient(app2).get(f"/api/paper/papers/{pid}/note").json()
+    assert payload.get("exists") is True, "the reader must find the restored note"
+    rebuilt.close()
+
 
 
 def test_scenario_manifest_update_converges_under_concurrency(tmp_path: Path, monkeypatch):

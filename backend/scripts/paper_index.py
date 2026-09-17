@@ -28,6 +28,7 @@ from backend.app.paper.manifest import (
     read_manifest_file,
 )
 from backend.app.paper.scanner import ScanConfig, discover_papers
+from backend.app.paper.models import PaperNote
 from backend.app.paper.storage import PaperStorage
 from backend.app.paper.writer import VaultWriteService
 
@@ -59,6 +60,52 @@ def _next_version(prior: Any, source: Any) -> int:
     return previous if _unchanged(prior, source) else previous + 1
 
 
+
+def _restore_note_from_manifest(
+    storage: Any,
+    service: Any,
+    paper: Any,
+    adopted: Any,
+    papers_root_rel: str,
+    errors: list,
+) -> int:
+    """Re-attach the note a manifest declares.
+
+    The manifest records `note: {note_id, path}`; without consuming it here a
+    rebuilt database knows the paper was adopted but not that it had a note, so
+    the reader sees "no note" and creating one returns 409 permanently. Writing
+    the binding was only half the chain.
+    """
+    note_id = getattr(adopted, "note_id", None)
+    note_path = getattr(adopted, "note_path", None)
+    if not (note_id and note_path):
+        return 0
+
+    full_rel = (
+        str(Path(papers_root_rel, paper.folder_relpath, note_path))
+        if papers_root_rel
+        else str(Path(paper.folder_relpath, note_path))
+    )
+    try:
+        _data, digest = service.read(full_rel)
+    except Exception:
+        errors.append(
+            f"manifest declares note {note_path} but it is missing for {paper.folder_relpath}"
+        )
+        return 0
+
+    paper.note_id = note_id
+    storage.upsert_note(
+        PaperNote(
+            note_id=note_id,
+            paper_id=paper.paper_id,
+            rel_path=note_path,
+            content_sha256=digest,
+        )
+    )
+    return 1
+
+
 def index_papers(dry_run: bool = False) -> dict:
     cfg = load_config()
     root = cfg.papers_root_or_default
@@ -82,6 +129,7 @@ def index_papers(dry_run: bool = False) -> dict:
     sources_written = 0
     conflicts = 0
     retired = 0
+    notes_restored = 0
     result_errors: list[str] = []
 
     # Every folder this scan actually saw. A manifest id appearing at a new
@@ -120,7 +168,7 @@ def index_papers(dry_run: bool = False) -> dict:
         existing = storage.get_paper_by_folder(paper.folder_relpath)
 
         if adopted:
-            manifest_id = adopted[0]
+            manifest_id = adopted.paper_id if hasattr(adopted, "paper_id") else adopted[0]
             owner = existing_by_id.get(manifest_id)
             if owner is not None and owner.folder_relpath != paper.folder_relpath:
                 if owner.folder_relpath in scanned_folders:
@@ -165,6 +213,14 @@ def index_papers(dry_run: bool = False) -> dict:
             conflicts += 1
             continue
 
+        # The note row references the paper, so it can only be written once the
+        # paper exists — the foreign key enforces that ordering.
+        notes_restored += _restore_note_from_manifest(
+            storage, service, paper, adopted, papers_root_rel, result_errors
+        )
+        if paper.note_id:
+            storage.upsert_paper(paper, allow_folder_move=True)
+
         # Bind sources, reusing existing source ids by relative path so the
         # PDF endpoint keeps serving the same source_id across rescans.
         existing_sources = {
@@ -173,7 +229,13 @@ def index_papers(dry_run: bool = False) -> dict:
         # Source ids recorded in the manifest are authoritative for the same
         # reason the paper id is.
         manifest_sources = (
-            {s.rel_path: s for s in manifest_to_sources(paper.paper_id, adopted[1])}
+            {
+                s.rel_path: s
+                for s in manifest_to_sources(
+                    paper.paper_id,
+                    adopted.sources if hasattr(adopted, "sources") else adopted[1],
+                )
+            }
             if adopted
             else {}
         )
@@ -234,6 +296,7 @@ def index_papers(dry_run: bool = False) -> dict:
         "sources": sources_written,
         "conflicts": conflicts,
         "retired": retired,
+        "notes_restored": notes_restored,
         "binding_states": dict(states),
         "errors": result.errors,
     }

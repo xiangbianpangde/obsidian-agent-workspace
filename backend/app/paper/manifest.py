@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +36,32 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AdoptedIdentity:
+    """Identity recorded in a manifest.
+
+    A dataclass rather than a tuple because the field count grew once already
+    (the note binding) and a positional tuple made that easy to drop silently —
+    which is exactly what happened.
+    """
+
+    paper_id: str
+    sources: List[Dict[str, Any]]
+    note_path: Optional[str] = None
+    note_id: Optional[str] = None
+
+    def __iter__(self):
+        """Iterate as (paper_id, sources, note_path, note_id).
+
+        Keeps existing unpacking call sites working while the dataclass gives
+        new code named access.
+        """
+        return iter((self.paper_id, self.sources, self.note_path, self.note_id))
+
+    def __getitem__(self, index: int):
+        return (self.paper_id, self.sources, self.note_path, self.note_id)[index]
 
 
 class ManifestError(Exception):
@@ -90,11 +117,18 @@ def _note_name(paper: Paper) -> str:
     return "notes.md"
 
 
-def parse_manifest(document: Any) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
+def parse_manifest(
+    document: Any,
+) -> Tuple[str, List[Dict[str, Any]], Optional[str], Optional[str]]:
     """Validate and unpack a manifest.
 
-    Returns ``(paper_id, sources, note_path)``. Validating on read is what stops
-    a hand-edited or half-written manifest from silently re-identifying a paper.
+    Returns ``(paper_id, sources, note_path, note_id)``. Validating on read is
+    what stops a hand-edited or half-written manifest from silently
+    re-identifying a paper.
+
+    The note id is returned alongside its path because the path alone cannot
+    rebuild a binding: a database rebuild needs the stable id to re-attach the
+    note, and dropping it here is what left the recovery chain half-connected.
     """
     try:
         validate_manifest(document)
@@ -103,7 +137,7 @@ def parse_manifest(document: Any) -> Tuple[str, List[Dict[str, Any]], Optional[s
 
     sources = document.get("sources") or []
     note = document.get("note") or {}
-    return document["paper_id"], sources, note.get("path")
+    return document["paper_id"], sources, note.get("path"), note.get("note_id")
 
 
 def manifest_to_sources(paper_id: str, entries: List[Dict[str, Any]]) -> List[PaperSource]:
@@ -284,11 +318,13 @@ def ensure_adopted(
 
 def load_adopted_identity(
     service: Any, folder_relpath: str, papers_root_rel: str = ""
-) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+) -> Optional[AdoptedIdentity]:
     """Read an existing manifest for a folder, if any.
 
     Used by the indexer so a rescan reuses the Vault-anchored identity instead
-    of minting a new one.
+    of minting a new one — including the note binding, which the earlier version
+    parsed and then discarded, leaving a rebuilt database unable to re-attach
+    the note it had just written a manifest for.
     """
     folder = folder_relpath
     if papers_root_rel and papers_root_rel != ".":
@@ -297,8 +333,10 @@ def load_adopted_identity(
     document = read_manifest_file(service, rel)
     if document is None:
         return None
-    paper_id, entries, _note_path = parse_manifest(document)
-    return paper_id, entries
+    paper_id, entries, note_path, note_id = parse_manifest(document)
+    return AdoptedIdentity(
+        paper_id=paper_id, sources=entries, note_path=note_path, note_id=note_id
+    )
 
 
 #: Per-path locks so concurrent manifest writers serialise instead of racing.

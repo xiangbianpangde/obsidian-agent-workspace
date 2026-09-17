@@ -201,7 +201,9 @@ def test_identity_survives_a_database_rebuild(vault: Path):
     rebuilt = PaperStorage(Path(tempfile.mkdtemp()) / "b.db")
     identity = load_adopted_identity(service, "方向/论文A", papers_root_rel="论文根")
     assert identity is not None
-    recovered_id, entries = identity
+    # load_adopted_identity returns a dataclass now (it also carries the note
+    # binding); named access keeps this test independent of field order.
+    recovered_id, entries = identity.paper_id, identity.sources
     assert recovered_id == pid, "rebuilt identity must match the original"
 
     rebuilt.upsert_paper(

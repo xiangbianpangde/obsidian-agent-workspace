@@ -222,6 +222,34 @@ export class WorkspaceStateTracker extends EventTarget {
     return this._flushing;
   }
 
+  /**
+   * Re-read the stored version after a 409.
+   *
+   * Deliberately does not clear the version or mutate the local position: the
+   * point is to learn what the other writer produced so the next attempt carries
+   * a real version, not to abandon the check. Clearing it would turn the
+   * conflict into the silent overwrite the check exists to prevent.
+   */
+  async _reloadVersion() {
+    const epoch = this._epoch;
+    try {
+      const payload = await this.io.load();
+      if (epoch !== this._epoch) return;
+      const remoteVersion = payload?.state?.state_version;
+      if (typeof remoteVersion === 'number') {
+        this.stateVersion = remoteVersion;
+      }
+      this._emit('versionconflict', { remoteVersion: remoteVersion ?? null });
+    } catch {
+      // Leave the version untouched: the next flush will surface the conflict
+      // again rather than proceeding unverified.
+    }
+  }
+
+  _emit(type, detail) {
+    this.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+
   dispose() {
     clearTimeout(this._debounce);
     clearTimeout(this._max);
