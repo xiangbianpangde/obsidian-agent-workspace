@@ -26,7 +26,15 @@ export const ANNOTATION_KINDS = {
   CONCLUSION: '重要结论',
 };
 
-export const ANCHOR_SCHEMA_VERSION = 1;
+/**
+ * Version stamped on newly created anchors.
+ *
+ * Version 2 requires a resolvable locator: real normalised geometry for a PDF
+ * anchor, and a block fingerprint or text position for a Markdown one. Version 1
+ * tolerated empty values, which let an annotation validate while being
+ * impossible to re-anchor. Both remain readable so history stays intact.
+ */
+export const ANCHOR_SCHEMA_VERSION = 2;
 
 /** Build a PDF anchor from a viewer selection.
  *
@@ -117,6 +125,14 @@ export function validateAnchor(anchor) {
     if (!Array.isArray(anchor.quad_points_normalized)) {
       return { ok: false, reason: 'quad_points_normalized must be an array' };
     }
+    // Version 2 requires geometry: without it the anchor cannot be
+    // re-resolved, which is the whole purpose of storing one.
+    if (!anchor.quad_points_normalized.length) {
+      return {
+        ok: false,
+        reason: 'PDF 锚点需要归一化坐标：请确认页面已渲染完成后再选择文本',
+      };
+    }
     for (const point of anchor.quad_points_normalized) {
       if (typeof point?.x !== 'number' || typeof point?.y !== 'number') {
         return { ok: false, reason: 'normalised points need numeric x/y' };
@@ -133,6 +149,14 @@ export function validateAnchor(anchor) {
   if (anchor.type === 'MARKDOWN_TEXT') {
     if (!Array.isArray(anchor.heading_path)) {
       return { ok: false, reason: 'heading_path must be an array' };
+    }
+    // A heading path alone drifts: headings move between revisions and
+    // offsets shift with any edit, so one positional locator is required.
+    if (!anchor.block_fingerprint && !anchor.text_position) {
+      return {
+        ok: false,
+        reason: 'Markdown 锚点需要 block_fingerprint 或 text_position',
+      };
     }
     if (!anchor.text_quote?.exact) {
       return { ok: false, reason: 'text_quote.exact is the mandatory fallback locator' };

@@ -481,3 +481,158 @@ def test_note_read_uses_the_same_path_join(workbench):
     payload = client.get(f"/api/paper/papers/{pid}/note").json()
     assert payload["exists"] is True
     assert "# 往返测试" in payload["note"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Source-relative assets (P0-B7)
+# ---------------------------------------------------------------------------
+
+def test_asset_resolves_within_the_paper_folder(workbench):
+    """A figure referenced by a paper's own Markdown is served from our origin.
+
+    The generic vault asset route scans the whole vault by basename; two papers
+    shipping an `image_1.png` would collide and could return the wrong figure.
+    """
+    client, _, _, _, md_sid, paper_dir, _ = workbench
+    images = paper_dir / "images"
+    images.mkdir()
+    (images / "figure_1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 40)
+
+    response = client.get(
+        f"/api/paper-sources/{md_sid}/asset", params={"ref": "images/figure_1.png"}
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cross-origin-resource-policy"] == "same-origin"
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_asset_falls_back_into_common_image_folders(workbench):
+    client, _, _, _, md_sid, paper_dir, _ = workbench
+    (paper_dir / "images").mkdir()
+    (paper_dir / "images" / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"y" * 10)
+    # Reference given as a bare basename, as MinerU sometimes emits.
+    assert client.get(f"/api/paper-sources/{md_sid}/asset", params={"ref": "fig.png"}).status_code == 200
+
+
+def test_asset_cannot_traverse_out_of_the_paper_folder(workbench):
+    client, _, _, _, md_sid, _, _ = workbench
+    for bad in ("../other/secret.png", "..%2Fsecret.png", "/etc/passwd"):
+        response = client.get(f"/api/paper-sources/{md_sid}/asset", params={"ref": bad})
+        assert response.status_code in (400, 404), f"{bad} should be refused"
+
+
+def test_asset_rejects_external_references(workbench):
+    client, _, _, _, md_sid, _, _ = workbench
+    for bad in ("https://evil.example/x.png", "data:image/png;base64,AAAA"):
+        response = client.get(f"/api/paper-sources/{md_sid}/asset", params={"ref": bad})
+        assert response.status_code == 400, f"{bad} must not be proxied"
+
+
+def test_asset_refuses_active_formats(workbench):
+    """SVG can carry script and external references, so it is never served."""
+    client, _, _, _, md_sid, paper_dir, _ = workbench
+    (paper_dir / "diagram.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8")
+    response = client.get(f"/api/paper-sources/{md_sid}/asset", params={"ref": "diagram.svg"})
+    assert response.status_code == 415
+
+
+def test_asset_requires_a_markdown_source(workbench):
+    client, _, _, pdf_sid, _, _, _ = workbench
+    response = client.get(f"/api/paper-sources/{pdf_sid}/asset", params={"ref": "x.png"})
+    assert response.status_code == 415
+
+
+# Anchor with real geometry, required from anchor_schema_version 2.
+_GOOD_PDF_ANCHOR = {
+    "type": "PDF_TEXT",
+    "page_index": 0,
+    "page_label": "1",
+    "rotation": 0,
+    "quad_points_normalized": [{"x": 0.1, "y": 0.2}],
+    "text_quote": {"exact": "x", "prefix": None, "suffix": None},
+}
+
+
+def test_new_annotations_are_written_as_version_2(workbench):
+    """The write path must produce anchors that satisfy the tightened contract."""
+    import json as _json
+
+    client, _, pid, pdf_sid, _, paper_dir, _ = workbench
+    from backend.app.paper.models import PaperSource, new_source_id
+
+    # A source with real geometry in the anchor.
+    response = client.post(
+        f"/api/paper/papers/{pid}/annotations",
+        json={
+            "source_id": pdf_sid,
+            "kind": "HIGHLIGHT",
+            "anchor": _GOOD_PDF_ANCHOR,
+            "selected_text": "x",
+            "anchor_schema_version": 2,
+        },
+    )
+    assert response.status_code == 200, response.text
+    document = _json.loads((paper_dir / "paper.annotations.json").read_text(encoding="utf-8"))
+    assert document["annotations"][0]["anchor_schema_version"] == 2
+
+
+def test_annotation_source_hash_is_server_derived(workbench):
+    """A client-supplied hash could never be contradicted by an orphan check."""
+    import json as _json
+
+    client, storage, pid, pdf_sid, _, paper_dir, _ = workbench
+    storage.upsert_source(
+        type(storage.get_source(pdf_sid))(
+            source_id=pdf_sid,
+            paper_id=pid,
+            role=storage.get_source(pdf_sid).role,
+            rel_path=storage.get_source(pdf_sid).rel_path,
+            source_version=7,
+            sha256="b" * 64,
+        )
+    )
+    response = client.post(
+        f"/api/paper/papers/{pid}/annotations",
+        json={
+            "source_id": pdf_sid,
+            "kind": "HIGHLIGHT",
+            "anchor": _GOOD_PDF_ANCHOR,
+            "source_sha256": "f" * 64,
+            "source_version": 999,
+            "anchor_schema_version": 2,
+        },
+    )
+    assert response.status_code == 200, response.text
+    record = _json.loads((paper_dir / "paper.annotations.json").read_text(encoding="utf-8"))[
+        "annotations"
+    ][0]
+    assert record["source_sha256"] == "b" * 64, "hash must come from the bound source"
+    assert record["source_version"] == 7, "version must come from the bound source"
+
+
+def test_annotation_rejects_a_source_from_another_paper(workbench):
+    client, storage, pid, _, _, _, _ = workbench
+    from backend.app.paper.models import Paper, PaperSource, SourceRole, new_paper_id, new_source_id
+
+    other_pid, other_sid = new_paper_id(), new_source_id()
+    storage.upsert_paper(Paper(paper_id=other_pid, folder_relpath="方向/别的", display_title="o"))
+    storage.upsert_source(
+        PaperSource(
+            source_id=other_sid,
+            paper_id=other_pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="b.pdf",
+        )
+    )
+    response = client.post(
+        f"/api/paper/papers/{pid}/annotations",
+        json={
+            "source_id": other_sid,
+            "kind": "HIGHLIGHT",
+            "anchor": _GOOD_PDF_ANCHOR,
+            "anchor_schema_version": 2,
+        },
+    )
+    assert response.status_code == 400

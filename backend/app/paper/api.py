@@ -28,7 +28,13 @@ from pydantic import BaseModel, Field
 
 from ..state import get_cfg
 from . import ANNOTATION_STORE_FILENAME, storage as paper_storage
-from .contracts import validate_annotations
+from .contracts import (
+    ANCHOR_SCHEMA_VERSION_RESOLVABLE,
+    validate_annotations,
+)
+
+#: Version stamped on newly created annotations.
+ANCHOR_SCHEMA_VERSION = ANCHOR_SCHEMA_VERSION_RESOLVABLE
 from .manifest import (
     DEPENDENT_OPERATIONS,
     AdoptionRequired,
@@ -568,13 +574,21 @@ def save_note(paper_id: str, body: NoteSave):
 
 
 class AnnotationCreate(BaseModel):
+    """Annotation creation payload.
+
+    ``source_sha256`` and ``source_version`` are deliberately absent: the server
+    derives them from the bound source. Accepting them from the client let a
+    caller stamp a fabricated hash that no orphan check could ever contradict.
+    """
+
     source_id: str
     kind: str
     anchor: Dict[str, Any]
     body_markdown: str = ""
     selected_text: Optional[str] = None
-    source_sha256: Optional[str] = None
-    source_version: int = 1
+    #: Anchor layout version produced by the client. Defaults to the current
+    #: version; older clients may still submit 1.
+    anchor_schema_version: int = ANCHOR_SCHEMA_VERSION
 
 
 def _sidecar_relpath(paper: Paper) -> str:
@@ -811,7 +825,9 @@ def create_annotation(paper_id: str, body: AnnotationCreate):
             "kind": body.kind,
             "body_markdown": body.body_markdown or "",
             "selected_text": body.selected_text,
-            "anchor_schema_version": 1,
+            # The version comes from the client so an older client can still
+            # submit v1, but the server validates whichever it declares.
+            "anchor_schema_version": int(body.anchor_schema_version),
             "anchor": body.anchor,
             "source_sha256": source.sha256 or ("0" * 64),
             "source_version": source.source_version or 1,

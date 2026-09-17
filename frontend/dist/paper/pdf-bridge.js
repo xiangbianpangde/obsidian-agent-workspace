@@ -310,6 +310,10 @@ export class PdfBridge extends EventTarget {
    * Selection lives inside the iframe's text layer. Reading it is the one place
    * we must cross the boundary, because the official viewer has no selection
    * event API. Access is same-origin and read-only.
+   *
+   * The selection's client rect and the page's rendered size are returned too:
+   * an anchor needs normalised geometry to be re-resolvable, and raw CSS pixels
+   * cannot be stored (they break on zoom, resize and DPI change).
    * @returns {SelectionSnapshot|null}
    */
   getSelection() {
@@ -324,6 +328,9 @@ export class PdfBridge extends EventTarget {
       // by text quote if the page is re-rendered at a different scale.
       let prefix = '';
       let suffix = '';
+      let selectionRect = null;
+      let pageWidth = 0;
+      let pageHeight = 0;
       try {
         const range = sel.getRangeAt(0);
         const node = range.startContainer;
@@ -331,8 +338,24 @@ export class PdfBridge extends EventTarget {
         const start = Math.max(0, range.startOffset - 32);
         prefix = full.slice(start, range.startOffset);
         suffix = full.slice(range.endOffset, range.endOffset + 32);
+
+        const rect = range.getBoundingClientRect();
+        const pageNode = win.document.querySelector('.page[data-page-number]');
+        const pageRect = pageNode?.getBoundingClientRect();
+        if (rect && pageRect && pageRect.width > 0 && pageRect.height > 0) {
+          // Coordinates relative to the page box, which is what the crop-box
+          // normalisation expects.
+          selectionRect = {
+            left: rect.left - pageRect.left,
+            top: rect.top - pageRect.top,
+            right: rect.right - pageRect.left,
+            bottom: rect.bottom - pageRect.top,
+          };
+          pageWidth = pageRect.width;
+          pageHeight = pageRect.height;
+        }
       } catch {
-        /* context is best effort */
+        /* context and geometry are best effort */
       }
 
       return {
@@ -340,6 +363,9 @@ export class PdfBridge extends EventTarget {
         prefix,
         suffix,
         pageIndex: this.getCurrentPage(),
+        selectionRect,
+        pageWidth,
+        pageHeight,
       };
     } catch {
       return null;

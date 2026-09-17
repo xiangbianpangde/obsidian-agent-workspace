@@ -120,6 +120,18 @@ export const api = {
     });
   },
 
+  /**
+   * URL for an image referenced by a paper's Markdown.
+   *
+   * Images resolve through this same-origin endpoint rather than the vault's
+   * generic asset route, which scans the whole vault by basename and can
+   * return another paper's figure.
+   */
+  sourceAssetUrl(sourceId, ref, version) {
+    const base = `${SOURCES}/${encodeURIComponent(sourceId)}/asset?ref=${encodeURIComponent(ref)}`;
+    return version == null ? base : `${base}&version=${encodeURIComponent(version)}`;
+  },
+
   listAnnotations(paperId) {
     return request(`${BASE}/papers/${encodeURIComponent(paperId)}/annotations`);
   },

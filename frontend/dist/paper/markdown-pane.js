@@ -224,10 +224,12 @@ export class MarkdownPane {
   /**
    * Selected text inside the pane, with surrounding context.
    *
-   * Context is captured because a Markdown anchor must survive re-rendering;
-   * a DOM selector alone would break the moment KaTeX or a table changes the
-   * node structure (ADR-008).
-   * @returns {{exact: string, prefix: string, suffix: string, headingPath: string[]}|null}
+   * Context and block fingerprint are captured because a Markdown anchor must
+   * survive re-rendering; a DOM selector alone would break the moment KaTeX or
+   * a table changes the node structure (ADR-008). Headings move between
+   * revisions and offsets shift with any edit, so a fingerprint of the
+   * containing block is recorded alongside the heading path.
+   * @returns {{exact: string, prefix: string, suffix: string, headingPath: string[], blockFingerprint: string|null, textPosition: {start:number,end:number}|null}|null}
    */
   getSelection() {
     const sel = window.getSelection();
@@ -237,12 +239,31 @@ export class MarkdownPane {
 
     let prefix = '';
     let suffix = '';
+    let blockFingerprint = null;
+    let textPosition = null;
     try {
       const range = sel.getRangeAt(0);
       const node = range.startContainer;
       const full = node.nodeValue || '';
       prefix = full.slice(Math.max(0, range.startOffset - 48), range.startOffset);
       suffix = full.slice(range.endOffset, range.endOffset + 48);
+
+      const element =
+        node.nodeType === 1 ? node : node.parentElement;
+      const block = element?.closest('p, li, td, th, blockquote, pre, h1, h2, h3, h4, h5, h6');
+      if (block && full) {
+        // A cheap content fingerprint of the containing block: it survives
+        // re-rendering as long as the block's text is unchanged, which is
+        // exactly the condition under which the offsets stay meaningful.
+        blockFingerprint = fingerprint(block.textContent || '');
+        const before = full.slice(0, range.startOffset);
+        const blockStart = (block.textContent || '').indexOf(full.slice(0, 1));
+        const offset = blockStart >= 0 ? blockStart : 0;
+        textPosition = {
+          start: offset + before.length,
+          end: offset + before.length + String(sel).length,
+        };
+      }
     } catch {
       /* context is best effort */
     }
@@ -252,6 +273,8 @@ export class MarkdownPane {
       prefix,
       suffix,
       headingPath: this.currentHeadingPath(),
+      blockFingerprint,
+      textPosition,
     };
   }
 
@@ -264,6 +287,21 @@ export class MarkdownPane {
   _emit(type, detail) {
     this.host.dispatchEvent(new CustomEvent(type, { detail, bubbles: true }));
   }
+}
+
+/**
+ * Stable short fingerprint of a text block.
+ *
+ * Uses length plus a rolling hash so it is cheap and stable across renders; the
+ * point is to detect that the block changed, not to be cryptographic.
+ */
+function fingerprint(text) {
+  const value = String(text || '');
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return `md${value.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }
 
 function escapeHtml(value) {

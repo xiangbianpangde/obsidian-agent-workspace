@@ -457,3 +457,115 @@ def test_indexer_reuses_manifest_source_ids(tmp_path: Path, monkeypatch):
     assert len(sources) == 1
     assert sources[0].source_id == sid, "the manifest's source id must be reused"
     rebuilt.close()
+
+
+# ---------------------------------------------------------------------------
+# P0-B5: anchor schema versioning and P0-B4: pinned file descriptor
+# ---------------------------------------------------------------------------
+
+def _annotations_doc(version: int, anchor: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "paper_id": "pw_3d9e1234-5678-4abc-89de-0123456789ab",
+        "annotations": [
+            {
+                "annotation_id": "ann_11111111-2222-4333-8999-444444444444",
+                "source_id": "src_a12f1234-5678-4abc-89de-0123456789ab",
+                "kind": "HIGHLIGHT",
+                "body_markdown": "",
+                "selected_text": "x",
+                "anchor_schema_version": version,
+                "anchor": anchor,
+                "source_sha256": "a" * 64,
+                "source_version": 1,
+                "created_at": "2026-09-16T00:00:00Z",
+                "updated_at": "2026-09-16T00:00:00Z",
+                "deleted_at": None,
+                "orphaned_at": None,
+                "revision": 1,
+            }
+        ],
+    }
+
+
+_EMPTY_PDF_ANCHOR = {
+    "type": "PDF_TEXT",
+    "page_index": 0,
+    "page_label": "1",
+    "rotation": 0,
+    "quad_points_normalized": [],
+    "text_quote": {"exact": "x", "prefix": None, "suffix": None},
+}
+
+_GOOD_PDF_ANCHOR = {
+    "type": "PDF_TEXT",
+    "page_index": 0,
+    "page_label": "1",
+    "rotation": 0,
+    "quad_points_normalized": [{"x": 0.1, "y": 0.2}],
+    "text_quote": {"exact": "x", "prefix": None, "suffix": None},
+}
+
+
+def test_v1_annotation_with_empty_geometry_still_validates():
+    """History must not be invalidated by tightening the contract."""
+    from backend.app.paper.contracts import validate_annotations
+
+    validate_annotations(_annotations_doc(1, _EMPTY_PDF_ANCHOR))
+
+
+def test_v2_annotation_requires_geometry():
+    """Version 2 exists precisely because a placeholder anchor is useless."""
+    from backend.app.paper.contracts import SchemaError, validate_annotations
+
+    with pytest.raises(SchemaError) as exc:
+        validate_annotations(_annotations_doc(2, _EMPTY_PDF_ANCHOR))
+    assert "quad" in str(exc.value) or "geometry" in str(exc.value)
+
+
+def test_v2_annotation_with_geometry_validates():
+    from backend.app.paper.contracts import validate_annotations
+
+    validate_annotations(_annotations_doc(2, _GOOD_PDF_ANCHOR))
+
+
+def test_v2_markdown_anchor_requires_a_positional_locator():
+    from backend.app.paper.contracts import SchemaError, validate_annotations
+
+    bare = {
+        "type": "MARKDOWN_TEXT",
+        "heading_path": ["A"],
+        "block_fingerprint": None,
+        "text_position": None,
+        "text_quote": {"exact": "x", "prefix": None, "suffix": None},
+    }
+    with pytest.raises(SchemaError):
+        validate_annotations(_annotations_doc(2, bare))
+
+    located = {**bare, "block_fingerprint": "md3-abc"}
+    validate_annotations(_annotations_doc(2, located))
+
+
+def test_range_stream_is_pinned_to_one_file_revision(tmp_path: Path):
+    """Defect: the generator opened the path later, so a replacement between
+    stat() and the first read could mix two revisions in one response."""
+    from backend.app.paper.api_sources import _iter_fd_range, _open_pinned
+
+    target = tmp_path / "doc.pdf"
+    original = b"%PDF-1.4\n" + b"ORIGINAL" * 100 + b"\n%%EOF\n"
+    target.write_bytes(original)
+
+    fd, stat = _open_pinned(target)
+    try:
+        generator = _iter_fd_range(fd, 0, stat.st_size - 1)
+        first = next(generator)
+        # Replace the file while the response is still streaming.
+        target.write_bytes(b"%PDF-1.4\n" + b"REPLACED" * 200 + b"\n%%EOF\n")
+        rest = b"".join(generator)
+    finally:
+        os.close(fd)
+
+    body = first + rest
+    assert len(body) == len(original), "the pinned size must not change mid-stream"
+    assert b"ORIGINAL" in body
+    assert b"REPLACED" not in body, "bytes from two revisions must never mix"

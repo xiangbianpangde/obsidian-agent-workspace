@@ -273,8 +273,78 @@ def validate_manifest(document: Any) -> None:
 
 
 def validate_annotations(document: Any) -> None:
-    """Validate a ``paper.annotations.json`` sidecar document."""
+    """Validate a ``paper.annotations.json`` sidecar document.
+
+    Runs the frozen schema first, then the version-dependent anchor rules that
+    JSON Schema cannot express in the subset this validator enforces.
+    """
     _validate(document, ANNOTATIONS_SCHEMA_PATH)
+    for index, record in enumerate(document.get("annotations", [])):
+        if not isinstance(record, dict):
+            continue
+        _validate_anchor_semantics(record, f"/annotations/{index}")
+
+
+#: Anchor version at which a locator must be resolvable.
+ANCHOR_SCHEMA_VERSION_RESOLVABLE = 2
+
+
+def _validate_anchor_semantics(record: Dict[str, Any], pointer: str) -> None:
+    """Enforce the rules that distinguish a usable anchor from a placeholder.
+
+    Version 1 tolerated an empty PDF quad list and a null Markdown fingerprint,
+    which meant an annotation could validate while being impossible to
+    re-anchor. Version 2 requires a resolvable locator. Version 1 records stay
+    readable so history is not invalidated; they are upgraded on next write.
+    """
+    version = record.get("anchor_schema_version", 1)
+    if version < ANCHOR_SCHEMA_VERSION_RESOLVABLE:
+        return
+
+    anchor = record.get("anchor") or {}
+    kind = anchor.get("type")
+
+    if kind == "PDF_TEXT":
+        quads = anchor.get("quad_points_normalized")
+        if not isinstance(quads, list) or len(quads) < 1:
+            raise SchemaError(
+                f"{pointer}/anchor",
+                "anchor_schema_version 2 requires at least one normalised quad "
+                "point; an anchor with no geometry cannot be re-resolved",
+            )
+        quote = (anchor.get("text_quote") or {}).get("exact")
+        if not quote:
+            raise SchemaError(
+                f"{pointer}/anchor/text_quote",
+                "anchor_schema_version 2 requires a text quote as the "
+                "second-chance locator",
+            )
+        return
+
+    if kind == "MARKDOWN_TEXT":
+        path = anchor.get("heading_path")
+        fingerprint = anchor.get("block_fingerprint")
+        position = anchor.get("text_position")
+        quote = (anchor.get("text_quote") or {}).get("exact")
+        # Headings alone move between revisions, and offsets alone shift with
+        # any edit, so at least one positional locator plus the quote is needed.
+        if not (fingerprint or position):
+            raise SchemaError(
+                f"{pointer}/anchor",
+                "anchor_schema_version 2 requires block_fingerprint or "
+                "text_position in addition to the heading path",
+            )
+        if not quote:
+            raise SchemaError(
+                f"{pointer}/anchor/text_quote",
+                "anchor_schema_version 2 requires a text quote as the "
+                "second-chance locator",
+            )
+        if not isinstance(path, list):
+            raise SchemaError(f"{pointer}/anchor/heading_path", "must be an array")
+        return
+
+    raise SchemaError(f"{pointer}/anchor", f"unknown anchor type: {kind}")
 
 
 def validate_ai_context(document: Any) -> None:

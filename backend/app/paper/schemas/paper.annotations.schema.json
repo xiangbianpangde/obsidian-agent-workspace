@@ -44,7 +44,7 @@
         "rotation": { "type": "integer", "enum": [0, 90, 180, 270] },
         "quad_points_normalized": {
           "type": "array",
-          "description": "Coordinates normalized against the PDF crop box. Raw CSS pixels are forbidden: they break on zoom, window resize and DPI change.",
+          "description": "Coordinates normalized against the PDF crop box. Raw CSS pixels are forbidden: they break on zoom, window resize and DPI change. Under anchor_schema_version 2 this must carry at least one point, because an anchor with no geometry cannot be re-resolved; version 1 records are still readable.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -112,7 +112,11 @@
         },
         "body_markdown": { "type": "string", "maxLength": 65536 },
         "selected_text": { "type": ["string", "null"], "maxLength": 8192 },
-        "anchor_schema_version": { "const": 1 },
+        "anchor_schema_version": {
+          "type": "integer",
+          "enum": [1, 2],
+          "description": "1 = legacy (empty PDF quads and null Markdown fingerprints were tolerated); 2 = a locator must be resolvable. Existing v1 records stay readable and are upgraded on next write, so the meaning of a stored version never changes silently."
+        },
         "anchor": {
           "oneOf": [
             { "$ref": "#/$defs/pdfAnchor" },

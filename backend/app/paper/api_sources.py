@@ -33,7 +33,7 @@ from typing import Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from ..state import get_cfg
 from . import storage as paper_storage
@@ -115,16 +115,37 @@ def _parse_range(header: str, size: int) -> Optional[Tuple[int, int]]:
     return start, end
 
 
-def _iter_file_range(path: Path, start: int, end: int):
+def _iter_fd_range(fd: int, start: int, end: int):
+    """Stream a byte range from an already-open descriptor.
+
+    The descriptor is opened once, before the response begins, and both the
+    size and the version check come from that same handle. Opening the path
+    inside the generator would leave a window between stat() and the first read
+    during which the file could be replaced, letting one response mix bytes from
+    two revisions — exactly what the version pin exists to prevent.
+    """
     remaining = end - start + 1
-    with path.open("rb") as handle:
-        handle.seek(start)
-        while remaining > 0:
-            chunk = handle.read(min(_CHUNK, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
+    os.lseek(fd, start, os.SEEK_SET)
+    while remaining > 0:
+        chunk = os.read(fd, min(_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        yield chunk
+
+
+def _open_pinned(path: Path) -> Tuple[int, os.stat_result]:
+    """Open a file and return (fd, fstat) for the same underlying object."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        stat = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.st_size and stat.st_size != 0:
+        os.close(fd)
+        raise HTTPException(500, "source has an invalid size")
+    return fd, stat
 
 
 def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
@@ -207,9 +228,11 @@ def get_source_content(
             412, f"source version changed: requested {version}, current {source.source_version}"
         )
 
-    stat = full.stat()
-    size = stat.st_size
-    etag = f'"{source.source_version}-{int(stat.st_mtime_ns)}-{size}"'
+    # Pin the handle first: the size, the ETag and the bytes all come from the
+    # same open file, so a replacement mid-response cannot mix revisions.
+    fd, file_stat = _open_pinned(full)
+    size = file_stat.st_size
+    etag = f'"{source.source_version}-{int(file_stat.st_mtime_ns)}-{size}"'
 
     headers = {
         "Accept-Ranges": "bytes",
@@ -228,6 +251,7 @@ def get_source_content(
         try:
             parsed = _parse_range(range_header, size)
         except ValueError:
+            os.close(fd)
             headers["Content-Range"] = f"bytes */{size}"
             raise HTTPException(416, "requested range not satisfiable", headers=headers)
         if parsed is not None:
@@ -239,18 +263,32 @@ def get_source_content(
             # the byte-range contract.
             headers["Content-Encoding"] = "identity"
             return StreamingResponse(
-                _iter_file_range(full, start, end),
+                _stream_and_close(fd, start, end),
                 status_code=206,
                 media_type="application/pdf",
                 headers=headers,
             )
 
+    # No range: stream the same pinned descriptor and close it when done, so no
+    # code path leaves a descriptor behind.
     headers["Content-Length"] = str(size)
-    return FileResponse(
-        full,
+    return StreamingResponse(
+        _stream_and_close(fd, 0, size - 1),
+        status_code=200,
         media_type="application/pdf",
         headers=headers,
     )
+
+
+def _stream_and_close(fd: int, start: int, end: int):
+    """Stream a range then close the descriptor, including on client abort."""
+    try:
+        yield from _iter_fd_range(fd, start, end)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 @router.head("/{source_id}/content")
@@ -276,3 +314,110 @@ def head_source_content(
         "Cache-Control": "no-store, no-cache, must-revalidate",
     }
     return Response(status_code=200, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# Source-relative assets
+# ---------------------------------------------------------------------------
+
+
+def _resolve_source_relative(markdown_path: Path, asset_ref: str) -> Path:
+    """Resolve an asset referenced by a paper's Markdown, downward only.
+
+    MinerU extractions routinely reference images in a sibling ``images/``
+    folder, and the generic vault asset endpoint answers such a reference by
+    scanning the entire vault for a matching basename. That is both slow and
+    ambiguous — two papers shipping an ``image_1.png`` would collide, and the
+    resolver could pick the wrong paper's figure.
+
+    Resolution is therefore restricted to the referring document's own folder
+    and its descendants. Nothing above the paper folder is ever consulted, so a
+    reference can never escape into another paper.
+    """
+    if not asset_ref or "\x00" in asset_ref:
+        raise HTTPException(400, "invalid asset reference")
+    if asset_ref.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", asset_ref):
+        raise HTTPException(400, "absolute asset paths are not permitted")
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", asset_ref):
+        # scheme-qualified (http:, data:, ...) never reaches here; a local
+        # reference must stay local.
+        raise HTTPException(400, "external asset references are not permitted")
+
+    parts = Path(asset_ref).parts
+    if any(part == ".." for part in parts):
+        raise HTTPException(400, "asset reference may not traverse upwards")
+
+    base = markdown_path.parent
+    candidate = (base / asset_ref).resolve(strict=False)
+
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(400, "asset reference escapes the paper folder") from exc
+
+    if candidate.is_symlink():
+        raise HTTPException(400, "symlinked assets are not permitted")
+    if not candidate.is_file():
+        # Some extractions place images one level down under images/.
+        for sub in ("images", "assets", "figures"):
+            alt = (base / sub / asset_ref).resolve(strict=False)
+            try:
+                alt.relative_to(base)
+            except ValueError:
+                continue
+            if alt.is_file() and not alt.is_symlink():
+                return alt
+        raise HTTPException(404, f"asset not found: {asset_ref}")
+    return candidate
+
+
+@router.get("/{source_id}/asset")
+def get_source_asset(
+    source_id: str,
+    ref: str,
+    version: Optional[int] = None,
+):
+    """Serve an image referenced by a paper's Markdown, same-origin only.
+
+    Returning bytes from our own origin is what lets the reader display figures
+    without contacting anything external, which is the zero-egress promise.
+    """
+    source, full = _get_source_or_404(source_id)
+    if source.media_kind is not MediaKind.MARKDOWN:
+        raise HTTPException(415, "assets are resolved relative to a Markdown source")
+    if version is not None and version != source.source_version:
+        raise HTTPException(412, f"source version changed: requested {version}")
+
+    resolved = _resolve_source_relative(full, ref)
+    media_type, _ = mimetypes.guess_type(str(resolved))
+    if media_type not in _ALLOWED_ASSET_MEDIA:
+        raise HTTPException(
+            415, f"asset type is not served inline: {media_type or 'unknown'}"
+        )
+
+    with resolved.open("rb") as handle:
+        payload = handle.read()
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        },
+    )
+
+
+#: Passive raster and font formats only. SVG is an active format (it can carry
+#: script and external references) and PDFs are handled by their own endpoint.
+_ALLOWED_ASSET_MEDIA = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/tiff",
+    }
+)

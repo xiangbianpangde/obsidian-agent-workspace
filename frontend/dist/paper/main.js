@@ -14,9 +14,11 @@ import { PdfBridge, PDFJS_VERSION } from './pdf-bridge.js';
 import { MarkdownPane } from './markdown-pane.js';
 import { NoteEditor } from './note-pane.js';
 import {
+  ANCHOR_SCHEMA_VERSION,
   AnnotationList,
-  makePdfAnchor,
   makeMarkdownAnchor,
+  makePdfAnchor,
+  validateAnchor,
 } from './annotations.js';
 import { assembleAiContext } from './ai-context.js';
 import { WorkspaceStateTracker } from './workspace-state.js';
@@ -351,13 +353,27 @@ export class PaperWorkbench {
           selectedText: selection.exact,
           prefix: selection.prefix,
           suffix: selection.suffix,
+          selectionRect: selection.selectionRect,
+          pageWidth: selection.pageWidth,
+          pageHeight: selection.pageHeight,
         })
       : makeMarkdownAnchor({
           headingPath: selection.headingPath,
           selectedText: selection.exact,
           prefix: selection.prefix,
           suffix: selection.suffix,
+          blockFingerprint: selection.blockFingerprint,
+          textPosition: selection.textPosition,
         });
+
+    // A resolvable locator is mandatory from anchor schema version 2: an
+    // anchor that validates but cannot be re-resolved is worse than none.
+    const check = validateAnchor(anchor);
+    if (!check.ok) {
+      this.el.meta.textContent = `无法生成可用锚点：${check.reason}`;
+      return;
+    }
+    anchor.schema_version = ANCHOR_SCHEMA_VERSION;
 
     try {
       await api.createAnnotation(this.selected.paper_id, {
