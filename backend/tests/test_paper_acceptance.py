@@ -793,3 +793,51 @@ def test_scenario_annotation_store_intent_needs_no_rollforward(tmp_path: Path):
 
     assert report.resolved == 1
     assert report.outcomes[0].action == "already-consistent"
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — multi-tab coordination
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_tab_sync_is_wired_into_the_workbench():
+    """跨标签协调必须真的接线，而不是只定义了一个模块.
+
+    The review flagged exactly this pattern elsewhere — a component that exists
+    while nothing calls it.
+    """
+    main_js = _frontend_module("main.js")
+    assert "TabCoordinator" in main_js, "the coordinator must be instantiated"
+    assert "ACTIVITY.NOTE_SAVED" in main_js, "note saves must be announced"
+    assert "_onRemoteNoteSave" in main_js, "remote saves must be handled"
+
+
+def test_scenario_tab_sync_never_replaces_an_unsaved_draft():
+    """另一标签页保存时，本标签的草稿绝不能被静默替换.
+
+    Coordination is advisory: the server remains the authority on conflicts, and
+    a tab with unsaved work must be told rather than overwritten.
+    """
+    main_js = _frontend_module("main.js")
+    # Locate the method definition, not the registration call site.
+    definition = main_js.index("_onRemoteNoteSave(info) {")
+    block = main_js[definition : main_js.index("_onRemoteAnnotationChange(info) {")]
+    assert "hasUnsavedWork()" in block, "an unsaved draft must be detected"
+    # The warn path must come first; the reload path must be the clean case.
+    warn_index = block.index("hasUnsavedWork()")
+    reload_index = block.index("loadFor")
+    assert warn_index < reload_index, "the draft check must precede any reload"
+
+
+def test_scenario_tab_sync_ignores_its_own_messages():
+    """自己的广播会经 storage 路径回传，必须忽略，否则形成回环."""
+    tab_js = _frontend_module("tab-sync.js")
+    assert "message.tabId === this.tabId" in tab_js
+    assert "return" in tab_js[tab_js.index("message.tabId === this.tabId") :][:80]
+
+
+def test_scenario_tab_sync_degrades_without_channel_support():
+    """BroadcastChannel 不可用时必须回退而不是崩溃."""
+    tab_js = _frontend_module("tab-sync.js")
+    assert "typeof BroadcastChannel" in tab_js, "availability must be checked"
+    assert "localStorage" in tab_js, "a fallback path is required"

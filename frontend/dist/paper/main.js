@@ -22,6 +22,7 @@ import {
 } from './annotations.js';
 import { assembleAiContext } from './ai-context.js';
 import { WorkspaceStateTracker } from './workspace-state.js';
+import { ACTIVITY, TabCoordinator } from './tab-sync.js';
 
 const STATUS_LABELS = {
   UNREAD: '未看',
@@ -105,6 +106,19 @@ export class PaperWorkbench {
         ),
     });
     this.workspaceState.bind();
+
+    // Cross-tab awareness. The server stays the authority on whether a write
+    // is allowed; this only lets a tab learn sooner that another tab has
+    // moved the same paper forward.
+    this.tabs = new TabCoordinator();
+    this.tabs.on(ACTIVITY.NOTE_SAVED, (info) => this._onRemoteNoteSave(info));
+    this.tabs.on(ACTIVITY.ANNOTATION_CHANGED, (info) => this._onRemoteAnnotationChange(info));
+    this.note.addEventListener('saved', (event) => {
+      this.tabs.announce(ACTIVITY.NOTE_SAVED, {
+        paperId: this.selected?.paper_id ?? null,
+        hash: event.detail?.hash ?? null,
+      });
+    });
     this.annotations = new AnnotationList(this.el.annHost, {
       list: () => api.listAnnotations(this.selected.paper_id),
       onJump: (item) => this.jumpToAnnotation(item),
@@ -333,6 +347,31 @@ export class PaperWorkbench {
     }
   }
 
+  /**
+   * Another tab saved the same note.
+   *
+   * If this tab has no unsaved work, quietly adopt the newer hash so the next
+   * save succeeds. If it does have a draft, warn instead of reloading — the
+   * user's in-progress text must never be replaced behind their back.
+   */
+  _onRemoteNoteSave(info) {
+    if (!this.selected || info.paperId !== this.selected.paper_id) return;
+    if (!this.note) return;
+    if (this.note.hasUnsavedWork()) {
+      this.el.meta.textContent = '另一标签页保存了此笔记，你的草稿仍保留';
+      this.el.meta.dataset.remoteEdit = 'true';
+      return;
+    }
+    this.note.loadFor(this.selected.paper_id);
+    this.el.meta.textContent = '已同步另一标签页的改动';
+  }
+
+  /** Another tab changed annotations for this paper. */
+  _onRemoteAnnotationChange(info) {
+    if (!this.selected || info.paperId !== this.selected.paper_id) return;
+    this.annotations.load();
+  }
+
   _refreshSelectionState() {
     const available = !!(this.pdf?.getSelection() || this.markdown?.getSelection());
     this.annotations?.setSelectionAvailable(available);
@@ -389,6 +428,9 @@ export class PaperWorkbench {
       });
       await this.annotations.load();
       this._refreshSelectionState();
+      this.tabs.announce(ACTIVITY.ANNOTATION_CHANGED, {
+        paperId: this.selected.paper_id,
+      });
     } catch (error) {
       this.el.meta.textContent = `标注保存失败：${error.message}`;
     }
