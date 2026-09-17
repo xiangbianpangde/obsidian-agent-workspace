@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     # A multi-worker start would give every worker its own path locks, so two
     # requests could interleave a read-modify-write on one sidecar and lose one.
     from .paper.ownership import VaultWriteLock, assert_single_worker
+    from .paper.writer import VaultWriteService
 
     assert_single_worker()
 
@@ -55,6 +56,36 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("paper vault lock not acquired: %s", exc)
         _vault_lock = None
+
+    # Roll forward any write that a crash interrupted. The filesystem has no
+    # cross-file transaction, so an adopted paper can be missing its note and a
+    # note file can exist without its row. Recovery finishes the work; it never
+    # deletes what was already created.
+    try:
+        from .paper import storage as paper_storage_mod
+        from .paper.recovery import recover_pending_writes
+
+        report = recover_pending_writes(
+            paper_storage_mod.PaperStorage(),
+            VaultWriteService(cfg.vault_root),
+        )
+        if report.checked:
+            logger.info(
+                "paper write recovery: checked=%d resolved=%d unresolved=%d",
+                report.checked,
+                report.resolved,
+                report.unresolved,
+            )
+        for outcome in report.outcomes:
+            if not outcome.resolved:
+                logger.warning(
+                    "unresolved write intent %s (%s): %s",
+                    outcome.intent_id,
+                    outcome.operation,
+                    outcome.detail,
+                )
+    except Exception as exc:
+        logger.warning("paper write recovery could not run: %s", exc)
 
     watchdog_conn = None
     im_coordinator = im_api.get_im_coordinator()

@@ -320,6 +320,23 @@ def _adopt(
     """
     if operation not in DEPENDENT_OPERATIONS:
         raise HTTPException(500, f"internal: unknown adoption trigger {operation}")
+
+    # Adoption writes the manifest ahead of whatever dependent state follows, so
+    # a crash in between leaves a paper that is adopted but missing the step
+    # that triggered adoption. The intent lets startup finish the job rather
+    # than leaving it half-done.
+    intent = None
+    if not paper.manifest_relpath:
+        intent = storage.begin_write_intent(
+            paper.paper_id,
+            "adopt",
+            {
+                "trigger": operation,
+                # Recovery rejoins folder_relpath with this prefix; without
+                # it the manifest lands beside the papers root.
+                "papers_root_rel": str(_papers_root_ptr()),
+            },
+        )
     try:
         sources = storage.list_sources(paper.paper_id, include_inactive=True)
         base = _papers_root_ptr()
@@ -332,8 +349,12 @@ def _adopt(
             papers_root_rel=str(base) if str(base) != "." else "",
         )
     except ManifestError as exc:
+        if intent:
+            storage.fail_write_intent(intent, str(exc))
         raise HTTPException(500, f"cannot adopt paper: {exc}") from exc
     storage.upsert_paper(paper, allow_folder_move=True)
+    if intent and paper.manifest_relpath:
+        storage.commit_write_intent(intent)
     return paper
 
 
@@ -545,7 +566,18 @@ def create_note(paper_id: str, body: NoteCreate):
     # The file is created before the database row. If the process dies in
     # between, the note exists in the Vault with no row — recoverable by
     # re-reading its frontmatter — rather than a row pointing at nothing.
-    intent = storage.begin_write_intent(paper_id, "create_note", {"rel_path": rel, "note_id": note_id})
+    # The papers-root prefix is recorded so recovery can rebuild the path the
+    # same way the write did; folder_relpath alone is relative to the papers
+    # root, not the vault root.
+    intent = storage.begin_write_intent(
+        paper_id,
+        "create_note",
+        {
+            "rel_path": rel,
+            "note_id": note_id,
+            "papers_root_rel": str(_papers_root_ptr()),
+        },
+    )
     try:
         result = _service().create(full_rel, content)
     except AlreadyExistsError as exc:

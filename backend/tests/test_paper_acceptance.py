@@ -607,3 +607,189 @@ def test_scenario_backup_durability(tmp_path: Path, monkeypatch):
         f"expected 4 fsync calls (temp file, temp dir, backup file, backup dir), "
         f"saw {len(syncs)}: a missing one means a crash can lose a write"
     )
+
+
+# ---------------------------------------------------------------------------
+# Group 5 — crash recovery rolls forward (Sol: never roll back)
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_recovery_rebuilds_row_from_existing_note_file(tmp_path: Path):
+    """文件写完、DB 尚未更新时退出 —— 恢复必须前滚，不是删除文件.
+
+    Sol was explicit: deleting the note that was already created would destroy
+    user content. Recovery therefore adopts the file rather than undoing it.
+    """
+    from backend.app.paper.models import new_note_id
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    note_id = new_note_id()
+    (scene.paper_dir / "notes.md").write_text("# 崩溃前写入的笔记\n", encoding="utf-8")
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": note_id, "papers_root_rel": "论文根"},
+    )
+    assert storage.get_note_for_paper(pid) is None, "the row must be missing for this case"
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.checked == 1
+    assert report.resolved == 1
+    assert report.unresolved == 0
+
+    row = storage.get_note_for_paper(pid)
+    assert row is not None, "recovery must rebuild the row from the file"
+    assert row.note_id == note_id
+    assert row.content_sha256, "the rebuilt row must record the file's hash"
+    assert (scene.paper_dir / "notes.md").is_file(), "recovery must never delete the file"
+    assert storage.list_pending_write_intents() == []
+
+
+def test_scenario_recovery_leaves_consistent_state_alone(tmp_path: Path):
+    """两边都在且一致时，恢复不得改写任何东西."""
+    from backend.app.paper.models import PaperNote, new_note_id
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    note_id = new_note_id()
+    result = scene.service.create(scene.vault_rel("notes.md"), "# 一致的笔记")
+    (scene.paper_dir / "notes.md").write_text("# 一致的笔记", encoding="utf-8")
+    storage.upsert_note(
+        PaperNote(
+            note_id=note_id,
+            paper_id=pid,
+            rel_path="notes.md",
+            content_sha256=result.new_hash,
+        )
+    )
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": note_id, "papers_root_rel": "论文根"},
+    )
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.resolved == 1
+    assert report.outcomes[0].action == "already-consistent"
+    assert storage.get_note_for_paper(pid).note_id == note_id
+    assert (scene.paper_dir / "notes.md").read_text(encoding="utf-8") == "# 一致的笔记"
+
+
+def test_scenario_recovery_flags_a_mismatched_note_identity(tmp_path: Path):
+    """文件与行指向不同 note_id 时必须报冲突，不得猜测."""
+    from backend.app.paper.models import PaperNote, new_note_id
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    (scene.paper_dir / "notes.md").write_text("# 文件", encoding="utf-8")
+    storage.upsert_note(
+        PaperNote(
+            note_id=new_note_id(),
+            paper_id=pid,
+            rel_path="notes.md",
+        )
+    )
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": new_note_id(), "papers_root_rel": "论文根"},
+    )
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.unresolved == 1
+    assert report.outcomes[0].action == "inconsistent"
+
+
+def test_scenario_recovery_reports_an_orphaned_intent(tmp_path: Path):
+    """论文行不存在时，intent 无法完成，必须明确报告而不是猜测."""
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    storage.begin_write_intent(
+        "pw_00000000-0000-4000-8000-000000000000",
+        "create_note",
+        {"rel_path": "notes.md", "note_id": "note_x"},
+    )
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.unresolved == 1
+    assert report.outcomes[0].action == "orphaned"
+
+
+def test_scenario_recovery_is_idempotent(tmp_path: Path):
+    """重复运行恢复不得产生副作用."""
+    from backend.app.paper.models import new_note_id
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    note_id = new_note_id()
+    (scene.paper_dir / "notes.md").write_text("# 笔记", encoding="utf-8")
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": note_id, "papers_root_rel": "论文根"},
+    )
+
+    first = recover_pending_writes(storage, scene.service)
+    second = recover_pending_writes(storage, scene.service)
+
+    assert first.resolved == 1
+    assert second.checked == 0, "committed intents must not be reprocessed"
+    assert storage.get_note_for_paper(pid).note_id == note_id
+
+
+def test_scenario_adoption_intent_is_recovered(tmp_path: Path, monkeypatch):
+    """采纳写到一半时，恢复必须补齐 manifest.
+
+    The intent here deliberately omits the papers-root prefix: recovery runs at
+    startup with the live configuration available, so it must derive the prefix
+    rather than depend on what the interrupted write happened to record.
+    """
+    from backend.app.paper.manifest import is_adopted
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    scene.install_app_config(monkeypatch)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+    storage.begin_write_intent(pid, "adopt", {"trigger": "status_change"})
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.resolved == 1
+    paper = storage.get_paper(pid)
+    assert is_adopted(paper), "recovery must finish the adoption"
+    assert (scene.paper_dir / "paper.workbench.json").is_file()
+
+
+def test_scenario_annotation_store_intent_needs_no_rollforward(tmp_path: Path):
+    """sidecar 走原子发布，崩溃不会留下半截文档."""
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+    storage.begin_write_intent(pid, "create_annotation_store", {})
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.resolved == 1
+    assert report.outcomes[0].action == "already-consistent"
