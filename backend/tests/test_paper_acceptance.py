@@ -841,3 +841,105 @@ def test_scenario_tab_sync_degrades_without_channel_support():
     tab_js = _frontend_module("tab-sync.js")
     assert "typeof BroadcastChannel" in tab_js, "availability must be checked"
     assert "localStorage" in tab_js, "a fallback path is required"
+
+
+def test_scenario_recovery_finds_the_note_despite_a_stale_prefix(tmp_path: Path, monkeypatch):
+    """配置变更后，恢复不得把存在的笔记误判为「从未写入」.
+
+    Self-audit finding: recovery trusted the prefix recorded in the intent. With
+    a stale prefix the lookup missed a file that existed, recovery concluded the
+    write had never happened, and committing that intent left a note on disk
+    with no row — invisible to the reader and unrecoverable without noticing the
+    orphan.
+    """
+    from backend.app.paper.models import new_note_id
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    scene.install_app_config(monkeypatch)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    note_id = new_note_id()
+    (scene.paper_dir / "notes.md").write_text("# 真实存在的笔记\n", encoding="utf-8")
+
+    # The intent records a prefix that no longer matches the configuration.
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": note_id, "papers_root_rel": "陈旧前缀"},
+    )
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.outcomes[0].action == "completed"
+    assert storage.get_note_for_paper(pid) is not None, (
+        "a file that exists must never be reported as never written"
+    )
+    assert storage.get_note_for_paper(pid).note_id == note_id
+    assert (scene.paper_dir / "notes.md").is_file()
+
+
+def test_scenario_recovery_does_not_silently_retire_an_unfindable_intent(tmp_path: Path, monkeypatch):
+    """找不到文件时必须保留 intent 并报告，而不是当作「无影响」提交.
+
+    Retiring it would erase the only record that a write was attempted, so a
+    genuinely lost file would leave no trace at all.
+    """
+    from backend.app.paper.recovery import recover_pending_writes
+
+    scene = Scene(tmp_path)
+    scene.install_app_config(monkeypatch)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+
+    # No file on disk and no row: the write may or may not have happened.
+    storage.begin_write_intent(
+        pid,
+        "create_note",
+        {"rel_path": "notes.md", "note_id": "note_11111111-2222-4333-8999-444444444444"},
+    )
+
+    report = recover_pending_writes(storage, scene.service)
+
+    assert report.unresolved == 1
+    assert report.outcomes[0].action == "no-evidence"
+    # The intent survives so an operator can still see that a write was tried.
+    assert len(storage.list_pending_write_intents()) == 1
+
+
+def test_scenario_paper_modules_reference_no_external_origin():
+    """论文子系统自身的资源全部同源.
+
+    The claim is deliberately scoped: the paper modules and the vendored PDF.js
+    introduce no external dependency. The host page still loads its own CDNs
+    (Tailwind, KaTeX, marked, DOMPurify), so "the workspace makes no outbound
+    request at all" would be false, and the ADR says so explicitly.
+
+    Runtime observation is the strongest form of this check, but it needs a
+    browser; this asserts the static half — no paper module names an external
+    URL — which is what would regress first.
+    """
+    import re
+
+    paper_dir = REPO_ROOT / "frontend" / "dist" / "paper"
+    offenders: list[tuple[str, str]] = []
+    for path in sorted(paper_dir.glob("*.js")):
+        for match in re.finditer(r"['\"`](https?://[^'\"`]+)['\"`]", path.read_text(encoding="utf-8")):
+            url = match.group(1)
+            if "127.0.0.1" in url or "localhost" in url:
+                continue
+            offenders.append((path.name, url))
+
+    assert not offenders, f"paper modules must not reference external origins: {offenders}"
+
+
+def test_scenario_pdfjs_is_vendored_not_cdn():
+    """PDF.js 必须本地 vendored —— CDN 会让查看器版本漂移."""
+    reader_js = _frontend_module("pdf-bridge.js")
+    assert "/static/vendor/pdfjs/" in reader_js, "the viewer must be served from our own origin"
+    assert "cdn" not in reader_js.lower(), "no CDN may be used for the viewer"
+    vendored = REPO_ROOT / "frontend" / "dist" / "vendor" / "pdfjs" / "build" / "pdf.mjs"
+    assert vendored.is_file(), "the vendored build must be present"
+    worker = REPO_ROOT / "frontend" / "dist" / "vendor" / "pdfjs" / "build" / "pdf.worker.mjs"
+    assert worker.is_file(), "the worker must be vendored alongside the main build"

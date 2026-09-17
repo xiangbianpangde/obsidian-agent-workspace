@@ -31,25 +31,13 @@ logger = logging.getLogger(__name__)
 def _papers_root_rel(payload: Dict[str, Any]) -> str:
     """Vault-relative prefix for the papers root.
 
-    Recovery prefers the value recorded in the intent, because that is what the
-    interrupted write actually used. When it is absent (an older intent, or a
-    caller that did not record it) the live configuration is consulted rather
-    than assuming an empty prefix — assuming empty would write beside the papers
-    root instead of inside the paper folder, which is the path bug this
-    subsystem has already produced three times.
+    Prefers the value recorded in the intent, because that is what the
+    interrupted write actually used, and falls back to the live configuration.
     """
     recorded = payload.get("papers_root_rel")
     if recorded:
         return str(recorded)
-    try:
-        from ..state import get_cfg
-
-        cfg = get_cfg()
-        root = cfg.papers_root_or_default
-        relative = root.relative_to(cfg.vault_root)
-        return "" if str(relative) == "." else str(relative)
-    except Exception:
-        return ""
+    return _configured_papers_root_rel()
 
 
 @dataclass
@@ -167,6 +155,56 @@ def _recover_one(
     )
 
 
+def _locate_note_file(
+    service: Any, paper: Paper, rel_path: str, recorded_prefix: str
+) -> Optional[str]:
+    """Find a note file mentioned by an intent, without trusting one prefix.
+
+    The intent records the papers-root prefix, but a configuration change can
+    make that stale. Trusting it blindly produced a real hazard: with a stale
+    prefix the lookup missed a file that existed, recovery concluded "neither
+    the file nor the row was written", and committing that intent would leave a
+    note on disk with no row — invisible to the reader, and unrecoverable
+    without noticing the orphan.
+
+    So every plausible prefix is tried: the one the intent recorded, the one the
+    live configuration implies, and none at all. Finding the file under any of
+    them means the write did happen.
+    """
+    candidates: list[str] = []
+    for prefix in (recorded_prefix, _configured_papers_root_rel()):
+        if prefix:
+            candidates.append(str(Path(prefix, paper.folder_relpath, rel_path)))
+    # The paper folder without any prefix, and the bare filename, cover the case
+    # where both the prefix and the folder segment were lost.
+    candidates.append(str(Path(paper.folder_relpath, rel_path)))
+    candidates.append(rel_path)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            service.read(candidate)
+            return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _configured_papers_root_rel() -> str:
+    """Papers root relative to the vault root, from the live configuration."""
+    try:
+        from ..state import get_cfg
+
+        cfg = get_cfg()
+        relative = cfg.papers_root_or_default.relative_to(cfg.vault_root)
+        return "" if str(relative) == "." else str(relative)
+    except Exception:
+        return ""
+
+
 def _recover_create_note(
     storage: Any, service: Any, intent_id: str, paper: Paper, payload: Dict[str, Any]
 ) -> RecoveryOutcome:
@@ -178,20 +216,18 @@ def _recover_create_note(
     """
     rel_path = payload.get("rel_path") or "notes.md"
     note_id = payload.get("note_id") or ""
-    base = _papers_root_rel(payload)
-    full_rel = str(Path(base, paper.folder_relpath, rel_path)) if base else str(
-        Path(paper.folder_relpath, rel_path)
-    )
 
     note_row = storage.get_note_for_paper(paper.paper_id)
 
-    # Did the file land?
-    try:
-        data, digest = service.read(full_rel)
-        file_exists = True
-    except Exception:
-        data, digest = b"", None
-        file_exists = False
+    # Search for the file rather than assuming one prefix resolves it.
+    located = _locate_note_file(service, paper, rel_path, payload.get("papers_root_rel") or "")
+    file_exists = located is not None
+    digest = None
+    if located is not None:
+        try:
+            _data, digest = service.read(located)
+        except Exception:
+            file_exists = False
 
     if file_exists and note_row is not None:
         # Both sides present and the row points at the right note: nothing to
@@ -245,7 +281,7 @@ def _recover_create_note(
             operation="create_note",
             resolved=True,
             action="completed",
-            detail=f"note row rebuilt from the file on disk ({note_id})",
+            detail=f"note row rebuilt from {located}",
         )
 
     if not file_exists and note_row is not None:
@@ -261,15 +297,21 @@ def _recover_create_note(
             detail="note row exists but the file is absent; marked as missing",
         )
 
-    # Neither side exists: the crash happened before the first write, so the
-    # intent never took effect and there is nothing to finish.
+    # Nothing found anywhere. That is genuinely indistinguishable from "the
+    # write never happened", but the intent is not silently retired: it is
+    # recorded as unresolvable so an operator can see that a file the intent
+    # expected was never observed. Committing it would erase the only record
+    # that a write was attempted.
     return RecoveryOutcome(
         intent_id=intent_id,
         paper_id=paper.paper_id,
         operation="create_note",
-        resolved=True,
-        action="completed",
-        detail="neither the file nor the row was written; intent had no effect",
+        resolved=False,
+        action="no-evidence",
+        detail=(
+            f"no note file found for {paper.folder_relpath}/{rel_path} under any "
+            "known prefix; the write may never have happened, or the file moved"
+        ),
     )
 
 
