@@ -188,6 +188,68 @@ class WorkspaceStateUpdate(BaseModel):
     note_cursor_start: Optional[int] = None
     note_cursor_end: Optional[int] = None
     note_content_sha256: Optional[str] = None
+    #: Version the client last read. When supplied, a save is refused if the
+    #: stored state has moved on, so two tabs cannot silently overwrite each
+    #: other (last-write-wins).
+    expected_state_version: Optional[int] = None
+
+
+def _validate_position(source_id: str, position: Any) -> Dict[str, Any]:
+    """Validate one stored position against the frozen schema (ADR-007).
+
+    Positions were previously persisted as free-form JSON, so a client could
+    store `page_index: "seven"` and the breakage would only appear on restore.
+    Validation belongs here rather than in the browser because this is the
+    record every reader will trust.
+    """
+    if not isinstance(position, dict):
+        raise HTTPException(400, f"position for {source_id} must be an object")
+
+    kind = position.get("kind")
+    if kind not in {"PDF", "MARKDOWN"}:
+        raise HTTPException(400, f"position for {source_id} has unknown kind: {kind!r}")
+
+    if kind == "PDF":
+        page = position.get("page_index")
+        if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+            raise HTTPException(
+                400, f"PDF position for {source_id} needs a non-negative integer page_index"
+            )
+        ratio = position.get("page_offset_ratio", 0)
+        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 <= ratio <= 1:
+            raise HTTPException(
+                400, f"PDF position for {source_id} needs page_offset_ratio within 0..1"
+            )
+        scale = position.get("scale", 1)
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
+            raise HTTPException(400, f"PDF position for {source_id} needs a positive scale")
+        rotation = position.get("rotation", 0)
+        if rotation not in (0, 90, 180, 270):
+            raise HTTPException(
+                400, f"PDF position for {source_id} needs rotation in 0/90/180/270"
+            )
+    else:
+        heading = position.get("heading_path", [])
+        if not isinstance(heading, list) or any(not isinstance(h, str) for h in heading):
+            raise HTTPException(
+                400, f"Markdown position for {source_id} needs heading_path as a list of strings"
+            )
+        ratio = position.get("scroll_ratio", 0)
+        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 <= ratio <= 1:
+            raise HTTPException(
+                400, f"Markdown position for {source_id} needs scroll_ratio within 0..1"
+            )
+
+    # A position whose source version is unknown cannot be safely restored, so
+    # the field is required rather than optional.
+    version = position.get("source_version")
+    if version is not None and (
+        not isinstance(version, int) or isinstance(version, bool) or version < 0
+    ):
+        raise HTTPException(
+            400, f"position for {source_id} needs source_version as a non-negative integer"
+        )
+    return position
 
 
 # ------------------------------------------------------------------ helpers
@@ -369,12 +431,38 @@ def save_workspace_state(paper_id: str, body: WorkspaceStateUpdate):
     paper = _adopt(storage, paper, "workspace_state")
     existing = storage.get_workspace_state(paper_id)
 
+    # Two tabs both read version 4 and both save: without this check the second
+    # write silently wins and the first tab's reading position is lost.
+    if body.expected_state_version is not None and existing is not None:
+        if body.expected_state_version != existing.state_version:
+            raise HTTPException(
+                409,
+                f"workspace state changed: expected version "
+                f"{body.expected_state_version}, current {existing.state_version}",
+            )
+
+    positions = body.source_positions or (existing.source_positions if existing else {})
+    for source_id, position in positions.items():
+        _validate_position(source_id, position)
+
+    # An active source must belong to this paper, otherwise the reader opens a
+    # blank pane on restore and the cause is not obvious.
+    for field_name, candidate in (
+        ("active_pdf_source_id", body.active_pdf_source_id),
+        ("active_markdown_source_id", body.active_markdown_source_id),
+    ):
+        if not candidate:
+            continue
+        source = storage.get_source(candidate)
+        if source is None or source.paper_id != paper_id:
+            raise HTTPException(400, f"{field_name} does not belong to this paper")
+
     state = WorkspaceState(
         paper_id=paper_id,
         active_pdf_source_id=body.active_pdf_source_id,
         active_markdown_source_id=body.active_markdown_source_id,
         active_pane=body.active_pane if body.active_pane in {"PDF", "MARKDOWN", "NOTE"} else "PDF",
-        source_positions=body.source_positions or (existing.source_positions if existing else {}),
+        source_positions=positions,
         note_id=existing.note_id if existing else None,
         note_cursor_start=body.note_cursor_start,
         note_cursor_end=body.note_cursor_end,

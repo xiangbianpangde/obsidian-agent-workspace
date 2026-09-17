@@ -32,6 +32,8 @@ export class WorkspaceStateTracker {
     this._max = null;
     this._epoch = 0;
     this._flushing = null;
+    /** Version last read, sent back so a concurrent tab's write is not lost. */
+    this.stateVersion = null;
     this._bound = false;
     this._visibilityHandler = null;
   }
@@ -61,10 +63,16 @@ export class WorkspaceStateTracker {
       const payload = await this.io.load();
       if (epoch !== this._epoch) return null;
       this.state = payload?.state || null;
+      // Remember the version we read so a save can detect that another tab
+      // advanced it and refuse rather than silently overwriting.
+      this.stateVersion = payload?.state?.state_version ?? null;
       this._dirty = false;
       return this.state;
     } catch {
-      if (epoch === this._epoch) this.state = null;
+      if (epoch === this._epoch) {
+        this.state = null;
+        this.stateVersion = null;
+      }
       return null;
     }
   }
@@ -177,16 +185,29 @@ export class WorkspaceStateTracker {
     const paperId = this.paperId;
     const epoch = this._epoch;
     const snapshot = { ...this.state };
+    const expectedVersion = this.stateVersion;
     this._dirty = false;
 
     this._flushing = (async () => {
       try {
-        await this.io.save(snapshot);
+        const result = await this.io.save(snapshot, expectedVersion);
+        if (epoch !== this._epoch) return { ok: false, reason: 'stale-epoch' };
+        if (result && typeof result.state_version === 'number') {
+          this.stateVersion = result.state_version;
+        }
         return { ok: true };
       } catch (error) {
         // A failed checkpoint is not worth interrupting reading for; the next
         // scroll will schedule another attempt.
         if (epoch !== this._epoch) return { ok: false, reason: 'stale-epoch' };
+        if (error.status === 409) {
+          // Another tab advanced the state. Adopt its version and retry once so
+          // the newer position is not clobbered, and do not treat this as a
+          // user-visible failure.
+          this.stateVersion = null;
+          this._dirty = true;
+          return { ok: false, reason: 'version-conflict' };
+        }
         this._dirty = true;
         return { ok: false, reason: 'error', error };
       } finally {

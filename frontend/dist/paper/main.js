@@ -89,16 +89,20 @@ export class PaperWorkbench {
 
     this.workspaceState = new WorkspaceStateTracker({
       load: () => api.getWorkspaceState(this.selected.paper_id),
-      save: (state) =>
-        api.saveWorkspaceState(this.selected.paper_id, {
-          active_pane: state.active_pane || 'PDF',
-          active_pdf_source_id: state.active_pdf_source_id ?? null,
-          active_markdown_source_id: state.active_markdown_source_id ?? null,
-          source_positions: state.source_positions || {},
-          note_cursor_start: state.note_cursor_start ?? null,
-          note_cursor_end: state.note_cursor_end ?? null,
-          note_content_sha256: state.note_content_sha256 ?? null,
-        }),
+      save: (state, expectedVersion) =>
+        api.saveWorkspaceState(
+          this.selected.paper_id,
+          {
+            active_pane: state.active_pane || 'PDF',
+            active_pdf_source_id: state.active_pdf_source_id ?? null,
+            active_markdown_source_id: state.active_markdown_source_id ?? null,
+            source_positions: state.source_positions || {},
+            note_cursor_start: state.note_cursor_start ?? null,
+            note_cursor_end: state.note_cursor_end ?? null,
+            note_content_sha256: state.note_content_sha256 ?? null,
+          },
+          expectedVersion,
+        ),
     });
     this.workspaceState.bind();
     this.annotations = new AnnotationList(this.el.annHost, {

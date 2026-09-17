@@ -360,15 +360,93 @@ def test_workspace_state_round_trip(client, vault: Path):
         f"/api/paper/papers/{paper.paper_id}/workspace-state",
         json={
             "active_pane": "PDF",
-            "source_positions": {"src_x": {"page_index": 7, "page_offset_ratio": 0.25}},
+            "source_positions": {
+                "src_x": {
+                    "kind": "PDF",
+                    "page_index": 7,
+                    "page_offset_ratio": 0.25,
+                    "scale": 1,
+                    "rotation": 0,
+                    "source_version": 1,
+                }
+            },
             "note_cursor_start": 10,
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
 
     state = client.get(f"/api/paper/papers/{paper.paper_id}/workspace-state").json()["state"]
     assert state["source_positions"]["src_x"]["page_index"] == 7
     assert state["state_version"] == 1
+
+
+def test_workspace_state_rejects_free_form_positions(client, vault: Path):
+    """Positions were persisted as free-form JSON, so a bad value only failed
+    at restore time. Validation belongs on the record every reader trusts."""
+    _index(client.storage, vault)
+    paper = client.storage.list_papers()[0]
+    url = f"/api/paper/papers/{paper.paper_id}/workspace-state"
+
+    bad_positions = [
+        {"src_1": {"page_index": 7}},  # no kind
+        {"src_1": {"kind": "PDF", "page_index": "seven", "page_offset_ratio": 0}},
+        {"src_1": {"kind": "PDF", "page_index": -1, "page_offset_ratio": 0}},
+        {"src_1": {"kind": "PDF", "page_index": 1, "page_offset_ratio": 1.5}},
+        {"src_1": {"kind": "PDF", "page_index": 1, "page_offset_ratio": 0, "scale": 0}},
+        {"src_1": {"kind": "MARKDOWN", "heading_path": "not-a-list", "scroll_ratio": 0}},
+        {"src_1": {"kind": "MARKDOWN", "heading_path": [], "scroll_ratio": -1}},
+        {"src_1": "not-an-object"},
+    ]
+    for positions in bad_positions:
+        response = client.put(url, json={"active_pane": "PDF", "source_positions": positions})
+        # 400 from the explicit validator; 422 when Pydantic rejects the shape
+        # before it runs. Both are refusals, which is what matters here.
+        assert response.status_code in (400, 422), f"should reject {positions}"
+
+
+def test_workspace_state_rejects_foreign_active_source(client, vault: Path):
+    """An active source belonging to another paper would open a blank pane."""
+    from backend.app.paper.models import Paper, PaperSource, SourceRole, new_paper_id, new_source_id
+
+    _index(client.storage, vault)
+    paper = client.storage.list_papers()[0]
+
+    other_pid, other_sid = new_paper_id(), new_source_id()
+    client.storage.upsert_paper(
+        Paper(paper_id=other_pid, folder_relpath="方向/别的", display_title="o")
+    )
+    client.storage.upsert_source(
+        PaperSource(
+            source_id=other_sid,
+            paper_id=other_pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="b.pdf",
+        )
+    )
+
+    response = client.put(
+        f"/api/paper/papers/{paper.paper_id}/workspace-state",
+        json={"active_pane": "PDF", "active_pdf_source_id": other_sid},
+    )
+    assert response.status_code == 400
+
+
+def test_workspace_state_version_conflict_is_refused(client, vault: Path):
+    """Two tabs must not silently overwrite each other."""
+    _index(client.storage, vault)
+    paper = client.storage.list_papers()[0]
+    url = f"/api/paper/papers/{paper.paper_id}/workspace-state"
+
+    first = client.put(url, json={"active_pane": "PDF"})
+    assert first.status_code == 200
+    version = first.json()["state_version"]
+
+    # Tab A read version N, tab B already advanced it.
+    client.put(url, json={"active_pane": "PDF", "expected_state_version": version})
+
+    stale = client.put(url, json={"active_pane": "NOTE", "expected_state_version": version})
+    assert stale.status_code == 409
+    assert "version" in stale.json()["detail"]
 
 
 def test_workspace_state_version_increments(client, vault: Path):

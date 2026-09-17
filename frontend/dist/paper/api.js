@@ -79,11 +79,20 @@ export const api = {
     return request(`${BASE}/papers/${encodeURIComponent(paperId)}/workspace-state`);
   },
 
-  saveWorkspaceState(paperId, state) {
+  /**
+   * Persist reading state.
+   *
+   * `expectedVersion` is the state_version last read. Supplying it makes the
+   * server refuse a write when another tab has advanced the state, instead of
+   * silently letting the later write win.
+   */
+  saveWorkspaceState(paperId, state, expectedVersion = null) {
+    const payload = { ...state };
+    if (expectedVersion != null) payload.expected_state_version = expectedVersion;
     return request(`${BASE}/papers/${encodeURIComponent(paperId)}/workspace-state`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(state),
+      body: JSON.stringify(payload),
     });
   },
 
