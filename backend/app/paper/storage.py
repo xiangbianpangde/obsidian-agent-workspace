@@ -535,27 +535,38 @@ class PaperStorage:
             )
 
     def mark_sources_missing(self, paper_id: str, missing: Iterable[str]) -> None:
-        """Record that bound files vanished externally (tombstone, never delete)."""
+        """Record that the named bound files vanished externally.
+
+        Only the paths actually reported are stamped. The previous version first
+        marked *every* source of the paper as missing and then narrowed down,
+        so reporting one missing file marked all of them.
+        """
         stamp = utc_now()
+        targets = list(missing)
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN IMMEDIATE;")
             try:
-                cur.execute(
-                    "UPDATE paper_sources SET missing_since = ?, updated_at = ? "
-                    "WHERE paper_id = ? AND missing_since IS NULL",
-                    (stamp, stamp, paper_id),
-                )
-                for rel_path in missing:
+                for rel_path in targets:
                     cur.execute(
                         "UPDATE paper_sources SET missing_since = ?, updated_at = ? "
-                        "WHERE paper_id = ? AND rel_path = ?",
+                        "WHERE paper_id = ? AND rel_path = ? AND missing_since IS NULL",
                         (stamp, stamp, paper_id, rel_path),
                     )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
                 raise
+
+    def clear_missing(self, source_id: str) -> None:
+        """Clear a tombstone once the file is present again."""
+        stamp = utc_now()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE paper_sources SET missing_since = NULL, updated_at = ? "
+                "WHERE source_id = ?",
+                (stamp, source_id),
+            )
 
     # ------------------------------------------------------------------- notes
     def upsert_note(self, note: PaperNote) -> None:

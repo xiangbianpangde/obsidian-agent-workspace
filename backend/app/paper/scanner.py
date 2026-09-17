@@ -25,6 +25,7 @@ binding, because a wrong binding silently attaches the wrong file to a paper.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -178,6 +179,24 @@ def _nfc_key(rel_path: str) -> str:
     return unicodedata.normalize("NFC", rel_path)
 
 
+def _sha256_file(path: Path) -> Optional[str]:
+    """Content hash of one file, or None if it cannot be read.
+
+    Scanning used to record no hash at all, so version pinning had nothing to
+    compare against and a replaced PDF was indistinguishable from an unchanged
+    one. Only paper-sized files are hashed here (they already are), so this
+    stays cheap relative to the scan itself.
+    """
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _dir_depth(base: Path, current: Path) -> int:
     try:
         return len(current.relative_to(base).parts)
@@ -320,6 +339,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                 stat = pdf.stat()
                 source.size_bytes = stat.st_size
                 source.mtime_ns = stat.st_mtime_ns
+                source.sha256 = _sha256_file(pdf)
             except OSError:
                 pass
             sources.append(source)
@@ -346,6 +366,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                 stat = (current / name).stat()
                 source.size_bytes = stat.st_size
                 source.mtime_ns = stat.st_mtime_ns
+                source.sha256 = _sha256_file(current / name)
             except OSError:
                 pass
             sources.append(source)

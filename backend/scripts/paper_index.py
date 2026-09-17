@@ -83,10 +83,25 @@ def index_papers(dry_run: bool = False) -> dict:
         for source in paper.sources:
             prior = existing_sources.get(source.rel_path)
             if prior:
+                # Reuse identity, but only inherit the version when the bytes
+                # are actually unchanged. Blindly carrying source_version and
+                # sha256 forward made every file look immutable: replacing a
+                # PDF in place left version at 1, so `?version=1` kept serving
+                # the new file and 412 could never fire (ADR-009).
                 source.source_id = prior.source_id
                 source.created_at = prior.created_at
-                source.source_version = prior.source_version
-                source.sha256 = prior.sha256
+
+                changed = (
+                    prior.sha256 is None
+                    or prior.sha256 != source.sha256
+                    or (prior.size_bytes is not None and prior.size_bytes != source.size_bytes)
+                    or (prior.mtime_ns is not None and prior.mtime_ns != source.mtime_ns)
+                )
+                if changed:
+                    source.source_version = (prior.source_version or 1) + 1
+                else:
+                    source.source_version = prior.source_version or 1
+                    source.sha256 = prior.sha256
             source.paper_id = paper.paper_id
             storage.upsert_source(source)
             sources_written += 1

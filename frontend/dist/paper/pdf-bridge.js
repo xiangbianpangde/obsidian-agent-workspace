@@ -64,6 +64,9 @@ export class PdfBridge extends EventTarget {
     this._wired = false;
     this._viewerApp = null;
     this._busHandlers = null;
+    /** Incremented on every open(); stale probes and probes from a previous
+     *  document must not settle the current promise. */
+    this._generation = 0;
     this.pageCount = 0;
   }
 
@@ -76,6 +79,16 @@ export class PdfBridge extends EventTarget {
    */
   async open(contentUrl, opts = {}) {
     if (this._disposed) throw new PdfBridgeError('bridge disposed');
+
+    // Every open is a new generation. Without this the second open() reuses a
+    // bridge whose `ready` flag is still true, so _markReady() returns early,
+    // the new ready promise never settles, and the call times out after 15s
+    // even though the document loaded fine.
+    const generation = ++this._generation;
+    this._detachViewerEvents();
+    this.ready = false;
+    this.pageCount = 0;
+
     this._sourceId = opts.sourceId ?? null;
     this._sourceVersion = opts.sourceVersion ?? null;
     this._currentPage = opts.pageIndex ?? 0;
@@ -95,6 +108,7 @@ export class PdfBridge extends EventTarget {
     this.iframe.src = url;
 
     const timer = setTimeout(() => {
+      if (generation !== this._generation) return;
       this._readyReject?.(
         new PdfBridgeError('viewer did not become ready in time', 'HANDSHAKE_TIMEOUT')
       );
@@ -108,6 +122,21 @@ export class PdfBridge extends EventTarget {
 
     if (opts.pageIndex) this.goToPage(opts.pageIndex);
     return this;
+  }
+
+  /** Unbind the previous document's event handlers before loading another. */
+  _detachViewerEvents() {
+    try {
+      const bus = this._viewerApp?.eventBus;
+      if (bus && this._busHandlers) {
+        for (const [name, handler] of this._busHandlers) bus.off?.(name, handler);
+      }
+    } catch {
+      /* the frame is going away regardless */
+    }
+    this._busHandlers = null;
+    this._viewerApp = null;
+    this._wired = false;
   }
 
   _createIframe() {
@@ -138,12 +167,13 @@ export class PdfBridge extends EventTarget {
    * embedding. We poll that same-origin surface, which is the documented
    * integration point rather than a private class name.
    *
-   * No handshake timeout can fire on a slow, large PDF: so this waits for
-   * `initialized` and then for `pdfDocument`, and reports progress via the
-   * `loadingprogress` event instead of failing.
+   * A slow, large PDF is surfaced through `loadingprogress` events rather than
+   * being mistaken for a failure; the handshake timeout still applies as a
+   * backstop for a viewer that never initialises at all.
    */
   _probeReady(attempt = 0) {
     if (this._disposed) return;
+    const generation = this._generation;
 
     let app = null;
     try {
@@ -151,6 +181,10 @@ export class PdfBridge extends EventTarget {
     } catch {
       app = null; // not same-origin yet
     }
+
+    // A previous document may still be installed while the new one loads;
+    // only the current generation may settle the promise.
+    if (generation !== this._generation) return;
 
     if (app && app.initialized && app.pdfDocument) {
       this._wireViewerEvents(app);

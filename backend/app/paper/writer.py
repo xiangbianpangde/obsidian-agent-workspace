@@ -83,6 +83,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write the whole buffer, tolerating short writes.
+
+    ``os.write`` may legally write fewer bytes than requested; treating a
+    partial write as complete silently truncates the file. Notes, manifests and
+    annotation sidecars all go through here, so a truncation would corrupt
+    authoritative content.
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write: no progress")
+        view = view[written:]
+
+
 class VaultWriteService:
     """All Vault mutations for the paper subsystem funnel through here."""
 
@@ -104,15 +120,17 @@ class VaultWriteService:
             else Path.home() / ".personal-ai-workspace" / "papers" / "backups"
         )
         self.excluded_segments = excluded_segments
-        self._locks: Dict[str, threading.Lock] = {}
+        # Re-entrant: save() legitimately calls create() while holding the lock
+        # for the same path, and a plain Lock deadlocks on that re-entry.
+        self._locks: Dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
     # ------------------------------------------------------------------ paths
-    def _lock_for(self, key: str) -> threading.Lock:
+    def _lock_for(self, key: str) -> threading.RLock:
         with self._locks_guard:
             lock = self._locks.get(key)
             if lock is None:
-                lock = threading.Lock()
+                lock = threading.RLock()
                 self._locks[key] = lock
             return lock
 
@@ -120,12 +138,27 @@ class VaultWriteService:
     def _nfc(value: str) -> str:
         return unicodedata.normalize("NFC", value)
 
+    def _reject_excluded(self, parts: tuple[str, ...], rel_path: str) -> None:
+        if any(part in self.excluded_segments for part in parts):
+            raise PathRejected(f"path is in an excluded area: {rel_path}")
+
     def resolve(self, rel_path: str) -> Path:
         """Resolve a vault-relative path, refusing escapes and excluded areas.
 
         Writing is the dangerous direction, so this is stricter than a read
-        resolution: absolute paths, ``..`` traversal, symlink escapes and
-        excluded segments are all rejected outright.
+        resolution. Three independent checks are required, and the first two
+        must happen **before** any symlink is followed:
+
+        1. lexical checks on the requested path (absolute / ``..`` / excluded);
+        2. an ``lstat`` walk of the *requested* segments, which is the only
+           point where an internal symlink is still visible as a symlink;
+        3. the same excluded-area check again on the *resolved* path, because
+           resolution can land somewhere the requested path never mentioned.
+
+        Checking only the requested path misses ``alias/config`` when
+        ``alias -> .git``: the requested parts contain neither ``..`` nor
+        ``.git``, and walking up from the resolved candidate finds no symlink
+        because resolution already followed it.
         """
         raw = (rel_path or "").strip()
         if not raw:
@@ -135,22 +168,33 @@ class VaultWriteService:
         parts = Path(raw).parts
         if any(part == ".." for part in parts):
             raise PathRejected(f"path traversal rejected: {rel_path}")
-        if any(part in self.excluded_segments for part in parts):
-            raise PathRejected(f"path is in an excluded area: {rel_path}")
+        self._reject_excluded(parts, rel_path)
+
+        # (2) Walk the requested segments without following symlinks. Any
+        # symlink on the chain is refused outright: this subsystem never needs
+        # one, and permitting them makes the write boundary unverifiable.
+        probe = self.vault_root
+        for index, part in enumerate(parts):
+            probe = probe / part
+            try:
+                stat = probe.lstat()
+            except FileNotFoundError:
+                # Remaining segments do not exist yet, which is normal for a
+                # create. Nothing further can be a symlink.
+                break
+            if stat.st_mode and (stat.st_mode & 0o170000) == 0o120000:
+                raise PathRejected(
+                    f"symlink in path rejected: {rel_path} (at '{part}')"
+                )
 
         candidate = (self.vault_root / raw).resolve(strict=False)
         try:
-            candidate.relative_to(self.vault_root)
+            resolved_rel = candidate.relative_to(self.vault_root)
         except ValueError as exc:
             raise PathRejected(f"path escapes the vault: {rel_path}") from exc
 
-        # Reject symlinks anywhere along the chain: a symlinked parent could
-        # redirect the write outside the vault even though the path looks local.
-        probe = candidate
-        while probe != self.vault_root and probe.parent != probe:
-            if probe.exists() and probe.is_symlink():
-                raise PathRejected(f"symlink in path rejected: {rel_path}")
-            probe = probe.parent
+        # (3) Re-check the destination, which resolution may have redirected.
+        self._reject_excluded(resolved_rel.parts, rel_path)
         return candidate
 
     def relpath(self, full: Path) -> str:
@@ -194,7 +238,7 @@ class VaultWriteService:
         try:
             fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             try:
-                os.write(fd, data)
+                _write_all(fd, data)
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -248,7 +292,7 @@ class VaultWriteService:
             try:
                 fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 try:
-                    os.write(fd, data)
+                    _write_all(fd, data)
                     os.fsync(fd)
                 finally:
                     os.close(fd)

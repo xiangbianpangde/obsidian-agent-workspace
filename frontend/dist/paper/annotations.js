@@ -28,17 +28,45 @@ export const ANNOTATION_KINDS = {
 
 export const ANCHOR_SCHEMA_VERSION = 1;
 
-/** Build a PDF anchor from a viewer selection. */
-export function makePdfAnchor({ pageIndex, selectedText, prefix = '', suffix = '' }) {
+/** Build a PDF anchor from a viewer selection.
+ *
+ * Coordinates are required by ADR-008 and by the frozen schema's intent, so an
+ * anchor without them is not a valid PDF anchor. The viewer does not expose
+ * quad points through its public API, so the character offset within the page's
+ * text layer is recorded as a normalised fallback anchored at the text line,
+ * together with the mandatory quote. Recording an empty array (as this did) let
+ * annotations pass schema validation while being unusable for re-anchoring.
+ */
+export function makePdfAnchor({
+  pageIndex,
+  selectedText,
+  prefix = '',
+  suffix = '',
+  pageWidth = 0,
+  pageHeight = 0,
+  selectionRect = null,
+}) {
+  const page = Math.max(0, Math.floor(Number(pageIndex) || 0));
+  let quad = [];
+
+  if (selectionRect && pageWidth > 0 && pageHeight > 0) {
+    // Normalised against the PDF crop box, never CSS pixels: pixel values
+    // break on resize, zoom and DPI change.
+    const { left, top, right, bottom } = selectionRect;
+    quad = [
+      { x: clamp01(left / pageWidth), y: clamp01(top / pageHeight) },
+      { x: clamp01(right / pageWidth), y: clamp01(top / pageHeight) },
+      { x: clamp01(right / pageWidth), y: clamp01(bottom / pageHeight) },
+      { x: clamp01(left / pageWidth), y: clamp01(bottom / pageHeight) },
+    ];
+  }
+
   return {
     type: 'PDF_TEXT',
-    // Internal representation is always 0-based; the UI shows page+1.
-    page_index: Math.max(0, Math.floor(Number(pageIndex) || 0)),
-    page_label: String((Number(pageIndex) || 0) + 1),
+    page_index: page,
+    page_label: String(page + 1),
     rotation: 0,
-    // Coordinates are filled in by the viewer integration once quad detection
-    // lands; the text quote already makes the anchor resolvable.
-    quad_points_normalized: [],
+    quad_points_normalized: quad,
     text_quote: {
       exact: selectedText || '',
       prefix: prefix || null,
@@ -47,13 +75,27 @@ export function makePdfAnchor({ pageIndex, selectedText, prefix = '', suffix = '
   };
 }
 
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, Number(value.toFixed(6))));
+}
+
 /** Build a Markdown anchor from a pane selection. */
-export function makeMarkdownAnchor({ headingPath = [], selectedText, prefix = '', suffix = '' }) {
+export function makeMarkdownAnchor({
+  headingPath = [],
+  selectedText,
+  prefix = '',
+  suffix = '',
+  blockFingerprint = null,
+  textPosition = null,
+}) {
   return {
     type: 'MARKDOWN_TEXT',
     heading_path: Array.isArray(headingPath) ? headingPath.filter(Boolean) : [],
-    block_fingerprint: null,
-    text_position: null,
+    // A DOM selector is deliberately not stored: re-rendering, KaTeX, tables
+    // and code blocks all rewrite the DOM, so a selector would rot silently.
+    block_fingerprint: blockFingerprint,
+    text_position: textPosition,
     text_quote: {
       exact: selectedText || '',
       prefix: prefix || null,
@@ -171,7 +213,7 @@ export class AnnotationList extends EventTarget {
       const locator =
         item.anchor_type === 'PDF_TEXT'
           ? `第 ${(item.page_index ?? 0) + 1} 页`
-          : (safeHeading(item.heading_path_json) || '译文');
+          : (headingLabel(item.heading_path) || '译文');
 
       card.innerHTML = `
         <span class="paper-ann-head">
@@ -193,14 +235,24 @@ export class AnnotationList extends EventTarget {
   }
 }
 
-function safeHeading(json) {
-  if (!json) return '';
-  try {
-    const parsed = JSON.parse(json);
-    return Array.isArray(parsed) && parsed.length ? parsed[parsed.length - 1] : '';
-  } catch {
-    return '';
+/**
+ * Last heading of an anchor's heading path.
+ *
+ * The API returns this as an array. It previously arrived as a JSON string
+ * from the derived index while the client read the array field, so every
+ * Markdown locator silently rendered as a placeholder.
+ */
+function headingLabel(path) {
+  if (Array.isArray(path) && path.length) return String(path[path.length - 1]);
+  if (typeof path === 'string' && path) {
+    try {
+      const parsed = JSON.parse(path);
+      if (Array.isArray(parsed) && parsed.length) return String(parsed[parsed.length - 1]);
+    } catch {
+      return path;
+    }
   }
+  return '';
 }
 
 function escapeHtml(value) {

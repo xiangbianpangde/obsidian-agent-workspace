@@ -298,14 +298,10 @@ export class PaperWorkbench {
       if (Number.isFinite(page)) this.pdf.goToPage(page);
       return;
     }
-    if (item.anchor_type === 'MARKDOWN_TEXT' && item.heading_path_json) {
-      try {
-        const path = JSON.parse(item.heading_path_json);
-        const target = Array.isArray(path) ? path[path.length - 1] : null;
-        if (target) this.markdown.scrollToHeading?.(target);
-      } catch {
-        /* heading path is best effort */
-      }
+    if (item.anchor_type === 'MARKDOWN_TEXT') {
+      const path = item.heading_path;
+      const target = Array.isArray(path) && path.length ? path[path.length - 1] : null;
+      if (target) this.markdown.scrollToHeading?.(target);
     }
   }
 

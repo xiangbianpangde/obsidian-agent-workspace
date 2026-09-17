@@ -109,7 +109,9 @@ export const api = {
 
   /** Raw text of a markdown source (translations, MinerU extractions). */
   sourceText(sourceId) {
-    return fetch(`${SOURCES}/${encodeURIComponent(sourceId)}/content`, {
+    // Markdown is served by /text as text/plain; /content is PDF-only and
+    // answers 415 for a rendered document.
+    return fetch(`${SOURCES}/${encodeURIComponent(sourceId)}/text`, {
       cache: 'no-store',
       headers: { Accept: 'text/markdown, text/plain, */*' },
     }).then(async (response) => {

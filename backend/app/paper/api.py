@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -28,6 +29,12 @@ from pydantic import BaseModel, Field
 from ..state import get_cfg
 from . import ANNOTATION_STORE_FILENAME, storage as paper_storage
 from .contracts import validate_annotations
+from .manifest import (
+    DEPENDENT_OPERATIONS,
+    AdoptionRequired,
+    ManifestError,
+    ensure_adopted,
+)
 from .models import (
     Paper,
     PaperNote,
@@ -75,18 +82,54 @@ def _storage() -> paper_storage.PaperStorage:
     return paper_storage.PaperStorage()
 
 
+# --------------------------------------------------------------------- locks
+#
+# `_service()` used to build a fresh VaultWriteService per request, so its
+# per-path locks were per-request and serialised nothing across requests. The
+# service is now a module-level singleton, and annotation read-modify-write
+# cycles take an additional per-paper lock, because the unit that must be
+# atomic is "load sidecar -> mutate -> save", not a single file operation.
+
+_service_singleton: Optional[VaultWriteService] = None
+_service_lock = threading.Lock()
+_paper_locks: Dict[str, threading.RLock] = {}
+_paper_locks_guard = threading.Lock()
+
+
 def _service() -> VaultWriteService:
+    global _service_singleton
     cfg = get_cfg()
-    return VaultWriteService(cfg.vault_root)
+    with _service_lock:
+        if _service_singleton is None or _service_singleton.vault_root != cfg.vault_root:
+            _service_singleton = VaultWriteService(cfg.vault_root)
+        return _service_singleton
+
+
+def _paper_lock(paper_id: str) -> threading.RLock:
+    with _paper_locks_guard:
+        lock = _paper_locks.get(paper_id)
+        if lock is None:
+            lock = threading.RLock()
+            _paper_locks[paper_id] = lock
+        return lock
 
 
 def _papers_root_ptr() -> Path:
+    """Vault-relative location of the papers root.
+
+    Fails closed. Returning ``Path(".")`` when the configuration is broken used
+    to write files to the Vault root instead of the papers root — turning a
+    serious misconfiguration into silent data placement in the wrong place.
+    """
     cfg = get_cfg()
     root = cfg.papers_root_or_default
     try:
         return root.relative_to(cfg.vault_root)
-    except ValueError:
-        return Path(".")
+    except ValueError as exc:
+        raise HTTPException(
+            500,
+            "papers root is not inside the vault; refusing to resolve any paper path",
+        ) from exc
 
 
 def _paper_rel(paper: Paper, *parts: str) -> str:
@@ -198,6 +241,34 @@ def _require_paper(storage: paper_storage.PaperStorage, paper_id: str) -> Paper:
     return paper
 
 
+def _adopt(
+    storage: paper_storage.PaperStorage, paper: Paper, operation: str
+) -> Paper:
+    """Anchor identity in the Vault before any dependent state is written.
+
+    This is the gate ADR-006 requires. Without it a paper's identity exists
+    only in SQLite, so a rebuild detaches every note, annotation and reading
+    position from its paper.
+    """
+    if operation not in DEPENDENT_OPERATIONS:
+        raise HTTPException(500, f"internal: unknown adoption trigger {operation}")
+    try:
+        sources = storage.list_sources(paper.paper_id, include_inactive=True)
+        base = _papers_root_ptr()
+        paper = ensure_adopted(
+            storage,
+            _service(),
+            paper,
+            sources,
+            operation=operation,
+            papers_root_rel=str(base) if str(base) != "." else "",
+        )
+    except ManifestError as exc:
+        raise HTTPException(500, f"cannot adopt paper: {exc}") from exc
+    storage.upsert_paper(paper, allow_folder_move=True)
+    return paper
+
+
 # ------------------------------------------------------------------- papers
 
 
@@ -246,6 +317,8 @@ def list_sources(paper_id: str):
 def set_status(paper_id: str, body: StatusUpdate):
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    # Identity must be anchored before the reading state is recorded.
+    paper = _adopt(storage, paper, "status_change")
     try:
         target = PaperStatus.parse(body.status)
     except ValueError as exc:
@@ -286,7 +359,8 @@ def save_workspace_state(paper_id: str, body: WorkspaceStateUpdate):
     from .models import WorkspaceState
 
     storage = _storage()
-    _require_paper(storage, paper_id)
+    paper = _require_paper(storage, paper_id)
+    paper = _adopt(storage, paper, "workspace_state")
     existing = storage.get_workspace_state(paper_id)
 
     state = WorkspaceState(
@@ -355,40 +429,41 @@ def create_note(paper_id: str, body: NoteCreate):
     paper = _require_paper(storage, paper_id)
     if storage.get_note_for_paper(paper_id) is not None:
         raise HTTPException(409, "note already exists for this paper")
+    # The note will reference this paper, so the identity must already exist in
+    # the Vault for a rebuild to be able to re-attach it.
+    paper = _adopt(storage, paper, "note_creation")
 
     rel = body.rel_path or "notes.md"
     if not rel.endswith(".md"):
         raise HTTPException(400, "note path must end with .md")
 
-    full_rel = _paper_rel(paper, rel)
-    # Seed the frontmatter with the stable ids so the note can be re-identified
-    # if the file is renamed. Status is deliberately NOT written here: it is
-    # SQLite-owned and must never be duplicated into the Vault (ADR-007).
-    content = body.content or (
-        "---\n"
-        f"paper_id: {paper.paper_id}\n"
-        f"paper_note_id: {new_note_id()}\n"
-        "paper_role: notes\n"
-        "tags: []\n"
-        "---\n\n"
-        "# 阅读笔记\n\n"
-        "## 核心内容\n\n"
-        "## 关键结论\n\n"
-        "## 我的理解\n\n"
-        "## 创新点\n\n"
-        "## 疑问\n\n"
-        "## 可复用思想\n\n"
-        "## 批注记录\n"
-    )
+    # One identity, generated once, written both to the note's frontmatter and
+    # to SQLite. Generating it twice produced a note whose Vault-side id could
+    # never match the database row, so the note could not be recovered from the
+    # Vault after a rebuild — which defeats the point of storing it there.
+    note_id = new_note_id()
 
+    body_text = body.content if body.content else DEFAULT_NOTE_BODY.format(note_id=note_id, paper_id=paper.paper_id)
+    content = _ensure_note_frontmatter(body_text, paper.paper_id, note_id)
+
+    full_rel = _paper_rel(paper, rel)
+
+    # The file is created before the database row. If the process dies in
+    # between, the note exists in the Vault with no row — recoverable by
+    # re-reading its frontmatter — rather than a row pointing at nothing.
+    intent = storage.begin_write_intent(paper_id, "create_note", {"rel_path": rel, "note_id": note_id})
     try:
         result = _service().create(full_rel, content)
     except AlreadyExistsError as exc:
+        storage.fail_write_intent(intent, "already exists")
         raise HTTPException(409, str(exc)) from exc
     except PathRejected as exc:
+        storage.fail_write_intent(intent, str(exc))
         raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        storage.fail_write_intent(intent, str(exc))
+        raise
 
-    note_id = new_note_id()
     storage.upsert_note(
         PaperNote(
             note_id=note_id,
@@ -399,6 +474,7 @@ def create_note(paper_id: str, body: NoteCreate):
     )
     paper.note_id = note_id
     storage.upsert_paper(paper, allow_folder_move=True)
+    storage.commit_write_intent(intent)
 
     return _no_store(
         {
@@ -409,6 +485,51 @@ def create_note(paper_id: str, body: NoteCreate):
             "content": content,
         }
     )
+
+
+DEFAULT_NOTE_BODY = (
+    "---\n"
+    "paper_id: {paper_id}\n"
+    "paper_note_id: {note_id}\n"
+    "paper_role: notes\n"
+    "tags: []\n"
+    "---\n\n"
+    "# 阅读笔记\n\n"
+    "## 核心内容\n\n"
+    "## 关键结论\n\n"
+    "## 我的理解\n\n"
+    "## 创新点\n\n"
+    "## 疑问\n\n"
+    "## 可复用思想\n\n"
+    "## 批注记录\n"
+)
+
+
+def _ensure_note_frontmatter(text: str, paper_id: str, note_id: str) -> str:
+    """Guarantee the note carries its stable ids.
+
+    Client-supplied content previously skipped the frontmatter entirely, so a
+    note written from the editor had no paper_id and could not be re-identified
+    after a rename. Status is deliberately never included: it is SQLite-owned
+    and duplicating it into the Vault would create a second authority (ADR-007).
+    """
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            front = text[: end + 4]
+            body = text[end + 4 :].lstrip("\n")
+            additions = []
+            if f"paper_id: {paper_id}" not in front:
+                additions.append(f"paper_id: {paper_id}")
+            if f"paper_note_id: {note_id}" not in front:
+                additions.append(f"paper_note_id: {note_id}")
+            if not additions:
+                return text
+            merged = front.rstrip()
+            if merged.endswith("---"):
+                merged = merged[:-3].rstrip()
+            return merged + "\n" + "\n".join(additions) + "\n---\n\n" + body
+    return f"---\npaper_id: {paper_id}\npaper_note_id: {note_id}\npaper_role: notes\n---\n\n{text}"
 
 
 @router.put("/papers/{paper_id}/note")
@@ -460,23 +581,49 @@ def _sidecar_relpath(paper: Paper) -> str:
     return _paper_rel(paper, ANNOTATION_STORE_FILENAME)
 
 
+class SidecarCorruptError(Exception):
+    """The sidecar exists but cannot be parsed.
+
+    Raised rather than degrading to an empty document: overwriting the bytes of
+    a corrupt sidecar would destroy annotations the user may still be able to
+    recover by hand, and would do so silently.
+    """
+
+
 def _read_sidecar(paper: Paper) -> Dict[str, Any]:
     """Read the authoritative annotation sidecar (ADR-008).
 
     A missing sidecar is legal: a paper with no annotations yet has none, and
     creating an empty one on read would write to the Vault without cause.
+
+    An *unreadable* sidecar is not the same thing as a missing one and must
+    fail closed.
     """
     rel = _sidecar_relpath(paper)
     try:
         data, digest = _service().read(rel)
     except Exception:
-        return {"schema_version": 1, "paper_id": paper.paper_id, "annotations": [], "_hash": None}
+        # Genuinely absent: first annotation for this paper.
+        return {
+            "schema_version": 1,
+            "paper_id": paper.paper_id,
+            "annotations": [],
+            "_hash": None,
+            "_exists": False,
+        }
     try:
         parsed = json.loads(data.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        logger.warning("annotation sidecar is not valid JSON: %s", rel)
-        return {"schema_version": 1, "paper_id": paper.paper_id, "annotations": [], "_hash": digest, "_corrupt": True}
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SidecarCorruptError(
+            f"annotation sidecar is not valid JSON and must be repaired by hand: {rel}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise SidecarCorruptError(
+            f"annotation sidecar is not a JSON object: {rel}"
+        )
+    parsed.setdefault("annotations", [])
     parsed["_hash"] = digest
+    parsed["_exists"] = True
     return parsed
 
 
@@ -495,17 +642,50 @@ def _write_sidecar(paper: Paper, document: Dict[str, Any], expected_hash: Option
     rel = _sidecar_relpath(paper)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     service = _service()
+
     if expected_hash is None:
         try:
             return service.create(rel, text)
         except AlreadyExistsError:
-            # Sidecar appeared between read and write; re-read and retry as save.
-            current = _read_sidecar(paper)
-            return service.save(rel, text, expected_hash=current.get("_hash"))
+            # The sidecar appeared between our read and our write. Re-read it
+            # and report the new hash so the caller can re-apply its mutation
+            # to the *current* document. Writing our stale payload here with
+            # the fresh hash is exactly how a concurrent annotation gets
+            # silently deleted.
+            raise SidecarStaleError()
     try:
         return service.save(rel, text, expected_hash=expected_hash)
     except ConflictError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise SidecarStaleError() from exc
+
+
+class SidecarStaleError(Exception):
+    """The sidecar changed between load and save; the caller must retry."""
+
+
+def _mutate_sidecar(paper: Paper, mutation: Any, *, attempts: int = 5) -> Tuple[Dict[str, Any], Any]:
+    """Apply a mutation to the sidecar under a per-paper lock, with retry.
+
+    The unit that must be atomic is load -> mutate -> save, not a single file
+    write. Every retry re-reads the current document and re-applies the
+    mutation, so two concurrent annotations both survive instead of the second
+    one overwriting the first.
+    """
+    with _paper_lock(paper.paper_id):
+        last_error: Optional[Exception] = None
+        for _ in range(attempts):
+            document = _read_sidecar(paper)  # propagates SidecarCorruptError
+            result = mutation(document)
+            try:
+                written = _write_sidecar(paper, document, document.get("_hash"))
+                return document, written
+            except SidecarStaleError as exc:
+                last_error = exc
+                continue
+        raise HTTPException(
+            409,
+            "annotation store kept changing during the write; please retry",
+        ) from last_error
 
 
 def _reindex_annotations(storage: Any, paper: Paper, document: Dict[str, Any]) -> None:
@@ -538,19 +718,66 @@ def _reindex_annotations(storage: Any, paper: Paper, document: Dict[str, Any]) -
 
 @router.get("/papers/{paper_id}/annotations")
 def list_annotations(paper_id: str):
+    """List annotations, flattened for the client.
+
+    The sidecar stores the locator nested under ``anchor``; the list view and
+    the jump handler need a flat shape, and reading it from the sidecar keeps
+    this endpoint authoritative instead of depending on the derived index. A
+    corrupt sidecar is reported rather than silently presented as empty.
+    """
     storage = _storage()
     paper = _require_paper(storage, paper_id)
-    document = _read_sidecar(paper)
+    try:
+        document = _read_sidecar(paper)
+    except SidecarCorruptError as exc:
+        return _no_store(
+            {
+                "paper_id": paper_id,
+                "sidecar_hash": None,
+                "corrupt": True,
+                "error": str(exc),
+                "annotations": [],
+            }
+        )
+
     return _no_store(
         {
             "paper_id": paper_id,
             "sidecar_hash": document.get("_hash"),
-            "corrupt": bool(document.get("_corrupt")),
-            "annotations": [
-                a for a in document.get("annotations", [])
-            ],
+            "corrupt": False,
+            "annotations": [_flatten_annotation(a) for a in document.get("annotations", [])],
         }
     )
+
+
+def _flatten_annotation(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a sidecar record into the flat shape the client consumes.
+
+    Emitting the raw record produced a shape mismatch: the client read
+    ``anchor_type`` / ``page_index`` at the top level while they live under
+    ``anchor``, so every locator label and jump silently did nothing.
+    """
+    anchor = record.get("anchor") or {}
+    heading_path = anchor.get("heading_path")
+    return {
+        "annotation_id": record.get("annotation_id"),
+        "source_id": record.get("source_id"),
+        "kind": record.get("kind"),
+        "body_markdown": record.get("body_markdown") or "",
+        "selected_text": record.get("selected_text"),
+        "anchor_type": anchor.get("type"),
+        "page_index": anchor.get("page_index"),
+        "heading_path": heading_path if isinstance(heading_path, list) else None,
+        "text_quote": (anchor.get("text_quote") or {}).get("exact"),
+        "anchor": anchor,
+        "source_sha256": record.get("source_sha256"),
+        "source_version": record.get("source_version"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "deleted_at": record.get("deleted_at"),
+        "orphaned_at": record.get("orphaned_at"),
+        "revision": record.get("revision", 1),
+    }
 
 
 @router.post("/papers/{paper_id}/annotations")
@@ -561,35 +788,49 @@ def create_annotation(paper_id: str, body: AnnotationCreate):
     if body.kind not in ANNOTATION_KINDS:
         raise HTTPException(400, f"unknown annotation kind: {body.kind}")
 
-    document = _read_sidecar(paper)
-    anchors = {a.get("annotation_id") for a in document.get("annotations", [])}
+    # The sidecar records paper_id, so the identity must be in the Vault first.
+    paper = _adopt(storage, paper, "annotation_creation")
+
+    # The source identity, hash and version are derived from the bound source,
+    # never taken from the client. Trusting them let a caller attach an
+    # annotation to another paper's source, or stamp a fabricated hash that
+    # no orphan check could ever contradict.
+    source = storage.get_source(body.source_id)
+    if source is None or not source.active:
+        raise HTTPException(404, f"unknown or inactive source: {body.source_id}")
+    if source.paper_id != paper_id:
+        raise HTTPException(400, "source does not belong to this paper")
+
     annotation_id = new_annotation_id()
-    while annotation_id in anchors:  # pragma: no cover - astronomically unlikely
-        annotation_id = new_annotation_id()
-
     now = utc_now()
-    record = {
-        "annotation_id": annotation_id,
-        "source_id": body.source_id,
-        "kind": body.kind,
-        "body_markdown": body.body_markdown or "",
-        "selected_text": body.selected_text,
-        "anchor_schema_version": 1,
-        "anchor": body.anchor,
-        "source_sha256": body.source_sha256 or "0" * 64,
-        "source_version": body.source_version,
-        "created_at": now,
-        "updated_at": now,
-        "deleted_at": None,
-        "orphaned_at": None,
-        "revision": 1,
-    }
-    document.setdefault("annotations", []).append(record)
 
-    result = _write_sidecar(paper, document, document.get("_hash"))
+    def mutation(document: Dict[str, Any]) -> None:
+        record = {
+            "annotation_id": annotation_id,
+            "source_id": source.source_id,
+            "kind": body.kind,
+            "body_markdown": body.body_markdown or "",
+            "selected_text": body.selected_text,
+            "anchor_schema_version": 1,
+            "anchor": body.anchor,
+            "source_sha256": source.sha256 or ("0" * 64),
+            "source_version": source.source_version or 1,
+            "created_at": now,
+            "updated_at": now,
+            "deleted_at": None,
+            "orphaned_at": None,
+            "revision": 1,
+        }
+        document.setdefault("annotations", []).append(record)
+
+    try:
+        document, written = _mutate_sidecar(paper, mutation)
+    except SidecarCorruptError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     _reindex_annotations(storage, paper, document)
     return _no_store(
-        {"ok": True, "annotation_id": annotation_id, "sidecar_hash": result.new_hash}
+        {"ok": True, "annotation_id": annotation_id, "sidecar_hash": written.new_hash}
     )
 
 
@@ -598,26 +839,38 @@ def delete_annotation(paper_id: str, annotation_id: str):
     """Soft delete.
 
     ADR-002 applies here exactly as elsewhere: the record stays in the array
-    with a `deleted_at` stamp so history is never destroyed.
+    with a ``deleted_at`` stamp so history is never destroyed.
     """
     storage = _storage()
     paper = _require_paper(storage, paper_id)
-    document = _read_sidecar(paper)
 
-    target = next(
-        (a for a in document.get("annotations", []) if a.get("annotation_id") == annotation_id),
-        None,
-    )
-    if target is None:
-        raise HTTPException(404, f"unknown annotation: {annotation_id}")
+    box: Dict[str, Any] = {}
 
-    target["deleted_at"] = utc_now()
-    target["updated_at"] = target["deleted_at"]
-    target["revision"] = int(target.get("revision", 1)) + 1
+    def mutation(document: Dict[str, Any]) -> None:
+        target = next(
+            (
+                a
+                for a in document.get("annotations", [])
+                if a.get("annotation_id") == annotation_id
+            ),
+            None,
+        )
+        if target is None:
+            raise HTTPException(404, f"unknown annotation: {annotation_id}")
+        target["deleted_at"] = utc_now()
+        target["updated_at"] = target["deleted_at"]
+        target["revision"] = int(target.get("revision", 1)) + 1
+        box["deleted_at"] = target["deleted_at"]
 
-    result = _write_sidecar(paper, document, document.get("_hash"))
+    try:
+        document, written = _mutate_sidecar(paper, mutation)
+    except SidecarCorruptError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     _reindex_annotations(storage, paper, document)
-    return _no_store({"ok": True, "deleted_at": target["deleted_at"], "sidecar_hash": result.new_hash})
+    return _no_store(
+        {"ok": True, "deleted_at": box["deleted_at"], "sidecar_hash": written.new_hash}
+    )
 
 
 # ------------------------------------------------------------------ config

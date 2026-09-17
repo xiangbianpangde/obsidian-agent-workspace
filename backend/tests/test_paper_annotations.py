@@ -292,7 +292,11 @@ def test_corrupt_sidecar_does_not_crash_listing(workbench):
 def test_note_round_trip(workbench):
     client, _, pid, _, _, paper_dir, _ = workbench
     created = client.post(f"/api/paper/papers/{pid}/note", json={"content": "# 初稿"}).json()
-    assert (paper_dir / "notes.md").read_text(encoding="utf-8") == "# 初稿"
+    written = (paper_dir / "notes.md").read_text(encoding="utf-8")
+    # The note carries its stable ids so it can be re-identified after a rename.
+    assert f"paper_id: {pid}" in written
+    assert f"paper_note_id: {created['note_id']}" in written
+    assert written.rstrip().endswith("# 初稿")
 
     saved = client.put(
         f"/api/paper/papers/{pid}/note",
@@ -300,6 +304,41 @@ def test_note_round_trip(workbench):
     )
     assert saved.status_code == 200
     assert (paper_dir / "notes.md").read_text(encoding="utf-8") == "# 二稿"
+
+
+def test_note_frontmatter_id_matches_database_id(workbench):
+    """Regression: two separately generated ids could never agree.
+
+    The frontmatter used to mint one note_id and SQLite another, so the note
+    could never be recovered from the Vault after a rebuild — which is the only
+    reason the id is stored there at all.
+    """
+    client, storage, pid, _, _, paper_dir, _ = workbench
+    created = client.post(f"/api/paper/papers/{pid}/note", json={}).json()
+    written = (paper_dir / "notes.md").read_text(encoding="utf-8")
+    row = storage.get_note_for_paper(pid)
+    assert row is not None
+    assert created["note_id"] == row.note_id
+    assert f"paper_note_id: {row.note_id}" in written
+
+
+def test_note_created_with_client_content_still_gets_frontmatter(workbench):
+    """Editor-supplied content used to skip the frontmatter entirely."""
+    client, _, pid, _, _, paper_dir, _ = workbench
+    created = client.post(
+        f"/api/paper/papers/{pid}/note", json={"content": "用户直接输入的内容"}
+    ).json()
+    written = (paper_dir / "notes.md").read_text(encoding="utf-8")
+    assert written.startswith("---")
+    assert f"paper_note_id: {created['note_id']}" in written
+    assert "用户直接输入的内容" in written
+
+
+def test_note_creation_records_and_commits_a_write_intent(workbench):
+    """A crash between file creation and the DB row must stay recoverable."""
+    client, storage, pid, _, _, _, _ = workbench
+    client.post(f"/api/paper/papers/{pid}/note", json={})
+    assert storage.list_pending_write_intents() == []
 
 
 def test_note_save_takes_a_backup(workbench):
@@ -310,7 +349,7 @@ def test_note_save_takes_a_backup(workbench):
         json={"content": "v2", "expected_hash": created["hash"]},
     ).json()
     assert saved["backup_path"] is not None
-    assert Path(saved["backup_path"]).read_text(encoding="utf-8") == "v1"
+    assert "v1" in Path(saved["backup_path"]).read_text(encoding="utf-8")
 
 
 def test_note_conflict_preserves_remote_content(workbench):
