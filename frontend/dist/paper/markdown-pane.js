@@ -61,6 +61,7 @@ export class MarkdownPane {
     }
 
     this.host.innerHTML = `<article class="paper-md-body">${html}</article>`;
+    this._enforceEgressBoundary();
     this._collectHeadings();
     this._decorateHeadings();
 
@@ -100,9 +101,94 @@ export class MarkdownPane {
     // to them in P0.5 without a re-render invalidating the anchor.
   }
 
+  /**
+   * Apply the zero-egress boundary to rendered content (ADR-009).
+   *
+   * A translated paper routinely cites external links and remote images.
+   * Rendering them as-is means simply opening a paper silently contacts
+   * third-party servers, which is exactly what the paper subsystem promises not
+   * to do.
+   *
+   *   - remote images are replaced with a placeholder that requires a click;
+   *   - links keep their text but are marked so the host can confirm first.
+   *
+   * Local images are left alone: they resolve through the same-origin asset
+   * endpoint and never leave the machine.
+   */
+  _enforceEgressBoundary() {
+    const blocked = [];
+
+    this.host.querySelectorAll('img').forEach((img) => {
+      const src = img.getAttribute('src') || '';
+      if (!src || this._isSameOrigin(src)) return;
+      const placeholder = document.createElement('button');
+      placeholder.type = 'button';
+      placeholder.className = 'paper-external-image';
+      placeholder.textContent = '外部图片已阻止 — 点击后加载';
+      placeholder.dataset.externalSrc = src;
+      placeholder.addEventListener('click', () => {
+        const real = document.createElement('img');
+        real.src = placeholder.dataset.externalSrc;
+        real.alt = img.alt || '外部图片';
+        placeholder.replaceWith(real);
+      });
+      img.replaceWith(placeholder);
+      blocked.push(src);
+    });
+
+    this.host.querySelectorAll('a[href]').forEach((anchor) => {
+      const href = anchor.getAttribute('href') || '';
+      if (!href || href.startsWith('#') || this._isSameOrigin(href)) return;
+      anchor.dataset.externalHref = href;
+      anchor.setAttribute('rel', 'noopener noreferrer nofollow');
+      anchor.classList.add('paper-external-link');
+      blocked.push(href);
+    });
+
+    if (blocked.length) {
+      this._emit('egressblocked', { count: blocked.length });
+    }
+  }
+
+  _isSameOrigin(url) {
+    if (!url) return true;
+    if (url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) return true;
+    if (url.startsWith('data:') || url.startsWith('blob:')) return true;
+    try {
+      return new URL(url, window.location.href).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
   /** @returns {Array<{id: string, level: number, title: string}>} */
   getOutline() {
     return [...this.headings];
+  }
+
+  /**
+   * Scroll to a heading by its text.
+   *
+   * Annotation jump used to call this without it existing, so every Markdown
+   * jump silently did nothing. Matching on the collected heading text keeps the
+   * anchor structural rather than depending on a DOM selector that a re-render
+   * would invalidate.
+   *
+   * @param {string} title heading text to scroll to
+   * @returns {boolean} whether a matching heading was found
+   */
+  scrollToHeading(title) {
+    const wanted = String(title || '').trim();
+    if (!wanted) return false;
+    const heading =
+      this.headings.find((h) => h.title === wanted) ||
+      this.headings.find((h) => h.title.includes(wanted) || wanted.includes(h.title));
+    if (!heading) return false;
+    const node = this.host.querySelector(`#${heading.id}`);
+    if (!node) return false;
+    node.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    this._emit('headingjumped', { id: heading.id, title: heading.title });
+    return true;
   }
 
   /** Current heading path, used as the Markdown anchor's structural locator. */

@@ -6,7 +6,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import agentsview as agentsview_api
@@ -60,18 +60,44 @@ app = FastAPI(title="Obsidian Agent Workspace", version="0.2.0-m4", lifespan=lif
 
 @app.middleware("http")
 async def im_no_store_middleware(request: Request, call_next):
-    """Keep all personal IM & Schedule success/error responses out of browser/proxy caches."""
-    response = await call_next(request)
-    if (
-        request.url.path.startswith("/api/im")
-        or request.url.path.startswith("/internal/im")
-        or request.url.path.startswith("/api/schedule")
-        or request.url.path.startswith("/api/assignment")
-        or request.url.path.startswith("/api/paper")
-    ):
+    """Keep personal data out of caches, including on the error path.
+
+    A middleware whose only job is to stamp a header after `call_next` misses
+    every response that never returns from it — an unhandled exception produces
+    a 500 from Starlette's own handler, which then carries no `no-store` and may
+    embed private paths in its body. The header is therefore also applied in the
+    exception path.
+    """
+    sensitive = _is_sensitive_path(request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception:
+        if sensitive:
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "internal error"},
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+            response.headers["Pragma"] = "no-cache"
+            return response
+        raise
+    if sensitive:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
     return response
+
+
+def _is_sensitive_path(path: str) -> bool:
+    """Paths whose responses may contain personal reading or message data."""
+    return path.startswith(
+        (
+            "/api/im",
+            "/internal/im",
+            "/api/schedule",
+            "/api/assignment",
+            "/api/paper",
+        )
+    )
 
 
 app.include_router(files_api.router, prefix="/api", tags=["files"])

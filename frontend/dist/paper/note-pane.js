@@ -41,6 +41,38 @@ export class NoteEditor {
     this._maxTimer = null;
     this._pending = false;
     this._lastLoadedText = '';
+    /**
+     * Identity of the paper currently loaded.
+     *
+     * The editor is reused across papers, and an autosave can still be in
+     * flight when the user switches. Without pinning the identity per
+     * operation, a late response would write its hash into the *new* paper's
+     * editor state, and a pending flush would file paper A's text against
+     * paper B. Every async operation captures the epoch it started in and is
+     * discarded if the epoch has moved on.
+     */
+    this.paperId = null;
+    this._epoch = 0;
+  }
+
+  /**
+   * Bind the editor to a paper and load its note.
+   *
+   * Switching increments the epoch first, so any in-flight save from the
+   * previous paper cannot mutate the new one's state when it settles.
+   */
+  async loadFor(paperId) {
+    this._epoch += 1;
+    this.paperId = paperId;
+    this.hash = null;
+    this.noteId = null;
+    this.conflict = false;
+    this._acceptedSeq = 0;
+    if (this.el?.conflict) this.el.conflict.hidden = true;
+    clearTimeout(this._debounceTimer);
+    clearTimeout(this._maxTimer);
+    this._maxTimer = null;
+    return this.load();
   }
 
   mount() {
@@ -84,8 +116,10 @@ export class NoteEditor {
 
   /** Load a note into the editor. Absent notes are legal (ADR-006). */
   async load() {
+    const epoch = this._epoch;
     try {
       const payload = await this.io.load();
+      if (epoch !== this._epoch) return { exists: false, stale: true };
       if (!payload?.exists) {
         this.hash = null;
         this.noteId = null;
@@ -101,6 +135,7 @@ export class NoteEditor {
       this.el.conflict.hidden = true;
       return { exists: true };
     } catch (error) {
+      if (epoch !== this._epoch) return { exists: false, stale: true };
       this._setState(`加载失败：${error.message}`);
       return { exists: false, error };
     }
@@ -134,11 +169,19 @@ export class NoteEditor {
     clearTimeout(this._debounceTimer);
     if (this.conflict) return { ok: false, reason: 'conflict' };
     if (!this.dirty) return { ok: true, reason: 'clean' };
+
+    // An in-flight save belongs to the current epoch only if no switch has
+    // happened. If one has, this call is for the *new* paper and must not be
+    // silently satisfied by the old paper's in-flight request.
     if (this.saving) {
       this._pending = true;
-      return { ok: false, reason: 'in-flight' };
+      await this._waitForIdle();
+      if (this.conflict) return { ok: false, reason: 'conflict' };
+      if (!this.dirty) return { ok: true, reason: 'coalesced' };
     }
 
+    const epoch = this._epoch;
+    const paperId = this.paperId;
     const text = this.el.editor.value;
     const seq = ++this._saveSeq;
     this.saving = true;
@@ -149,24 +192,30 @@ export class NoteEditor {
       if (this.hash === null) {
         // First write creates the note; the response carries the initial hash.
         result = await this.io.create(text);
-        this.hash = result.hash;
-        this.noteId = result.note_id;
       } else {
         result = await this.io.save(text, this.hash);
-        this.hash = result.new_hash;
       }
 
-      // Ignore a response that a newer save has already superseded.
+      // A late response must not touch the editor state of another paper.
+      if (epoch !== this._epoch) {
+        return { ok: false, reason: 'stale-epoch' };
+      }
       if (seq < this._acceptedSeq) {
         return { ok: false, reason: 'superseded' };
       }
+
       this._acceptedSeq = seq;
+      if (result.hash) this.hash = result.hash;
+      if (result.note_id) this.noteId = result.note_id;
       this._lastLoadedText = text;
       this.dirty = this.el.editor.value !== text;
       this._setState(this.dirty ? '有未保存改动' : '已保存');
-      this._emit('saved', { hash: this.hash, seq });
+      this._emit('saved', { hash: this.hash, seq, paperId });
       return { ok: true, hash: this.hash };
     } catch (error) {
+      if (epoch !== this._epoch) {
+        return { ok: false, reason: 'stale-epoch' };
+      }
       if (error.status === 409) {
         this.conflict = true;
         this.el.conflict.hidden = false;
@@ -179,11 +228,25 @@ export class NoteEditor {
       return { ok: false, reason: 'error', error };
     } finally {
       this.saving = false;
+      this._releaseIdle();
       if (this._pending) {
         this._pending = false;
-        if (!this.conflict) setTimeout(() => this.flush(), 50);
+        if (!this.conflict && epoch === this._epoch) setTimeout(() => this.flush(), 50);
       }
     }
+  }
+
+  /** Resolves once no save is in flight. */
+  _waitForIdle() {
+    if (!this._idleWaiters) this._idleWaiters = [];
+    if (!this.saving) return Promise.resolve();
+    return new Promise((resolve) => this._idleWaiters.push(resolve));
+  }
+
+  _releaseIdle() {
+    const waiters = this._idleWaiters || [];
+    this._idleWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   /** Discard the local draft and take the remote copy. */

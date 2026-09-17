@@ -20,8 +20,15 @@ from pathlib import Path
 
 from backend.app.config import load_config
 from backend.app.paper.models import utc_now
+from backend.app.paper import MANIFEST_FILENAME
+from backend.app.paper.manifest import (
+    load_adopted_identity,
+    manifest_to_sources,
+    read_manifest_file,
+)
 from backend.app.paper.scanner import ScanConfig, discover_papers
 from backend.app.paper.storage import PaperStorage
+from backend.app.paper.writer import VaultWriteService
 
 
 def index_papers(dry_run: bool = False) -> dict:
@@ -32,11 +39,21 @@ def index_papers(dry_run: bool = False) -> dict:
 
     result = discover_papers(ScanConfig(root=root, max_depth=cfg.papers_max_depth))
     storage = None if dry_run else PaperStorage()
+    # The manifest is the identity authority (ADR-006). A rescan must reuse
+    # the ids it records, otherwise a new source_id is minted on every index
+    # run and reading positions, notes and annotations all lose their anchor.
+    service = None if dry_run else VaultWriteService(cfg.vault_root)
+    papers_root_rel = (
+        str(root.relative_to(cfg.vault_root))
+        if root != cfg.vault_root
+        else ""
+    )
 
     created = 0
     updated = 0
     sources_written = 0
     conflicts = 0
+    result_errors: list[str] = []
 
     for paper in result.papers:
         parts = paper.folder_relpath.split("/")
@@ -49,9 +66,21 @@ def index_papers(dry_run: bool = False) -> dict:
 
         # Reuse the existing identity for this folder so a rescan preserves
         # status, workspace state and note bindings.
+        # Identity precedence: the Vault manifest outranks the local row,
+        # because the manifest is what survives losing the database.
+        adopted = None
+        try:
+            adopted = load_adopted_identity(service, paper.folder_relpath, papers_root_rel)
+        except Exception as exc:  # noqa: BLE001
+            result_errors.append(f"manifest unreadable for {paper.folder_relpath}: {exc}")
+
         existing = storage.get_paper_by_folder(paper.folder_relpath)
-        paper.paper_id = existing.paper_id if existing else ""
-        if not paper.paper_id:
+        if adopted:
+            paper.paper_id = adopted[0]
+            paper.manifest_relpath = MANIFEST_FILENAME
+        elif existing:
+            paper.paper_id = existing.paper_id
+        else:
             from backend.app.paper.models import new_paper_id
 
             paper.paper_id = new_paper_id()
@@ -80,9 +109,23 @@ def index_papers(dry_run: bool = False) -> dict:
         existing_sources = {
             s.rel_path: s for s in storage.list_sources(paper.paper_id, include_inactive=True)
         }
+        # Source ids recorded in the manifest are authoritative for the same
+        # reason the paper id is.
+        manifest_sources = (
+            {s.rel_path: s for s in manifest_to_sources(paper.paper_id, adopted[1])}
+            if adopted
+            else {}
+        )
         for source in paper.sources:
-            prior = existing_sources.get(source.rel_path)
-            if prior:
+            from_manifest = manifest_sources.get(source.rel_path)
+            if from_manifest is not None:
+                # Keep the id the Vault recorded; re-derive the runtime facts.
+                source.source_id = from_manifest.source_id
+                prior = existing_sources.get(source.rel_path)
+                source.source_version = prior.source_version if prior else 1
+                if prior and prior.sha256 == source.sha256:
+                    source.sha256 = prior.sha256
+            if prior and from_manifest is None:
                 # Reuse identity, but only inherit the version when the bytes
                 # are actually unchanged. Blindly carrying source_version and
                 # sha256 forward made every file look immutable: replacing a

@@ -19,6 +19,7 @@ import {
   makeMarkdownAnchor,
 } from './annotations.js';
 import { assembleAiContext } from './ai-context.js';
+import { WorkspaceStateTracker } from './workspace-state.js';
 
 const STATUS_LABELS = {
   UNREAD: '未看',
@@ -75,11 +76,29 @@ export class PaperWorkbench {
     this.pdf = new PdfBridge(this.el.pdfHost);
     this.markdown = new MarkdownPane(this.el.markdownHost);
     this.note = new NoteEditor(this.el.noteHost, {
+      // The closures read this.selected at call time, so they always address
+      // the paper that is selected now; the editor pins its own epoch to stop
+      // a late response from a previous paper mutating live state.
       load: () => api.getNote(this.selected.paper_id),
       save: (content, hash) => api.saveNote(this.selected.paper_id, content, hash),
       create: (content) => api.createNote(this.selected.paper_id, content),
     });
     this.note.mount();
+
+    this.workspaceState = new WorkspaceStateTracker({
+      load: () => api.getWorkspaceState(this.selected.paper_id),
+      save: (state) =>
+        api.saveWorkspaceState(this.selected.paper_id, {
+          active_pane: state.active_pane || 'PDF',
+          active_pdf_source_id: state.active_pdf_source_id ?? null,
+          active_markdown_source_id: state.active_markdown_source_id ?? null,
+          source_positions: state.source_positions || {},
+          note_cursor_start: state.note_cursor_start ?? null,
+          note_cursor_end: state.note_cursor_end ?? null,
+          note_content_sha256: state.note_content_sha256 ?? null,
+        }),
+    });
+    this.workspaceState.bind();
     this.annotations = new AnnotationList(this.el.annHost, {
       list: () => api.listAnnotations(this.selected.paper_id),
       onJump: (item) => this.jumpToAnnotation(item),
@@ -100,6 +119,20 @@ export class PaperWorkbench {
     this.annotations.addEventListener('addrequest', () => this.createAnnotationFromSelection());
     document.addEventListener('selectionchange', () => this._refreshSelectionState());
     this.el.markdownHost.addEventListener('mouseup', () => this._refreshSelectionState());
+
+    // Position capture. Scroll and page events only touch memory; the tracker
+    // owns the debounce and the flush policy.
+    this.pdf.onPageChanged(({ pageIndex }) => {
+      const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+      if (!source) return;
+      this.workspaceState.notePdfPosition(source.source_id, {
+        pageIndex,
+        offsetRatio: 0,
+        sourceVersion: source.source_version,
+      });
+    });
+    this.el.markdownHost.addEventListener('scroll', () => this._captureMarkdownPosition());
+    this.pdf.container.addEventListener('paperpdfscroll', () => this._capturePdfScroll());
 
     this.root.addEventListener('layoutresize', () => {
       if (this.pdf?.iframe) this.pdf.iframe.style.height = '100%';
@@ -151,10 +184,8 @@ export class PaperWorkbench {
   }
 
   async selectPaper(paperId) {
-    // Do not silently drop unsaved work when switching papers.
-    if (this.note?.hasUnsavedWork()) {
-      await this.note.flush();
-    }
+    // Persist the outgoing paper's note and reading position before switching.
+    await Promise.all([this.note.flush(), this.workspaceState.flush()]);
     try {
       const [paper, sources] = await Promise.all([
         api.getPaper(paperId),
@@ -182,11 +213,63 @@ export class PaperWorkbench {
         if (md) await this.openSource(md.source_id);
       }
 
-      await Promise.all([this.note.load(), this.annotations.load()]);
+      await Promise.all([this.note.loadFor(paperId), this.workspaceState.loadFor(paperId)]);
+      await this._restorePosition();
     } catch (error) {
       this.el.title.textContent = '加载失败';
       this.el.meta.textContent = error.message;
     }
+  }
+
+  _captureMarkdownPosition() {
+    const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+    if (!source || source.media_kind !== 'MARKDOWN') return;
+    this.workspaceState.noteMarkdownPosition(source.source_id, {
+      headingPath: this.markdown.currentHeadingPath(),
+      scrollRatio: this.markdown.getScrollRatio(),
+      sourceVersion: source.source_version,
+    });
+  }
+
+  _capturePdfScroll() {
+    const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+    if (!source || source.media_kind !== 'PDF') return;
+    this.workspaceState.notePdfPosition(source.source_id, {
+      pageIndex: this.pdf.getCurrentPage(),
+      offsetRatio: 0,
+      sourceVersion: source.source_version,
+    });
+  }
+
+  /**
+   * Restore the recorded position for the active source.
+   *
+   * When the source revision changed, only the coarse position (page or
+   * heading) is restored: the fine offset pointed into different bytes.
+   */
+  async _restorePosition() {
+    const source = this.sources.find((s) => s.source_id === this.activeSourceId);
+    if (!source) return;
+    const kind = source.media_kind === 'PDF' ? 'PDF' : 'MARKDOWN';
+    const target = this.workspaceState.resolveRestore(
+      source.source_id,
+      source.source_version,
+      kind
+    );
+    if (target.restored === 'none') return;
+
+    if (kind === 'PDF' && Number.isFinite(target.pageIndex)) {
+      this.pdf.goToPage(target.pageIndex);
+    } else if (kind === 'MARKDOWN' && Number.isFinite(target.scrollRatio)) {
+      this.markdown.scrollToRatio(target.scrollRatio);
+    }
+    this._emitRestoreNotice(target.restored);
+  }
+
+  _emitRestoreNotice(restored) {
+    if (restored !== 'coarse') return;
+    this.el.meta.dataset.restore = 'coarse';
+    this.el.meta.title = '来源已更新，仅恢复到页/章节级位置';
   }
 
   _renderMeta() {
@@ -301,7 +384,11 @@ export class PaperWorkbench {
     if (item.anchor_type === 'MARKDOWN_TEXT') {
       const path = item.heading_path;
       const target = Array.isArray(path) && path.length ? path[path.length - 1] : null;
-      if (target) this.markdown.scrollToHeading?.(target);
+      if (!target) return;
+      const jumped = this.markdown.scrollToHeading(target);
+      if (!jumped) {
+        this.el.meta.textContent = `未找到对应章节：${target}`;
+      }
     }
   }
 
@@ -363,8 +450,15 @@ export class PaperWorkbench {
   async openSource(sourceId) {
     const source = this.sources.find((s) => s.source_id === sourceId);
     if (!source) return;
+    // Persist where we were before moving to a different source.
+    await this.workspaceState.flush();
     this.activeSourceId = sourceId;
     this._renderSources();
+    this.workspaceState.noteActive({
+      pane: source.media_kind === 'PDF' ? 'PDF' : 'MARKDOWN',
+      pdfSourceId: source.media_kind === 'PDF' ? sourceId : undefined,
+      markdownSourceId: source.media_kind === 'MARKDOWN' ? sourceId : undefined,
+    });
 
     if (source.media_kind === 'PDF') {
       const url = api.sourceContentUrl(sourceId, source.source_version);

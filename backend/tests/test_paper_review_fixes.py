@@ -348,3 +348,112 @@ def test_frontend_reads_flat_anchor_fields():
     ann_js = (base / "annotations.js").read_text(encoding="utf-8")
     assert "heading_path_json" not in main_js, "API returns heading_path, not heading_path_json"
     assert "heading_path_json" not in ann_js
+
+
+# ---------------------------------------------------------------------------
+# P0-B6: frontend closed loops
+# ---------------------------------------------------------------------------
+
+def _paper_module(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[2] / "frontend" / "dist" / "paper" / name
+    ).read_text(encoding="utf-8")
+
+
+def test_workspace_state_tracker_is_wired_into_the_workbench():
+    """Defect: the endpoints existed but nothing on the frontend ever called
+    them, so a reading position was never recorded or restored."""
+    main_js = _paper_module("main.js")
+    assert "WorkspaceStateTracker" in main_js
+    assert "workspaceState.loadFor" in main_js
+    assert "_restorePosition" in main_js
+    assert "notePdfPosition" in main_js
+
+
+def test_workspace_state_flushes_on_switch_and_on_hide():
+    tracker = _paper_module("workspace-state.js")
+    assert "visibilitychange" in tracker
+    assert "DEBOUNCE_MS = 750" in tracker
+    assert "MAX_INTERVAL_MS = 5000" in tracker
+
+
+def test_note_editor_pins_a_paper_epoch():
+    """Defect: a late autosave from paper A could mutate paper B's editor."""
+    note_js = _paper_module("note-pane.js")
+    assert "_epoch" in note_js
+    assert "loadFor" in note_js
+    assert "stale-epoch" in note_js
+
+
+def test_frontend_blocks_remote_images():
+    """ADR-009: opening a paper must not contact a third-party server."""
+    pane = _paper_module("markdown-pane.js")
+    assert "_enforceEgressBoundary" in pane
+    assert "paper-external-image" in pane
+
+
+def test_indexer_reuses_manifest_source_ids(tmp_path: Path, monkeypatch):
+    """Defect: the indexer only consulted SQLite, so after a database rebuild it
+    minted fresh source ids and every saved reading position was orphaned.
+
+    Behavioural: adopt a paper (writing a manifest), then index into a brand-new
+    database and assert the source id matches the manifest rather than being new.
+    """
+    from backend.app.paper import scanner as scanner_mod
+    from backend.scripts import paper_index as indexer
+
+    root = tmp_path / "vault"
+    paper_dir = root / "论文根" / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_BYTES)
+
+    # Adopt first, using a throwaway database, so a manifest exists on disk.
+    service = VaultWriteService(root, backup_root=tmp_path / "bk")
+    seed = PaperStorage(tmp_path / "seed.db")
+    pid, sid = new_paper_id(), new_source_id()
+    seed.upsert_paper(Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="t"))
+    seed.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="a.pdf",
+            sha256="a" * 64,
+        )
+    )
+    ensure_adopted(
+        seed,
+        service,
+        seed.get_paper(pid),
+        seed.list_sources(pid),
+        operation="status_change",
+        papers_root_rel="论文根",
+    )
+    seed.close()
+
+    # Now index into a fresh database, as a rebuild would.
+    fresh_db = tmp_path / "fresh.db"
+
+    class _Cfg:
+        vault_path = root
+        vault_root = root
+        papers_root = root / "论文根"
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(indexer, "load_config", lambda: _Cfg())
+    monkeypatch.setattr(indexer, "PaperStorage", lambda *a, **k: PaperStorage(fresh_db))
+
+    indexer.index_papers(dry_run=False)
+
+    rebuilt = PaperStorage(fresh_db)
+    papers = rebuilt.list_papers()
+    assert len(papers) == 1
+    assert papers[0].paper_id == pid, "the manifest's paper id must win over a fresh one"
+    sources = rebuilt.list_sources(pid)
+    assert len(sources) == 1
+    assert sources[0].source_id == sid, "the manifest's source id must be reused"
+    rebuilt.close()

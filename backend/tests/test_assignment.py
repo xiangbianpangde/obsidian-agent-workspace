@@ -49,7 +49,25 @@ class TestOutboundGuard(unittest.TestCase):
     def test_allows_whitelisted_https(self):
         url = validate_url("https://i.chaoxing.com/base?t=1")
         self.assertTrue(url.startswith("https://i.chaoxing.com"))
-        self.assertTrue(validate_url("https://smartestu.cn/api/homework/student/portal-summary"))
+
+    def test_allows_whitelisted_host_when_dns_is_available(self):
+        """The public-IP check needs DNS, so a resolver outage must not be
+        reported as a guard failure.
+
+        This test used to live in test_allows_whitelisted_https and therefore
+        failed on any machine without DNS, which says nothing about whether the
+        guard works. The whitelist decision itself is covered above; here we
+        only exercise the IP check when it can actually run.
+        """
+        import socket
+
+        try:
+            socket.gethostbyname("smartestu.cn")
+        except OSError:
+            self.skipTest("DNS unavailable; cannot exercise the public-IP check")
+        self.assertTrue(
+            validate_url("https://smartestu.cn/api/homework/student/portal-summary")
+        )
 
     def test_upgrades_http_to_https(self):
         self.assertTrue(validate_url("http://mooc1.chaoxing.com/x").startswith("https://"))

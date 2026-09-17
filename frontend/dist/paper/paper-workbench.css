@@ -388,3 +388,28 @@
   color: var(--pw-muted);
 }
 .paper-md-body img { max-width: 100%; border-radius: 6px; }
+
+/* --------------------------------------------------- zero-egress boundary */
+
+/* Remote images are never fetched on render: opening a paper must not contact
+   a third-party server. The placeholder is a button, so loading is an explicit
+   user action rather than a side effect of scrolling past. */
+.paper-external-image {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 160px;
+  min-height: 48px;
+  padding: 8px 12px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed var(--pw-border);
+  border-radius: 6px;
+  color: var(--pw-muted);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.paper-external-image:hover { border-color: var(--pw-accent); color: var(--pw-text); }
+
+.paper-external-link { color: #fbbf24; }
+.paper-external-link::after { content: ' ↗'; font-size: 0.85em; }
