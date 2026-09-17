@@ -1648,3 +1648,107 @@ def test_scenario_frontend_modules_load_and_expose_their_contracts():
     report = _json.loads(completed.stdout.strip().splitlines()[-1])
     assert report["failures"] == [], f"contract failures: {report['failures']}"
     assert report["total"] >= 40, "the smoke test must cover the module contracts"
+
+
+def test_scenario_notes_are_not_bound_as_paper_sources(tmp_path: Path, monkeypatch):
+    """工作台自己的产物不得被当作论文来源.
+
+    Found during the real-vault canary: after a rebuild the source count came
+    back as 4 where the manifest declared 3, because `notes.md` was scanned and
+    bound as an OTHER_MARKDOWN source. That presents the user's own reading notes
+    as a translatable document and inflates the count on every rebuild.
+
+    The exclusion reads the manifest's note binding rather than a hardcoded
+    filename, so a note created under a custom name is excluded too.
+    """
+    import backend.app.state as app_state
+    from backend.app.paper.manifest import ensure_adopted
+    from backend.app.paper.models import Paper, PaperNote, PaperSource, SourceRole, new_paper_id, new_source_id
+    from backend.app.paper.writer import VaultWriteService
+    from backend.scripts import paper_index as indexer
+
+    vault = tmp_path / "vault"
+    papers_root = vault / "论文根"
+    paper_dir = papers_root / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_V1)
+    (paper_dir / "b_全文翻译.md").write_text("# 译文\n", encoding="utf-8")
+
+    papers_root_ = papers_root
+
+    class _Cfg:
+        vault_path = vault
+        vault_root = vault
+        papers_root = papers_root_
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+
+    pid, sid = new_paper_id(), new_source_id()
+    storage = PaperStorage(tmp_path / "seed.db")
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="t"))
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="a.pdf",
+            sha256="a" * 64,
+        )
+    )
+    service = VaultWriteService(vault, backup_root=tmp_path / "bk")
+    adopted = ensure_adopted(
+        storage,
+        service,
+        storage.get_paper(pid),
+        storage.list_sources(pid),
+        operation="status_change",
+        papers_root_rel="论文根",
+    )
+    storage.upsert_paper(adopted, allow_folder_move=True)
+
+    # A note under a CUSTOM name, so a hardcoded `notes.md` exclusion would miss it.
+    note_id = "note_11111111-2222-4333-8999-444444444444"
+    (paper_dir / "我的阅读笔记.md").write_text("# 笔记\n", encoding="utf-8")
+    storage.upsert_note(
+        PaperNote(
+            note_id=note_id,
+            paper_id=pid,
+            rel_path="我的阅读笔记.md",
+        )
+    )
+    storage.get_paper(pid).note_id = note_id
+    storage.close()
+
+    # The manifest must declare the note so the indexer knows to exclude it.
+    from backend.app.paper.manifest import update_manifest
+
+    seed = PaperStorage(tmp_path / "seed.db")
+    paper = seed.get_paper(pid)
+    paper.note_id = note_id
+    update_manifest(
+        seed,
+        service,
+        paper,
+        seed.list_sources(pid),
+        papers_root_rel="论文根",
+        note_rel_path="我的阅读笔记.md",
+    )
+    seed.close()
+
+    rebuilt_db = tmp_path / "rebuilt.db"
+    monkeypatch.setattr(indexer, "load_config", lambda: _Cfg())
+    monkeypatch.setattr(indexer, "PaperStorage", lambda *a, **k: PaperStorage(rebuilt_db))
+    indexer.index_papers(dry_run=False)
+
+    rebuilt = PaperStorage(rebuilt_db)
+    bound = {s.rel_path for s in rebuilt.list_sources(pid)}
+    assert "我的阅读笔记.md" not in bound, (
+        "the paper's own note must not be bound as a translatable source"
+    )
+    assert "a.pdf" in bound, "real sources must still be bound"
+    rebuilt.close()

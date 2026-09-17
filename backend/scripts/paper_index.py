@@ -21,7 +21,7 @@ from pathlib import Path
 
 from backend.app.config import load_config
 from backend.app.paper.models import utc_now
-from backend.app.paper import MANIFEST_FILENAME
+from backend.app.paper import ANNOTATION_STORE_FILENAME, MANIFEST_FILENAME
 from backend.app.paper.manifest import (
     load_adopted_identity,
     manifest_to_sources,
@@ -239,7 +239,27 @@ def index_papers(dry_run: bool = False) -> dict:
             if adopted
             else {}
         )
+        # Files the workbench itself created must not be bound as paper sources.
+        # `notes.md` carries the paper's own reading notes; presenting it as an
+        # "other markdown" source lets a user open their notes in the translation
+        # pane, and it inflates the source count on every rebuild.
+        #
+        # The filenames come from the manifest's note binding rather than a
+        # hardcoded list, so a note created with a custom name is excluded too.
+        workbench_owned: set[str] = set()
+        if adopted is not None:
+            note_path = getattr(adopted, "note_path", None)
+            if note_path:
+                workbench_owned.add(note_path)
+        workbench_owned.add(ANNOTATION_STORE_FILENAME)
+        workbench_owned.add(MANIFEST_FILENAME)
+
         for source in paper.sources:
+            if source.rel_path in workbench_owned:
+                # Skip binding, but do not touch any existing row: a stale
+                # binding from an earlier index is deactivated by the
+                # retire-unseen pass below, never deleted.
+                continue
             from_manifest = manifest_sources.get(source.rel_path)
             prior = existing_sources.get(source.rel_path)
 
