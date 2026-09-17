@@ -39,7 +39,7 @@ from backend.app.paper.models import (
     new_source_id,
 )
 from backend.app.paper.ownership import (
-    DEFAULT_LOCK_PATH,
+    lock_path_for,
     MultiWorkerError,
     VaultAlreadyOwnedError,
     VaultWriteLock,
@@ -56,6 +56,94 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+
+@pytest.fixture
+def workbench_like(tmp_path: Path, monkeypatch):
+    """An app + vault scene for the review-round-2 regression tests.
+
+    Mirrors production shape: the papers root nests inside the vault, and the
+    paper carries both a PDF and a translation so multi-source behaviour is
+    exercised rather than assumed.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import backend.app.paper.api as paper_api
+    import backend.app.state as app_state
+
+    work = tmp_path
+    vault = work / "vault"
+    papers_root = vault / "论文根"
+    paper_dir = papers_root / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_V1)
+    (paper_dir / "b_全文翻译.md").write_text("# 译文\n", encoding="utf-8")
+
+    storage = PaperStorage(work / "wb.db")
+    pid, pdf_sid, md_sid = new_paper_id(), new_source_id(), new_source_id()
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="t"))
+    storage.upsert_source(
+        PaperSource(
+            source_id=pdf_sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="a.pdf",
+            sha256="a" * 64,
+        )
+    )
+    storage.upsert_source(
+        PaperSource(
+            source_id=md_sid,
+            paper_id=pid,
+            role=SourceRole.TRANSLATION_FULL,
+            rel_path="b_全文翻译.md",
+        )
+    )
+
+    papers_root_ = papers_root
+
+    class _Cfg:
+        vault_path = vault
+        vault_root = vault
+        papers_root = papers_root_
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+    monkeypatch.setattr(paper_api, "_storage", lambda: storage)
+    import backend.app.paper.api_sources as api_sources
+
+    monkeypatch.setattr(api_sources.paper_storage, "PaperStorage", lambda *a, **k: storage)
+
+    app = FastAPI()
+    app.include_router(paper_api.router)
+    client = TestClient(app)
+
+    class _Client:
+        """TestClient plus scene accessors the tests need."""
+
+        def __init__(self, inner, storage, pid, pdf_sid, md_sid, paper_dir):
+            self._inner = inner
+            self.storage = storage
+            self.paper_id = pid
+            self.pdf_sid = pdf_sid
+            self.md_sid = md_sid
+            self.paper_dir = paper_dir
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def manifest_path(self):
+            return self.paper_dir / "paper.workbench.json"
+
+    proxy = _Client(client, storage, pid, pdf_sid, md_sid, paper_dir)
+    yield proxy, storage, pid, (pdf_sid, md_sid)
+    storage.close()
 
 
 class Scene:
@@ -943,3 +1031,201 @@ def test_scenario_pdfjs_is_vendored_not_cdn():
     assert vendored.is_file(), "the vendored build must be present"
     worker = REPO_ROOT / "frontend" / "dist" / "vendor" / "pdfjs" / "build" / "pdf.worker.mjs"
     assert worker.is_file(), "the worker must be vendored alongside the main build"
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — review round 2 findings (all five were reproduced before fixing)
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_note_creation_updates_the_manifest(workbench_like):
+    """CRITICAL: the manifest must record the note binding.
+
+    The adoption gate runs before the note has an id, so the manifest was
+    permanently left at `note: null`. A database rebuild then could not
+    re-attach the note — the identity property ADR-006 exists to provide.
+    """
+    client, storage, pid, _ = workbench_like
+    response = client.post(f"/api/paper/papers/{pid}/note", json={"content": "# 笔记"})
+    assert response.status_code == 200, response.text
+    note_id = response.json()["note_id"]
+
+    manifest = client.manifest_path()
+    assert manifest.is_file(), "the note must not exist without an adopting manifest"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    assert document.get("note") is not None, "manifest.note must not stay null"
+    assert document["note"]["note_id"] == note_id
+
+
+def test_scenario_lock_failure_prevents_startup(tmp_path: Path):
+    """CRITICAL: a second instance must not serve after failing to take the lock.
+
+    This was swallowed by `except Exception: logger.error(...)`, so the second
+    instance served alongside the first, both writing the vault and both running
+    crash recovery over the same intents.
+    """
+    import inspect
+
+    import backend.app.main as main_mod
+
+    source = inspect.getsource(main_mod.lifespan)
+    acquire_index = source.index("_vault_lock.acquire()")
+    # The acquire call must not sit inside a try/except that logs and continues.
+    preceding = source[:acquire_index]
+    tail = source[acquire_index : acquire_index + 400]
+    assert "except Exception" not in tail, (
+        "the lock error must not be swallowed; the process must refuse to start"
+    )
+    assert "env_allows_readonly_startup" in source, "a read-only opt-out must be explicit"
+    assert preceding  # sanity: the slice is non-empty
+
+
+def test_scenario_stale_lock_is_reclaimed_but_a_live_one_is_not(tmp_path: Path):
+    """高风险: SIGKILL leaves a stale lock; requiring manual cleanup is wrong."""
+    from backend.app.paper.ownership import VaultWriteLock, VaultAlreadyOwnedError
+
+    lock_path = tmp_path / "v.lock"
+
+    # A pid that cannot exist.
+    lock_path.write_text("pid=999999\nvault=/tmp/x\n", encoding="utf-8")
+    reclaimed = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+    reclaimed.acquire()
+    assert reclaimed.path.exists()
+    reclaimed.release()
+
+    # A live pid (ours) must not be stolen.
+    lock_path.write_text(f"pid={os.getpid()}\nvault=/tmp/x\n", encoding="utf-8")
+    live = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+    with pytest.raises(VaultAlreadyOwnedError):
+        live.acquire()
+
+
+def test_scenario_lock_is_scoped_per_vault(tmp_path: Path):
+    """A fixed lock path made unrelated vaults contend with each other."""
+    from backend.app.paper.ownership import lock_path_for
+
+    assert lock_path_for(tmp_path / "a") != lock_path_for(tmp_path / "b")
+    assert lock_path_for(tmp_path / "a") == lock_path_for(tmp_path / "a")
+
+
+def test_scenario_workspace_positions_merge_not_replace(workbench_like):
+    """HIGH: saving one source's position must not erase another's."""
+    client, storage, pid, sources = workbench_like
+    pdf_id, md_id = sources
+    url = f"/api/paper/papers/{pid}/workspace-state"
+
+    first = client.put(
+        url,
+        json={
+            "active_pane": "PDF",
+            "source_positions": {
+                pdf_id: {
+                    "kind": "PDF",
+                    "page_index": 5,
+                    "page_offset_ratio": 0.2,
+                    "scale": 1,
+                    "rotation": 0,
+                    "source_version": 1,
+                }
+            },
+        },
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.put(
+        url,
+        json={
+            "active_pane": "MARKDOWN",
+            "source_positions": {
+                md_id: {
+                    "kind": "MARKDOWN",
+                    "heading_path": ["A"],
+                    "scroll_ratio": 0.7,
+                    "source_version": 1,
+                }
+            },
+        },
+    )
+    assert second.status_code == 200, second.text
+
+    positions = client.get(url).json()["state"]["source_positions"]
+    assert pdf_id in positions, "the PDF position must survive a Markdown save"
+    assert md_id in positions
+
+
+def test_scenario_workspace_rejects_non_finite_numbers(workbench_like):
+    """HIGH: Infinity passes isinstance but breaks the client's JSON.parse."""
+    client, storage, pid, sources = workbench_like
+    pdf_id, _ = sources
+    url = f"/api/paper/papers/{pid}/workspace-state"
+
+    body = (
+        '{"active_pane":"PDF","source_positions":{"'
+        + pdf_id
+        + '":{"kind":"PDF","page_index":1,"page_offset_ratio":0.5,'
+        + '"scale":Infinity,"rotation":0,"source_version":1}}}}'
+    )
+    response = client.put(url, content=body, headers={"Content-Type": "application/json"})
+    # 400 from the explicit validator, or 422 when Pydantic rejects the
+    # non-JSON token first. Either way it must not reach storage.
+    assert response.status_code in (400, 422), "a non-finite scale must be refused"
+
+
+def test_scenario_workspace_rejects_a_foreign_source(workbench_like):
+    """HIGH: an arbitrary key let a client store positions for other papers."""
+    from backend.app.paper.models import Paper, new_paper_id
+
+    client, storage, pid, _ = workbench_like
+    other_pid = new_paper_id()
+    storage.upsert_paper(Paper(paper_id=other_pid, folder_relpath="方向/别的", display_title="o"))
+
+    response = client.put(
+        f"/api/paper/papers/{pid}/workspace-state",
+        json={
+            "active_pane": "PDF",
+            "source_positions": {
+                "src_ffffffff-ffff-4fff-8fff-ffffffffffff": {
+                    "kind": "PDF",
+                    "page_index": 1,
+                    "page_offset_ratio": 0.5,
+                    "scale": 1,
+                    "rotation": 0,
+                }
+            },
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_scenario_egress_is_blocked_before_the_dom_attach():
+    """HIGH: assigning innerHTML first already issued the external request.
+
+    The browser starts fetching an <img src> as soon as the node is parsed, so
+    rewriting afterwards cannot stop the request. The boundary must be applied to
+    a detached tree, before it reaches the live document.
+    """
+    pane = _frontend_module("markdown-pane.js")
+    create_index = pane.index("const holder = document.createElement")
+    inner_index = pane.index("holder.innerHTML = html")
+    enforce_index = pane.index("this._enforceEgressBoundary(holder)")
+    attach_index = pane.index("this.host.replaceChildren(holder)")
+
+    assert create_index < inner_index < enforce_index < attach_index, (
+        "the egress boundary must run on the detached tree, before attaching it"
+    )
+    # And the live host must never receive raw markup directly.
+    assert "this.host.innerHTML = `<article" not in pane
+
+
+def test_scenario_workspace_conflict_does_not_clear_the_version():
+    """CRITICAL: clearing the version turned a conflict into a silent overwrite.
+
+    Sending null makes the server skip its check, so the next flush would
+    clobber the other tab's newer position.
+    """
+    tracker = _frontend_module("workspace-state.js")
+    conflict_block = tracker[tracker.index("error.status === 409") :][:400]
+    assert "this.stateVersion = null" not in conflict_block, (
+        "the conflict path must not clear the version"
+    )
+    assert "_reloadVersion" in tracker, "the conflict path must re-read the version"

@@ -298,3 +298,64 @@ def load_adopted_identity(
         return None
     paper_id, entries, _note_path = parse_manifest(document)
     return paper_id, entries
+
+
+def update_manifest(
+    storage: Any,
+    service: Any,
+    paper: Paper,
+    sources: List[PaperSource],
+    *,
+    papers_root_rel: str = "",
+) -> Paper:
+    """Rewrite an adopted paper's manifest after its bindings change.
+
+    `ensure_adopted` only writes when no manifest exists, which is correct for
+    the adoption gate but wrong for the fields that keep changing afterwards. A
+    note binding is the clear case: creation runs the gate before the note has an
+    id, so the manifest was permanently left at `note: null` and a database
+    rebuild could not re-attach the note — the exact property ADR-006 requires.
+
+    Returns the paper unchanged when it is not adopted yet, because adoption is
+    still the gate that decides when the manifest first appears.
+    """
+    if not is_adopted(paper):
+        return paper
+
+    base = papers_root_rel or _configured_prefix()
+    rel = f"{base}/{paper.folder_relpath}/{MANIFEST_FILENAME}" if base else (
+        f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
+    )
+    document = build_manifest(paper, sources)
+
+    existing = read_manifest_file(service, rel)
+    if existing is None:
+        # The manifest vanished (deleted externally). Re-create rather than
+        # leave the paper unanchored.
+        try:
+            service.create(rel, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            raise ManifestError(f"cannot re-create manifest for {paper.paper_id}: {exc}") from exc
+        return paper
+
+    if existing == document:
+        return paper
+
+    try:
+        _data, digest = service.read(rel)
+        service.save(rel, json.dumps(document, ensure_ascii=False, indent=2) + "\n", expected_hash=digest)
+    except Exception as exc:  # noqa: BLE001
+        raise ManifestError(f"cannot update manifest for {paper.paper_id}: {exc}") from exc
+    return paper
+
+
+def _configured_prefix() -> str:
+    """Papers root relative to the vault root, from the live configuration."""
+    try:
+        from ..state import get_cfg
+
+        cfg = get_cfg()
+        relative = cfg.papers_root_or_default.relative_to(cfg.vault_root)
+        return "" if str(relative) == "." else str(relative)
+    except Exception:
+        return ""

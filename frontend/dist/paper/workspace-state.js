@@ -19,11 +19,12 @@
 const DEBOUNCE_MS = 750;
 const MAX_INTERVAL_MS = 5000;
 
-export class WorkspaceStateTracker {
+export class WorkspaceStateTracker extends EventTarget {
   /**
    * @param {{load: Function, save: Function}} io
    */
   constructor(io) {
+    super();
     this.io = io;
     this.paperId = null;
     this.state = null;
@@ -201,11 +202,13 @@ export class WorkspaceStateTracker {
         // scroll will schedule another attempt.
         if (epoch !== this._epoch) return { ok: false, reason: 'stale-epoch' };
         if (error.status === 409) {
-          // Another tab advanced the state. Adopt its version and retry once so
-          // the newer position is not clobbered, and do not treat this as a
-          // user-visible failure.
-          this.stateVersion = null;
+          // Another tab advanced the state. Clearing the version here would be a
+          // silent data-loss path: the next flush would send null, the server
+          // would skip the check, and this tab would overwrite the other tab's
+          // newer position. Re-read instead so the next attempt carries a real
+          // version.
           this._dirty = true;
+          this._reloadVersion();
           return { ok: false, reason: 'version-conflict' };
         }
         this._dirty = true;

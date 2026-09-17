@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -40,6 +41,7 @@ from .manifest import (
     AdoptionRequired,
     ManifestError,
     ensure_adopted,
+    update_manifest,
 )
 from .models import (
     Paper,
@@ -194,6 +196,19 @@ class WorkspaceStateUpdate(BaseModel):
     expected_state_version: Optional[int] = None
 
 
+def _finite(value: Any) -> bool:
+    """True for a real, finite number.
+
+    NaN and Infinity are rejected explicitly: `float("inf")` passes an
+    isinstance check but SQLite stores it as a non-JSON token, and the frontend
+    then throws a SyntaxError parsing the response — a server-side value that
+    crashes the client.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
 def _validate_position(source_id: str, position: Any) -> Dict[str, Any]:
     """Validate one stored position against the frozen schema (ADR-007).
 
@@ -216,13 +231,15 @@ def _validate_position(source_id: str, position: Any) -> Dict[str, Any]:
                 400, f"PDF position for {source_id} needs a non-negative integer page_index"
             )
         ratio = position.get("page_offset_ratio", 0)
-        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 <= ratio <= 1:
+        if not _finite(ratio) or not 0 <= ratio <= 1:
             raise HTTPException(
                 400, f"PDF position for {source_id} needs page_offset_ratio within 0..1"
             )
         scale = position.get("scale", 1)
-        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
-            raise HTTPException(400, f"PDF position for {source_id} needs a positive scale")
+        if not _finite(scale) or scale <= 0:
+            raise HTTPException(
+                400, f"PDF position for {source_id} needs a finite positive scale"
+            )
         rotation = position.get("rotation", 0)
         if rotation not in (0, 90, 180, 270):
             raise HTTPException(
@@ -235,7 +252,7 @@ def _validate_position(source_id: str, position: Any) -> Dict[str, Any]:
                 400, f"Markdown position for {source_id} needs heading_path as a list of strings"
             )
         ratio = position.get("scroll_ratio", 0)
-        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 <= ratio <= 1:
+        if not _finite(ratio) or not 0 <= ratio <= 1:
             raise HTTPException(
                 400, f"Markdown position for {source_id} needs scroll_ratio within 0..1"
             )
@@ -462,9 +479,22 @@ def save_workspace_state(paper_id: str, body: WorkspaceStateUpdate):
                 f"{body.expected_state_version}, current {existing.state_version}",
             )
 
-    positions = body.source_positions or (existing.source_positions if existing else {})
-    for source_id, position in positions.items():
-        _validate_position(source_id, position)
+    # Merge, never replace: a paper with both a PDF and a translation keeps one
+    # position per source, so sending only the PDF position must not erase the
+    # Markdown one.
+    positions = dict(existing.source_positions) if existing else {}
+    if body.source_positions:
+        for source_id, position in body.source_positions.items():
+            positions[source_id] = _validate_position(source_id, position)
+
+    # Every position must belong to a source of this paper, or the reader would
+    # restore into a source it cannot open.
+    for source_id in positions:
+        source = storage.get_source(source_id)
+        if source is None or source.paper_id != paper_id:
+            raise HTTPException(
+                400, f"position references a source that is not part of this paper: {source_id}"
+            )
 
     # An active source must belong to this paper, otherwise the reader opens a
     # blank pane on restore and the cause is not obvious.
@@ -600,6 +630,23 @@ def create_note(paper_id: str, body: NoteCreate):
     )
     paper.note_id = note_id
     storage.upsert_paper(paper, allow_folder_move=True)
+
+    # The adoption gate ran before this note had an id, so the manifest recorded
+    # `note: null`. Without rewriting it, a database rebuild could not re-attach
+    # the note — the identity property ADR-006 exists to provide.
+    try:
+        update_manifest(
+            storage,
+            _service(),
+            paper,
+            storage.list_sources(paper_id, include_inactive=True),
+            papers_root_rel=str(_papers_root_ptr()),
+        )
+    except ManifestError as exc:
+        # The note itself is safely on disk and in the row; a manifest failure
+        # must not discard it, but it must be visible.
+        logger.warning("note created but manifest not updated: %s", exc)
+
     storage.commit_write_intent(intent)
 
     return _no_store(

@@ -60,8 +60,19 @@ export class MarkdownPane {
       return;
     }
 
-    this.host.innerHTML = `<article class="paper-md-body">${html}</article>`;
-    this._enforceEgressBoundary();
+    // Neutralise external references BEFORE the markup reaches the live DOM.
+    //
+    // An earlier version assigned innerHTML first and rewrote the images
+    // afterwards. That ordering is useless for the egress boundary: the browser
+    // starts fetching an <img src> as soon as the node is parsed, so by the time
+    // the rewrite ran the request had already left the machine. Rewriting the
+    // parsed-but-detached tree means the live DOM never contains an external
+    // URL at all.
+    const holder = document.createElement('article');
+    holder.className = 'paper-md-body';
+    holder.innerHTML = html;
+    this._enforceEgressBoundary(holder);
+    this.host.replaceChildren(holder);
     this._collectHeadings();
     this._decorateHeadings();
 
@@ -115,10 +126,11 @@ export class MarkdownPane {
    * Local images are left alone: they resolve through the same-origin asset
    * endpoint and never leave the machine.
    */
-  _enforceEgressBoundary() {
+  _enforceEgressBoundary(root) {
+    const scope = root || this.host;
     const blocked = [];
 
-    this.host.querySelectorAll('img').forEach((img) => {
+    scope.querySelectorAll('img').forEach((img) => {
       const src = img.getAttribute('src') || '';
       if (!src || this._isSameOrigin(src)) return;
       const placeholder = document.createElement('button');
@@ -136,7 +148,7 @@ export class MarkdownPane {
       blocked.push(src);
     });
 
-    this.host.querySelectorAll('a[href]').forEach((anchor) => {
+    scope.querySelectorAll('a[href]').forEach((anchor) => {
       const href = anchor.getAttribute('href') || '';
       if (!href || href.startsWith('#') || this._isSameOrigin(href)) return;
       anchor.dataset.externalHref = href;

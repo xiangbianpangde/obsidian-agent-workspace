@@ -43,19 +43,33 @@ async def lifespan(app: FastAPI):
     # Layer 1 of the write-coordination model: refuse an obviously wrong launch.
     # A multi-worker start would give every worker its own path locks, so two
     # requests could interleave a read-modify-write on one sidecar and lose one.
-    from .paper.ownership import VaultWriteLock, assert_single_worker
+    from .paper.ownership import (
+        VaultWriteLock,
+        assert_single_worker,
+        env_allows_readonly_startup,
+    )
     from .paper.writer import VaultWriteService
 
     assert_single_worker()
 
     # Layer 2: stop two separately-started processes from owning the same vault.
     # The in-process locks are layer 3 and remain the actual serialisation.
+    # Fail fast. Swallowing this and serving anyway defeats the entire
+    # single-writer model: a second instance would run alongside the first,
+    # both writing the vault and both running crash recovery over the same
+    # intents. A refusal to start is the correct outcome — the operator either
+    # stops the other instance or removes a stale lock file.
     _vault_lock = VaultWriteLock(vault_root=cfg.vault_root)
-    try:
-        _vault_lock.acquire()
-    except Exception as exc:
-        logger.error("paper vault lock not acquired: %s", exc)
+    if env_allows_readonly_startup():
+        # Explicit opt-out for read-only processes (the acceptance tests). A
+        # writer must never set this, so it is logged rather than silent.
+        logger.warning(
+            "paper vault lock skipped: PAPER_ALLOW_READONLY_STARTUP=1. "
+            "This process must not write to the vault."
+        )
         _vault_lock = None
+    else:
+        _vault_lock.acquire()
 
     # Roll forward any write that a crash interrupted. The filesystem has no
     # cross-file transaction, so an adopted paper can be missing its note and a

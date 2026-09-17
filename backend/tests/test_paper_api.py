@@ -356,12 +356,14 @@ def test_workspace_state_round_trip(client, vault: Path):
     _index(client.storage, vault)
     paper = client.storage.list_papers()[0]
 
+    # A position must reference a source of this paper, so use the real one.
+    real_source = client.storage.list_sources(paper.paper_id)[0]
     response = client.put(
         f"/api/paper/papers/{paper.paper_id}/workspace-state",
         json={
             "active_pane": "PDF",
             "source_positions": {
-                "src_x": {
+                real_source.source_id: {
                     "kind": "PDF",
                     "page_index": 7,
                     "page_offset_ratio": 0.25,
@@ -376,7 +378,7 @@ def test_workspace_state_round_trip(client, vault: Path):
     assert response.status_code == 200, response.text
 
     state = client.get(f"/api/paper/papers/{paper.paper_id}/workspace-state").json()["state"]
-    assert state["source_positions"]["src_x"]["page_index"] == 7
+    assert state["source_positions"][real_source.source_id]["page_index"] == 7
     assert state["state_version"] == 1
 
 

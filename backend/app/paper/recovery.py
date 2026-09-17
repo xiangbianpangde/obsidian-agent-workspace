@@ -160,37 +160,59 @@ def _locate_note_file(
 ) -> Optional[str]:
     """Find a note file mentioned by an intent, without trusting one prefix.
 
-    The intent records the papers-root prefix, but a configuration change can
-    make that stale. Trusting it blindly produced a real hazard: with a stale
-    prefix the lookup missed a file that existed, recovery concluded "neither
-    the file nor the row was written", and committing that intent would leave a
-    note on disk with no row — invisible to the reader, and unrecoverable
-    without noticing the orphan.
+    Two constraints shape this, and the second is a security boundary rather
+    than a convenience:
 
-    So every plausible prefix is tried: the one the intent recorded, the one the
-    live configuration implies, and none at all. Finding the file under any of
-    them means the write did happen.
+    1. The intent records the papers-root prefix, but a configuration change can
+       make it stale. Trusting it blindly missed a file that existed, recovery
+       concluded "neither the file nor the row was written", and committing that
+       intent left a note on disk with no row.
+
+    2. A note ALWAYS lives inside its paper folder. An earlier version fell back
+       to a bare ``rel_path``, so a stray ``notes.md`` at the vault root was
+       found for *every* paper: recovery built a row pointing at an unrelated
+       file, the paper displayed someone else's content, and its real note could
+       never be created (409, permanently).
+
+    The containing check therefore asks whether the candidate's tail equals the
+    paper folder plus the filename — which tolerates any prefix, while still
+    refusing a file that is not under the paper folder.
     """
+    folder_parts = Path(paper.folder_relpath).parts
+    expected_tail = (*folder_parts, rel_path)
+
     candidates: list[str] = []
     for prefix in (recorded_prefix, _configured_papers_root_rel()):
         if prefix:
             candidates.append(str(Path(prefix, paper.folder_relpath, rel_path)))
-    # The paper folder without any prefix, and the bare filename, cover the case
-    # where both the prefix and the folder segment were lost.
     candidates.append(str(Path(paper.folder_relpath, rel_path)))
-    candidates.append(rel_path)
 
     seen: set[str] = set()
     for candidate in candidates:
         if candidate in seen:
             continue
         seen.add(candidate)
+        if not _ends_with_paper_note(candidate, expected_tail):
+            continue
         try:
             service.read(candidate)
             return candidate
         except Exception:
             continue
     return None
+
+
+def _ends_with_paper_note(candidate: str, expected_tail: tuple) -> bool:
+    """True when the candidate path ends with the paper folder and filename.
+
+    A prefix is allowed — the papers root sits between the vault root and the
+    paper folder — but the tail must match exactly, so a same-named file
+    elsewhere in the vault can never satisfy it.
+    """
+    candidate_parts = Path(candidate).parts
+    if len(candidate_parts) < len(expected_tail):
+        return False
+    return tuple(candidate_parts[-len(expected_tail) :]) == expected_tail
 
 
 def _configured_papers_root_rel() -> str:

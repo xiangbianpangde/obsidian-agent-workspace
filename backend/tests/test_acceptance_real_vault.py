@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import sys
 import unittest
@@ -13,6 +15,11 @@ from pathlib import Path
 _backend_dir = str(Path(__file__).resolve().parents[1])
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
+
+# These tests only exercise read-only endpoints. Without this the
+# app's single-writer lock would refuse to start while a server is
+# running, making the suite unrunnable on a live machine.
+os.environ.setdefault('PAPER_ALLOW_READONLY_STARTUP', '1')
 
 from app.config import load_config
 from app.main import app
