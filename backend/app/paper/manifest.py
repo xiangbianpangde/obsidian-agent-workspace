@@ -39,6 +39,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ParsedManifest:
+    """A validated manifest, unpacked by name.
+
+    Deliberately does NOT provide `__iter__` or `__getitem__`: tuple-style
+    unpacking is what let a field be added while two call sites kept unpacking
+    three values. Named access makes every consumer state which fields it uses,
+    so adding a field cannot silently break a caller.
+    """
+
+    paper_id: str
+    sources: List[Dict[str, Any]]
+    note_path: Optional[str] = None
+    note_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class AdoptedIdentity:
     """Identity recorded in a manifest.
 
@@ -129,18 +145,20 @@ def _note_name(paper: Paper, note_rel_path: Optional[str] = None) -> str:
     return DEFAULT_NOTE_FILENAME
 
 
-def parse_manifest(
-    document: Any,
-) -> Tuple[str, List[Dict[str, Any]], Optional[str], Optional[str]]:
+def parse_manifest(document: Any) -> "ParsedManifest":
     """Validate and unpack a manifest.
 
-    Returns ``(paper_id, sources, note_path, note_id)``. Validating on read is
-    what stops a hand-edited or half-written manifest from silently
-    re-identifying a paper.
+    Returns a :class:`ParsedManifest` rather than a tuple. The tuple it replaced
+    grew from three fields to four (the note binding) and two of the three call
+    sites were missed, each raising `ValueError: too many values to unpack` only
+    when its code path ran — paths the test suite did not cover.
 
-    The note id is returned alongside its path because the path alone cannot
-    rebuild a binding: a database rebuild needs the stable id to re-attach the
-    note, and dropping it here is what left the recovery chain half-connected.
+    A named record makes that class of mistake impossible rather than merely
+    unlikely: there is no arity to get wrong, and the field a caller ignores is
+    visible in the source instead of being a positional blank.
+
+    Validating on read is what stops a hand-edited or half-written manifest from
+    silently re-identifying a paper.
     """
     try:
         validate_manifest(document)
@@ -149,7 +167,12 @@ def parse_manifest(
 
     sources = document.get("sources") or []
     note = document.get("note") or {}
-    return document["paper_id"], sources, note.get("path"), note.get("note_id")
+    return ParsedManifest(
+        paper_id=document["paper_id"],
+        sources=sources,
+        note_path=note.get("path"),
+        note_id=note.get("note_id"),
+    )
 
 
 def manifest_to_sources(paper_id: str, entries: List[Dict[str, Any]]) -> List[PaperSource]:
@@ -202,7 +225,9 @@ def reconcile_with_manifest(
     the manifest wins, because that is the record that survives a database
     rebuild.
     """
-    manifest_id, entries, note_path = parse_manifest(document)
+    parsed = parse_manifest(document)
+    manifest_id, entries = parsed.paper_id, parsed.sources
+    note_path, note_id = parsed.note_path, parsed.note_id
     paper.paper_id = manifest_id
     paper.manifest_relpath = MANIFEST_FILENAME
     if document.get("title_override"):
@@ -314,7 +339,8 @@ def ensure_adopted(
         existing = read_manifest_file(service, rel)
         if existing is None:
             raise ManifestError(f"cannot adopt paper {paper.paper_id}: {exc}") from exc
-        existing_id, entries, _note = parse_manifest(existing)
+        parsed_existing = parse_manifest(existing)
+        existing_id, entries = parsed_existing.paper_id, parsed_existing.sources
         if existing_id != paper.paper_id:
             raise ManifestInvalidError(
                 f"adoption race produced two identities for {paper.folder_relpath}: "
@@ -345,9 +371,12 @@ def load_adopted_identity(
     document = read_manifest_file(service, rel)
     if document is None:
         return None
-    paper_id, entries, note_path, note_id = parse_manifest(document)
+    parsed = parse_manifest(document)
     return AdoptedIdentity(
-        paper_id=paper_id, sources=entries, note_path=note_path, note_id=note_id
+        paper_id=parsed.paper_id,
+        sources=parsed.sources,
+        note_path=parsed.note_path,
+        note_id=parsed.note_id,
     )
 
 

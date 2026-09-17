@@ -1490,3 +1490,118 @@ def test_scenario_manifest_records_a_custom_note_filename(workbench_like):
     assert document["note"]["path"] == "我的阅读笔记.md", (
         "the manifest must record the note's real filename, not an assumed one"
     )
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — every manifest call site must be exercised
+# ---------------------------------------------------------------------------
+
+_MANIFEST_DOC = {
+    "schema_version": 1,
+    "paper_id": "pw_3d9e1234-5678-4abc-89de-0123456789ab",
+    "title_override": None,
+    "sources": [
+        {
+            "source_id": "src_a12f1234-5678-4abc-89de-0123456789ab",
+            "role": "ORIGINAL_PDF",
+            "path": "a.pdf",
+            "primary": True,
+            "active": True,
+        }
+    ],
+    "note": {"note_id": "note_f8cd1234-5678-4abc-89de-0123456789ab", "path": "notes.md"},
+    "annotation_store": "paper.annotations.json",
+    "tags": [],
+    "created_at": "2026-09-16T00:00:00Z",
+    "updated_at": "2026-09-16T00:00:00Z",
+    "inactive_at": None,
+}
+
+
+def test_scenario_parsed_manifest_cannot_be_positionally_unpacked():
+    """解析结果必须拒绝位置解包 —— 这正是漏改两处调用点的根因.
+
+    parse_manifest grew from three fields to four. Two of the three call sites
+    kept unpacking three values and raised `ValueError: too many values to
+    unpack` — but only when their code path ran, which no test covered. Named
+    access removes the failure mode instead of relying on remembering to update
+    every call site.
+    """
+    from backend.app.paper.manifest import ParsedManifest, parse_manifest
+
+    parsed = parse_manifest(_MANIFEST_DOC)
+    assert isinstance(parsed, ParsedManifest)
+    assert parsed.paper_id == _MANIFEST_DOC["paper_id"]
+    assert parsed.note_id == _MANIFEST_DOC["note"]["note_id"]
+
+    with pytest.raises(TypeError):
+        a, b, c = parsed  # noqa: F841
+
+
+def test_scenario_reconcile_with_manifest_runs(tmp_path: Path):
+    """评审者指出：这条路径此前完全没有测试覆盖，改返回值即崩."""
+    from backend.app.paper.manifest import reconcile_with_manifest
+    from backend.app.paper.models import Paper
+
+    paper = reconcile_with_manifest(
+        Paper(paper_id="pw_temp", folder_relpath="方向/论文A"), [], _MANIFEST_DOC
+    )
+    # The manifest is authoritative for identity.
+    assert paper.paper_id == _MANIFEST_DOC["paper_id"]
+
+
+def test_scenario_adoption_race_branch_runs(tmp_path: Path, monkeypatch):
+    """评审者指出：采纳竞态分支同样没有覆盖，改返回值即崩.
+
+    The branch is reached when the manifest already exists on disk — another
+    writer adopted the paper between our check and our create.
+    """
+    import backend.app.state as app_state
+    from backend.app.paper.manifest import ensure_adopted
+    from backend.app.paper.models import Paper
+    from backend.app.paper.writer import VaultWriteService
+
+    vault = tmp_path / "vault"
+    papers_root = vault / "论文根"
+    paper_dir = papers_root / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_V1)
+    # A manifest already present, as if a concurrent request had just written it.
+    (paper_dir / "paper.workbench.json").write_text(
+        json.dumps(_MANIFEST_DOC), encoding="utf-8"
+    )
+
+    papers_root_ = papers_root
+
+    class _Cfg:
+        vault_path = vault
+        vault_root = vault
+        papers_root = papers_root_
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+
+    storage = PaperStorage(tmp_path / "race.db")
+    storage.upsert_paper(
+        Paper(
+            paper_id=_MANIFEST_DOC["paper_id"],
+            folder_relpath="方向/论文A",
+            display_title="t",
+        )
+    )
+    service = VaultWriteService(vault, backup_root=tmp_path / "bk")
+
+    adopted = ensure_adopted(
+        storage,
+        service,
+        storage.get_paper(_MANIFEST_DOC["paper_id"]),
+        [],
+        operation="status_change",
+        papers_root_rel="论文根",
+    )
+    assert adopted.manifest_relpath, "the race branch must adopt the existing manifest"
+    storage.close()
