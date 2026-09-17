@@ -20,12 +20,13 @@ const DEBOUNCE_MS = 750;
 /** Longest a dirty buffer may sit unsaved while the user keeps typing. */
 const MAX_INTERVAL_MS = 5000;
 
-export class NoteEditor {
+export class NoteEditor extends EventTarget {
   /**
    * @param {HTMLElement} host
    * @param {{load: Function, save: Function, create: Function}} io
    */
   constructor(host, io) {
+    super();
     if (!host) throw new Error('note host element is required');
     this.host = host;
     this.io = io;
@@ -282,8 +283,16 @@ export class NoteEditor {
     if (this.el?.state) this.el.state.textContent = text;
   }
 
+  /**
+   * Emit on the editor instance.
+   *
+   * The workbench listens on the instance (`note.addEventListener('saved', ...)`),
+   * so dispatching on the host element would leave every listener silent. This
+   * class also has to be an EventTarget for the same reason — a mismatch here
+   * is invisible until the mount path runs in a browser.
+   */
   _emit(type, detail) {
-    this.host.dispatchEvent(new CustomEvent(type, { detail, bubbles: true }));
+    this.dispatchEvent(new CustomEvent(type, { detail }));
   }
 
   dispose() {

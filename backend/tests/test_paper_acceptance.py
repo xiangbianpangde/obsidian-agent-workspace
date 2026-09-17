@@ -1605,3 +1605,46 @@ def test_scenario_adoption_race_branch_runs(tmp_path: Path, monkeypatch):
     )
     assert adopted.manifest_relpath, "the race branch must adopt the existing manifest"
     storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — frontend modules must load and satisfy their mount-time contracts
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_frontend_modules_load_and_expose_their_contracts():
+    """前端模块必须真实加载并满足挂载期契约.
+
+    The canary run failed with `this.note.addEventListener is not a function`
+    while 385 tests passed, because every frontend assertion until then read the
+    module source as text. Source text cannot reveal a missing method, a class
+    that should extend EventTarget, or a listener attached to the wrong object —
+    all of which only surface when the code runs.
+
+    This executes every paper ES module under a minimal DOM shim and asserts the
+    contracts the workbench relies on at mount time.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to exercise the browser modules")
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "frontend_smoke.mjs"
+    assert fixture.is_file(), "the frontend smoke fixture must be present"
+
+    completed = subprocess.run(
+        [node, str(fixture), str(REPO_ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, (
+        f"frontend modules failed to satisfy their contracts:\n"
+        f"{completed.stdout[-800:]}\n{completed.stderr[-400:]}"
+    )
+    report = _json.loads(completed.stdout.strip().splitlines()[-1])
+    assert report["failures"] == [], f"contract failures: {report['failures']}"
+    assert report["total"] >= 40, "the smoke test must cover the module contracts"
