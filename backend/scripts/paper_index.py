@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 from collections import Counter
 from pathlib import Path
 
@@ -29,6 +30,33 @@ from backend.app.paper.manifest import (
 from backend.app.paper.scanner import ScanConfig, discover_papers
 from backend.app.paper.storage import PaperStorage
 from backend.app.paper.writer import VaultWriteService
+
+
+
+def _unchanged(prior: Any, source: Any) -> bool:
+    """True when the file's content appears untouched since the last index."""
+    if prior.sha256 is None:
+        return False
+    if prior.sha256 != source.sha256:
+        return False
+    if prior.size_bytes is not None and prior.size_bytes != source.size_bytes:
+        return False
+    if prior.mtime_ns is not None and prior.mtime_ns != source.mtime_ns:
+        return False
+    return True
+
+
+def _next_version(prior: Any, source: Any) -> int:
+    """Advance the version when the bytes changed, keep it when they did not.
+
+    Carrying the previous version forward unconditionally made every file look
+    immutable: replacing a PDF in place left version at 1, so `?version=1` kept
+    serving the new file and 412 could never fire (ADR-009).
+    """
+    if prior is None:
+        return 1
+    previous = prior.source_version or 1
+    return previous if _unchanged(prior, source) else previous + 1
 
 
 def index_papers(dry_run: bool = False) -> dict:
@@ -53,7 +81,22 @@ def index_papers(dry_run: bool = False) -> dict:
     updated = 0
     sources_written = 0
     conflicts = 0
+    retired = 0
     result_errors: list[str] = []
+
+    # Every folder this scan actually saw. A manifest id appearing at a new
+    # folder is only a *move* if the folder it used to occupy is gone; if both
+    # are present the user copied the folder, and one identity occupying two
+    # live locations must fail closed rather than silently relocating (ADR-006).
+    scanned_folders = {p.folder_relpath for p in result.papers}
+
+    # Current folder bindings, so a manifest id can be compared against where
+    # the database believes that paper lives.
+    existing_by_id = (
+        {p.paper_id: p for p in storage.list_papers(include_inactive=True)}
+        if storage is not None
+        else {}
+    )
 
     for paper in result.papers:
         parts = paper.folder_relpath.split("/")
@@ -75,8 +118,26 @@ def index_papers(dry_run: bool = False) -> dict:
             result_errors.append(f"manifest unreadable for {paper.folder_relpath}: {exc}")
 
         existing = storage.get_paper_by_folder(paper.folder_relpath)
+
         if adopted:
-            paper.paper_id = adopted[0]
+            manifest_id = adopted[0]
+            owner = existing_by_id.get(manifest_id)
+            if owner is not None and owner.folder_relpath != paper.folder_relpath:
+                if owner.folder_relpath in scanned_folders:
+                    # Both folders exist on disk. The manifest was copied, so
+                    # this is a duplicate identity, not a move. Recording it
+                    # would relocate the original paper and orphan every note
+                    # and annotation anchored to its old location.
+                    conflicts += 1
+                    result_errors.append(
+                        f"duplicate paper identity: {manifest_id} exists in both "
+                        f"'{owner.folder_relpath}' and '{paper.folder_relpath}'"
+                    )
+                    continue
+                # The previous folder is gone, so this is a genuine move; the
+                # identity travels with the folder and keeps its status,
+                # notes and annotations.
+            paper.paper_id = manifest_id
             paper.manifest_relpath = MANIFEST_FILENAME
         elif existing:
             paper.paper_id = existing.paper_id
@@ -118,36 +179,39 @@ def index_papers(dry_run: bool = False) -> dict:
         )
         for source in paper.sources:
             from_manifest = manifest_sources.get(source.rel_path)
+            prior = existing_sources.get(source.rel_path)
+
             if from_manifest is not None:
-                # Keep the id the Vault recorded; re-derive the runtime facts.
+                # The Vault recorded an identity for this path, so keep it. The
+                # runtime facts (hash, size, version) are still re-derived here,
+                # otherwise a PDF replaced in place would keep version 1 and
+                # `?version=1` would keep serving the new bytes.
                 source.source_id = from_manifest.source_id
-                prior = existing_sources.get(source.rel_path)
-                source.source_version = prior.source_version if prior else 1
-                if prior and prior.sha256 == source.sha256:
+                source.created_at = prior.created_at if prior else source.created_at
+                source.source_version = _next_version(prior, source)
+                if prior and _unchanged(prior, source):
                     source.sha256 = prior.sha256
-            if prior and from_manifest is None:
-                # Reuse identity, but only inherit the version when the bytes
-                # are actually unchanged. Blindly carrying source_version and
-                # sha256 forward made every file look immutable: replacing a
-                # PDF in place left version at 1, so `?version=1` kept serving
-                # the new file and 412 could never fire (ADR-009).
+            elif prior is not None:
+                # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
                 source.created_at = prior.created_at
-
-                changed = (
-                    prior.sha256 is None
-                    or prior.sha256 != source.sha256
-                    or (prior.size_bytes is not None and prior.size_bytes != source.size_bytes)
-                    or (prior.mtime_ns is not None and prior.mtime_ns != source.mtime_ns)
-                )
-                if changed:
-                    source.source_version = (prior.source_version or 1) + 1
-                else:
-                    source.source_version = prior.source_version or 1
+                source.source_version = _next_version(prior, source)
+                if _unchanged(prior, source):
                     source.sha256 = prior.sha256
             source.paper_id = paper.paper_id
             storage.upsert_source(source)
             sources_written += 1
+
+        # Retire bindings the scan no longer sees. Without this a renamed or
+        # removed file stays active forever, so the paper keeps offering a PDF
+        # that is not on disk and the reader 404s on a source it was told about.
+        # Deactivation, never deletion: the row keeps its identity and history
+        # (ADR-002).
+        seen_paths = {s.rel_path for s in paper.sources}
+        for rel_path, prior_source in existing_sources.items():
+            if prior_source.active and rel_path not in seen_paths:
+                storage.deactivate_source(prior_source.source_id)
+                retired += 1
 
         # Re-point the paper at whichever source ends up primary this run.
         primary_pdf = next(
@@ -169,6 +233,7 @@ def index_papers(dry_run: bool = False) -> dict:
         "updated": updated,
         "sources": sources_written,
         "conflicts": conflicts,
+        "retired": retired,
         "binding_states": dict(states),
         "errors": result.errors,
     }

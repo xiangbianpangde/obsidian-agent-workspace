@@ -9,6 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import logging
+
 from .api import agentsview as agentsview_api
 from .api import assignment as assignment_api
 from .api import files as files_api
@@ -23,16 +25,37 @@ from .database import sqlite
 from .state import get_cfg, init_state
 
 observer = None
+logger = logging.getLogger(__name__)
+#: Module-level so the lock outlives the request that created it and is
+#: released at process exit.
+_vault_lock = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global observer
+    global observer, _vault_lock
     try:
         cfg = get_cfg()
     except Exception:
         cfg = load_config()
         init_state(cfg)
+
+    # Layer 1 of the write-coordination model: refuse an obviously wrong launch.
+    # A multi-worker start would give every worker its own path locks, so two
+    # requests could interleave a read-modify-write on one sidecar and lose one.
+    from .paper.ownership import VaultWriteLock, assert_single_worker
+
+    assert_single_worker()
+
+    # Layer 2: stop two separately-started processes from owning the same vault.
+    # The in-process locks are layer 3 and remain the actual serialisation.
+    _vault_lock = VaultWriteLock(vault_root=cfg.vault_root)
+    try:
+        _vault_lock.acquire()
+    except Exception as exc:
+        logger.error("paper vault lock not acquired: %s", exc)
+        _vault_lock = None
+
     watchdog_conn = None
     im_coordinator = im_api.get_im_coordinator()
     try:

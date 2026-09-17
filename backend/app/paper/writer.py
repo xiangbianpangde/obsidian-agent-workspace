@@ -99,6 +99,15 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _fsync_dir(path: Path) -> None:
+    """Sync a directory entry so a rename survives a crash."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class VaultWriteService:
     """All Vault mutations for the paper subsystem funnel through here."""
 
@@ -220,9 +229,18 @@ class VaultWriteService:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not target.exists():
             tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-            tmp.write_bytes(preimage)
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                _write_all(fd, preimage)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
             os.replace(tmp, target)
             os.chmod(target, 0o600)
+            # The directory entry itself must be synced, or a crash right after
+            # the rename can lose the backup while the original is already
+            # replaced — leaving neither version.
+            _fsync_dir(target.parent)
         return str(target)
 
     # ------------------------------------------------------------ atomic I/O
@@ -252,11 +270,7 @@ class VaultWriteService:
                 tmp.unlink(missing_ok=True)
             raise
 
-        dir_fd = os.open(full.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        _fsync_dir(full.parent)
 
     # ---------------------------------------------------------------- public
     def read(self, rel_path: str) -> Tuple[bytes, str]:
@@ -308,11 +322,7 @@ class VaultWriteService:
                 if tmp.exists():
                     tmp.unlink(missing_ok=True)
 
-            dir_fd = os.open(full.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            _fsync_dir(full.parent)
 
         return WriteResult(
             rel_path=self.relpath(full),

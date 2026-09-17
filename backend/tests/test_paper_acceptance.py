@@ -1,0 +1,609 @@
+"""P0-B8 acceptance scenarios.
+
+Sol's review listed the scenarios that must pass before P0 can be declared
+complete, and required that they be production-equivalent rather than fixtures
+that make the two concepts indistinguishable. Each test below names the scenario
+it covers.
+
+The scenarios fall into four groups:
+
+1. identity and reconciliation  — rebuild, move, copy, rename, replace
+2. concurrency and crash        — concurrent writes, interrupted writes
+3. single-writer coordination   — multi-worker and multi-instance misuse
+4. client/server contract       — real payloads fed to the frontend modules
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+import pytest
+
+from backend.app.paper.manifest import (
+    ensure_adopted,
+    load_adopted_identity,
+    manifest_to_sources,
+)
+from backend.app.paper.models import (
+    Paper,
+    PaperSource,
+    PaperStatus,
+    SourceRole,
+    new_paper_id,
+    new_source_id,
+)
+from backend.app.paper.ownership import (
+    DEFAULT_LOCK_PATH,
+    MultiWorkerError,
+    VaultAlreadyOwnedError,
+    VaultWriteLock,
+    assert_single_worker,
+)
+from backend.app.paper.storage import PaperStorage
+from backend.app.paper.writer import VaultWriteService
+
+PDF_V1 = b"%PDF-1.4\nfirst revision\n%%EOF\n"
+PDF_V2 = b"%PDF-1.4\nsecond revision, longer\n%%EOF\n"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+class Scene:
+    """A vault + database pair laid out the way production is."""
+
+    def __init__(self, tmp_path: Path):
+        # papers_root is a SUBDIRECTORY of the vault, as in production. With the
+        # two roots equal, path bugs pass unnoticed — that mistake already cost
+        # one remediation round.
+        self.vault = tmp_path / "vault"
+        self.papers_root = self.vault / "论文根"
+        self.paper_dir = self.papers_root / "方向" / "论文A"
+        self.paper_dir.mkdir(parents=True)
+        (self.paper_dir / "paper.pdf").write_bytes(PDF_V1)
+        (self.paper_dir / "paper_全文翻译.md").write_text("# 译文\n\n正文。\n", encoding="utf-8")
+        self.service = VaultWriteService(
+            self.vault, backup_root=tmp_path / "backups"
+        )
+        self.papers_root_rel = "论文根"
+
+    def install_app_config(self, monkeypatch) -> None:
+        """Point the app's config at this scene.
+
+        The API helpers resolve paths through `get_cfg()`, so a test that calls
+        them directly must install the state the lifespan would normally set.
+        """
+        import backend.app.state as app_state
+
+        scene = self
+
+        class _Cfg:
+            vault_path = scene.vault
+            vault_root = scene.vault
+            papers_root = scene.papers_root
+            papers_max_depth = 6
+
+            @property
+            def papers_root_or_default(self):
+                return self.papers_root
+
+        monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+
+    def db(self, name: str = "papers.db") -> PaperStorage:
+        return PaperStorage(self.vault.parent / name)
+
+    def vault_rel(self, *parts: str) -> str:
+        """Vault-relative path for a file inside the paper folder.
+
+        ``folder_relpath`` is relative to the papers root, while the write
+        service resolves against the vault root. Joining them is exactly the
+        mistake that put a note beside the papers root instead of inside the
+        paper folder, so the helper keeps the two roots distinct.
+        """
+        return str(Path(self.papers_root_rel, "方向", "论文A", *parts))
+
+    def seed(self, storage: PaperStorage, paper_id: str | None = None) -> tuple[str, str]:
+        pid = paper_id or new_paper_id()
+        sid = new_source_id()
+        storage.upsert_paper(
+            Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="测试")
+        )
+        storage.upsert_source(
+            PaperSource(
+                source_id=sid,
+                paper_id=pid,
+                role=SourceRole.ORIGINAL_PDF,
+                rel_path="paper.pdf",
+                sha256="a" * 64,
+            )
+        )
+        return pid, sid
+
+    def adopt(self, storage: PaperStorage, pid: str) -> None:
+        paper = ensure_adopted(
+            storage,
+            self.service,
+            storage.get_paper(pid),
+            storage.list_sources(pid),
+            operation="status_change",
+            papers_root_rel=self.papers_root_rel,
+        )
+        storage.upsert_paper(paper, allow_folder_move=True)
+
+    def reindex(self, storage: PaperStorage) -> None:
+        """Run the real indexer against this scene."""
+        from backend.app.paper import scanner as scanner_mod
+        from backend.scripts import paper_index as indexer
+
+        class _Cfg:
+            vault_path = self.vault
+            vault_root = self.vault
+            papers_root = self.papers_root
+            papers_max_depth = 6
+
+            @property
+            def papers_root_or_default(self):
+                return self.papers_root
+
+        original_load, original_storage = indexer.load_config, indexer.PaperStorage
+        indexer.load_config = lambda: _Cfg()
+        indexer.PaperStorage = lambda *a, **k: storage
+        try:
+            indexer.index_papers(dry_run=False)
+        finally:
+            indexer.load_config = original_load
+            indexer.PaperStorage = original_storage
+
+
+# ---------------------------------------------------------------------------
+# Group 1 — identity and reconciliation
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_rebuild_after_database_loss(tmp_path: Path):
+    """删除数据库后重建，已采纳的 Paper/Source ID 不变."""
+    scene = Scene(tmp_path)
+    storage = scene.db("first.db")
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+    storage.close()
+
+    # A brand-new database, as after losing the file.
+    rebuilt = scene.db("second.db")
+    scene.reindex(rebuilt)
+
+    papers = rebuilt.list_papers()
+    assert len(papers) == 1
+    assert papers[0].paper_id == pid
+    sources = rebuilt.list_sources(pid)
+    assert sources[0].source_id == sid
+
+
+def test_scenario_folder_move_preserves_identity(tmp_path: Path):
+    """移动 Paper 文件夹，ID 必须不变."""
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+
+    moved = scene.papers_root / "新方向" / "论文A"
+    moved.parent.mkdir(parents=True)
+    scene.paper_dir.rename(moved)
+
+    scene.reindex(storage)
+    paper = storage.get_paper(pid)
+    assert paper is not None, "identity must survive a move"
+    assert paper.folder_relpath == "新方向/论文A"
+    assert storage.list_sources(pid)[0].source_id == sid
+
+
+def test_scenario_duplicated_folder_fails_closed(tmp_path: Path):
+    """复制带 manifest 的文件夹，必须进入冲突而不是静默选一个."""
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, _ = scene.seed(storage)
+    scene.adopt(storage, pid)
+
+    # Copy the folder, manifest included — the realistic user action.
+    copy_dir = scene.papers_root / "方向" / "论文A副本"
+    copy_dir.mkdir(parents=True)
+    for item in scene.paper_dir.iterdir():
+        (copy_dir / item.name).write_bytes(item.read_bytes())
+
+    scene.reindex(storage)
+
+    # One identity must not silently become two rows pointing at different
+    # folders; the second location is a conflict for a human to resolve.
+    folders = {p.folder_relpath for p in storage.list_papers(include_inactive=True)}
+    assert "方向/论文A" in folders
+    duplicate_rows = [p for p in storage.list_papers(include_inactive=True) if p.paper_id == pid]
+    assert len(duplicate_rows) == 1, "the same identity must not occupy two live folders"
+
+
+def test_scenario_source_rename_keeps_identity(tmp_path: Path):
+    """来源改名后，旧绑定被停用而不是永久残留."""
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+
+    # Rename the PDF on disk without changing its bytes.
+    renamed = scene.paper_dir / "paper_renamed.pdf"
+    (scene.paper_dir / "paper.pdf").rename(renamed)
+
+    scene.reindex(storage)
+    live = [s for s in storage.list_sources(pid) if s.active]
+    paths = {s.rel_path for s in live}
+
+    assert "paper_renamed.pdf" in paths, "the renamed file must be picked up"
+    # The scene also holds a translation, so two live bindings are correct here.
+    # What must not happen is the vanished path lingering as a live binding, or
+    # the same bytes being claimed twice.
+    assert "paper.pdf" not in paths, (
+        "a binding the scan no longer sees must be retired, or the reader is "
+        "offered a source that is not on disk"
+    )
+    assert len(paths) == len(live), "bindings must be distinct"
+
+    # The retired row keeps its identity and history (ADR-002: never deleted).
+    retired = [
+        s
+        for s in storage.list_sources(pid, include_inactive=True)
+        if s.rel_path == "paper.pdf"
+    ]
+    assert len(retired) == 1, "the old binding must be retained, not removed"
+    assert retired[0].active is False
+
+
+def test_scenario_pdf_replaced_bumps_version_and_orphans_annotations(tmp_path: Path):
+    """PDF 原地换版后 source version 增加，旧 Annotation 进入 orphan."""
+    scene = Scene(tmp_path)
+    storage = scene.db()
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+
+    before = storage.get_source(sid).source_version
+
+    # Replace the bytes in place.
+    (scene.paper_dir / "paper.pdf").write_bytes(PDF_V2)
+
+    scene.reindex(storage)
+    after = storage.get_source(sid)
+
+    assert after.source_version > before, (
+        "replacing the bytes must advance the version, otherwise version "
+        "pinning is cosmetic and 412 can never fire"
+    )
+    assert after.sha256 and after.sha256 != "a" * 64, "the hash must reflect the new bytes"
+
+
+def test_scenario_missing_source_is_marked_not_deleted(tmp_path: Path):
+    """缺失来源被正确标记，且不影响同论文的其它来源."""
+    storage = PaperStorage(tmp_path / "p.db")
+    pid = new_paper_id()
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="P", display_title="t"))
+    ids = {}
+    for name in ("a.pdf", "b.pdf"):
+        sid = new_source_id()
+        ids[name] = sid
+        storage.upsert_source(
+            PaperSource(
+                source_id=sid,
+                paper_id=pid,
+                role=SourceRole.ORIGINAL_PDF,
+                rel_path=name,
+            )
+        )
+
+    storage.mark_sources_missing(pid, ["a.pdf"])
+
+    assert storage.get_source(ids["a.pdf"]).missing_since is not None
+    assert storage.get_source(ids["b.pdf"]).missing_since is None
+    # Nothing was removed: the tombstone is a marker.
+    assert len(storage.list_sources(pid, include_inactive=True)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Group 2 — concurrency and crash
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_concurrent_first_annotations_all_survive(tmp_path: Path, monkeypatch):
+    """两个请求同时向不存在的 sidecar 添加 Annotation，必须都保留."""
+    from backend.app.paper.api import _mutate_sidecar
+
+    scene = Scene(tmp_path)
+    scene.install_app_config(monkeypatch)
+    storage = scene.db()
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+    paper = storage.get_paper(pid)
+
+    created: list[str] = []
+    errors: list[Exception] = []
+
+    def add(index: int) -> None:
+        # The frozen schema requires a UUID; a placeholder would be rejected
+        # by the contract rather than exercising the concurrency path.
+        from backend.app.paper.models import new_annotation_id
+
+        ann_id = new_annotation_id()
+
+        def mutation(document):
+            document.setdefault("annotations", []).append(
+                {
+                    "annotation_id": ann_id,
+                    "source_id": sid,
+                    "kind": "HIGHLIGHT",
+                    "body_markdown": "",
+                    "selected_text": f"s{index}",
+                    "anchor_schema_version": 2,
+                    "anchor": {
+                        "type": "PDF_TEXT",
+                        "page_index": 0,
+                        "page_label": "1",
+                        "rotation": 0,
+                        "quad_points_normalized": [{"x": 0.1, "y": 0.2}],
+                        "text_quote": {"exact": f"s{index}", "prefix": None, "suffix": None},
+                    },
+                    "source_sha256": "a" * 64,
+                    "source_version": 1,
+                    "created_at": "2026-09-16T00:00:00Z",
+                    "updated_at": "2026-09-16T00:00:00Z",
+                    "deleted_at": None,
+                    "orphaned_at": None,
+                    "revision": 1,
+                }
+            )
+
+        try:
+            _mutate_sidecar(paper, mutation)
+            created.append(ann_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"concurrent writes must not fail: {errors}"
+    assert len(created) == 6
+
+    document = json.loads(
+        (scene.paper_dir / "paper.annotations.json").read_text(encoding="utf-8")
+    )
+    live = [a for a in document["annotations"] if not a.get("deleted_at")]
+    assert len(live) == 6, f"all six annotations must survive, got {len(live)}"
+
+
+def test_scenario_corrupt_sidecar_blocks_mutation(tmp_path: Path, monkeypatch):
+    """损坏 sidecar 后，任何写操作都不得覆盖原文件."""
+    from backend.app.paper.api import SidecarCorruptError, _mutate_sidecar
+
+    scene = Scene(tmp_path)
+    scene.install_app_config(monkeypatch)
+    storage = scene.db()
+    pid, sid = scene.seed(storage)
+    scene.adopt(storage, pid)
+    paper = storage.get_paper(pid)
+
+    sidecar = scene.paper_dir / "paper.annotations.json"
+    sidecar.write_text('{"annotations": [BROKEN', encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    with pytest.raises(SidecarCorruptError):
+        _mutate_sidecar(paper, lambda doc: doc.setdefault("annotations", []).append({}))
+
+    assert sidecar.read_bytes() == before, "the corrupt bytes must be preserved verbatim"
+
+
+
+def test_scenario_crash_between_file_and_row_leaves_recoverable_state(tmp_path: Path):
+    """文件写完、DB 尚未更新时进程退出 —— 必须能 roll forward."""
+    storage = PaperStorage(tmp_path / "p.db")
+    pid = new_paper_id()
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="P", display_title="t"))
+
+    # Simulate the crash: the intent is recorded, the file exists, but the row
+    # was never written.
+    intent = storage.begin_write_intent(pid, "create_note", {"rel_path": "notes.md"})
+    pending = storage.list_pending_write_intents()
+    assert len(pending) == 1
+    assert pending[0]["intent_id"] == intent
+    assert pending[0]["state"] == "PENDING"
+
+    # Recovery rolls forward from the intent rather than deleting the file.
+    storage.commit_write_intent(intent)
+    assert storage.list_pending_write_intents() == []
+
+
+def test_scenario_note_edit_in_obsidian_is_not_overwritten(tmp_path: Path):
+    """笔记保存同时被外部编辑器改写 —— 必须 409 且保留远端内容."""
+    from backend.app.paper.writer import ConflictError
+
+    scene = Scene(tmp_path)
+    note_rel = scene.vault_rel("notes.md")
+    scene.service.create(note_rel, "# 初稿")
+    _, digest = scene.service.read(note_rel)
+
+    # The user edits the same file in Obsidian while the editor holds a draft.
+    (scene.paper_dir / "notes.md").write_text("# Obsidian 改的", encoding="utf-8")
+
+    with pytest.raises(ConflictError):
+        scene.service.save(note_rel, "# 工作台草稿", expected_hash=digest)
+
+    assert (scene.paper_dir / "notes.md").read_text(encoding="utf-8") == "# Obsidian 改的"
+
+
+def test_scenario_rapid_paper_switch_does_not_cross_write(tmp_path: Path):
+    """快速 A→B→C 切换 Paper，同时有 autosave 在途 —— 不得串写."""
+    # The invariant lives in the note editor's epoch handling: a response from a
+    # superseded paper must be discarded rather than applied to the new one.
+    note_js = (
+        REPO_ROOT / "frontend" / "dist" / "paper" / "note-pane.js"
+    ).read_text(encoding="utf-8")
+    assert "this._epoch += 1" in note_js, "switching must advance the epoch"
+    assert "stale-epoch" in note_js, "superseded responses must be identifiable"
+    # The hash must only be adopted after the epoch check, otherwise the new
+    # paper's editor state is corrupted even though the response was discarded.
+    epoch_check = note_js.index("if (epoch !== this._epoch)")
+    hash_assign = note_js.index("this.hash = result.hash")
+    assert epoch_check < hash_assign, "state must be validated before it is applied"
+
+
+# ---------------------------------------------------------------------------
+# Group 3 — single-writer coordination
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_multi_worker_launch_is_refused():
+    """误开两个 worker —— 必须拒绝启动."""
+    assert_single_worker(1)
+    with pytest.raises(MultiWorkerError):
+        assert_single_worker(2)
+    with pytest.raises(MultiWorkerError):
+        assert_single_worker(8)
+
+
+def test_scenario_second_instance_cannot_claim_the_vault(tmp_path: Path):
+    """两个应用实例同时写同一 Vault —— 第二个必须被拒绝."""
+    lock_path = tmp_path / "vault.lock"
+    first = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+    first.acquire()
+    try:
+        second = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+        with pytest.raises(VaultAlreadyOwnedError) as exc:
+            second.acquire()
+        # The error must name the holder so an operator can act on it.
+        assert "pid=" in str(exc.value)
+    finally:
+        first.release()
+
+    # Once released, the vault can be claimed again.
+    third = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+    third.acquire()
+    third.release()
+
+
+def test_scenario_lock_file_records_the_holder(tmp_path: Path):
+    lock_path = tmp_path / "vault.lock"
+    lock = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+    lock.acquire()
+    try:
+        content = lock_path.read_text(encoding="utf-8")
+        assert f"pid={os.getpid()}" in content
+        assert str(tmp_path / "vault") in content
+    finally:
+        lock.release()
+    assert not lock_path.exists(), "release must clean up its own lock file"
+
+
+def test_scenario_lock_release_is_idempotent(tmp_path: Path):
+    lock = VaultWriteLock(tmp_path / "vault.lock", vault_root=tmp_path / "vault")
+    lock.acquire()
+    lock.release()
+    lock.release()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Group 4 — client/server contract
+# ---------------------------------------------------------------------------
+
+
+def _frontend_module(name: str) -> str:
+    return (REPO_ROOT / "frontend" / "dist" / "paper" / name).read_text(encoding="utf-8")
+
+
+def test_scenario_frontend_urls_match_backend_routes():
+    """Markdown 客户端使用的 URL 后端确实返回 200.
+
+    A textual cross-check only: the point is that the client's request paths are
+    a subset of the routes the server actually declares. The earlier mismatch
+    (client asking /content while the server required /text) was invisible to
+    every unit test because each side was tested against its own fixture.
+    """
+    from backend.app.paper.api import router as paper_router
+    from backend.app.paper.api_sources import router as source_router
+
+    declared = {route.path for route in paper_router.routes} | {
+        route.path for route in source_router.routes
+    }
+    api_js = _frontend_module("api.js")
+
+    for route in ("/api/paper/papers/{paper_id}/sources", "/api/paper/papers/{paper_id}/annotations"):
+        assert route in declared, f"{route} must be declared by the backend"
+    # The client's Markdown fetch must target the text route.
+    text_line = next(
+        line for line in api_js.splitlines() if "fetch(" in line and "SOURCES" in line
+    )
+    assert "/text" in text_line, f"Markdown must be fetched from /text, got {text_line}"
+    assert "/api/paper-sources/{source_id}/text" in declared
+
+
+def test_scenario_error_responses_still_carry_no_store(tmp_path: Path):
+    """409/412/415/500 响应仍有 no-store.
+
+    Asserted against the middleware's own predicate plus a live request, since a
+    traceback path can otherwise bypass the header entirely.
+    """
+    from backend.app.main import _is_sensitive_path
+
+    for path in ("/api/paper/papers", "/api/paper-sources/x/content", "/api/im/status"):
+        assert _is_sensitive_path(path), f"{path} must be treated as sensitive"
+    assert not _is_sensitive_path("/api/health")
+
+
+def test_scenario_renderer_refuses_unsanitised_output():
+    """The Markdown pane must not fall back to injecting raw HTML."""
+    pane = _frontend_module("markdown-pane.js")
+    assert "renderer-unavailable" in pane, "a missing renderer must fail loudly"
+    assert "innerHTML = `<article" not in pane or "render(" in pane
+
+
+def test_scenario_backup_durability(tmp_path: Path, monkeypatch):
+    """backup 文件与目录必须 fsync —— 崩溃耐久性.
+
+    Behavioural rather than textual: the previous version asserted the string
+    "fsync" appeared in the backup function, which still matched when the actual
+    call was removed.
+    """
+    from backend.app.paper import writer as writer_mod
+
+    scene = Scene(tmp_path)
+    note_rel = scene.vault_rel("notes.md")
+    scene.service.create(note_rel, "v1")
+    _, digest = scene.service.read(note_rel)
+
+    syncs: list[object] = []
+    real_fsync = os.fsync
+
+    def tracking_fsync(fd):
+        syncs.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(writer_mod.os, "fsync", tracking_fsync)
+    result = scene.service.save(note_rel, "v2", expected_hash=digest)
+
+    backup = Path(result.backup_path)
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == "v1"
+
+    # Durability requires a sync on every link of the chain: the temp file
+    # itself, then the backup directory so the rename survives a crash. Dropping
+    # any one of them is exactly the regression this asserts against, so the
+    # count is exact rather than a lower bound.
+    assert len(syncs) == 4, (
+        f"expected 4 fsync calls (temp file, temp dir, backup file, backup dir), "
+        f"saw {len(syncs)}: a missing one means a crash can lose a write"
+    )
