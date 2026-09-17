@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -300,6 +301,20 @@ def load_adopted_identity(
     return paper_id, entries
 
 
+#: Per-path locks so concurrent manifest writers serialise instead of racing.
+_MANIFEST_LOCKS: Dict[str, Any] = {}
+_MANIFEST_LOCKS_GUARD = threading.Lock()
+
+
+def _manifest_lock(path: str) -> Any:
+    with _MANIFEST_LOCKS_GUARD:
+        lock = _MANIFEST_LOCKS.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _MANIFEST_LOCKS[path] = lock
+        return lock
+
+
 def update_manifest(
     storage: Any,
     service: Any,
@@ -307,6 +322,7 @@ def update_manifest(
     sources: List[PaperSource],
     *,
     papers_root_rel: str = "",
+    attempts: int = 5,
 ) -> Paper:
     """Rewrite an adopted paper's manifest after its bindings change.
 
@@ -338,15 +354,39 @@ def update_manifest(
             raise ManifestError(f"cannot re-create manifest for {paper.paper_id}: {exc}") from exc
         return paper
 
-    if existing == document:
-        return paper
+    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
-    try:
-        _data, digest = service.read(rel)
-        service.save(rel, json.dumps(document, ensure_ascii=False, indent=2) + "\n", expected_hash=digest)
-    except Exception as exc:  # noqa: BLE001
-        raise ManifestError(f"cannot update manifest for {paper.paper_id}: {exc}") from exc
-    return paper
+    # Retry under a per-path lock. The optimistic hash makes a lost race
+    # detectable, but detecting it is not the same as surviving it: without the
+    # retry, concurrent writers fail rather than converge, which the concurrent
+    # probe demonstrated (5 of 6 raised).
+    with _manifest_lock(rel):
+        last_error: Optional[Exception] = None
+        for _ in range(attempts):
+            try:
+                existing = read_manifest_file(service, rel)
+            except ManifestInvalidError:
+                raise
+            if existing is None:
+                try:
+                    service.create(rel, payload)
+                    return paper
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    continue
+            if existing == document:
+                return paper
+            try:
+                _data, digest = service.read(rel)
+                service.save(rel, payload, expected_hash=digest)
+                return paper
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                continue
+
+    raise ManifestError(
+        f"cannot update manifest for {paper.paper_id} after {attempts} attempts: {last_error}"
+    )
 
 
 def _configured_prefix() -> str:

@@ -1229,3 +1229,108 @@ def test_scenario_workspace_conflict_does_not_clear_the_version():
         "the conflict path must not clear the version"
     )
     assert "_reloadVersion" in tracker, "the conflict path must re-read the version"
+
+
+def test_scenario_manifest_update_converges_under_concurrency(tmp_path: Path, monkeypatch):
+    """自攻击发现：并发 update_manifest 时有 5/6 抛错.
+
+    The optimistic hash made a lost race detectable but not survivable. The
+    sidecar path already had a per-key lock and retry; the manifest path did
+    not, so concurrent binding changes failed instead of converging.
+    """
+    import threading
+
+    import backend.app.state as app_state
+    from backend.app.paper.manifest import ensure_adopted, update_manifest
+    from backend.app.paper.models import Paper, PaperSource, SourceRole, new_paper_id
+
+    vault = tmp_path / "vault"
+    papers_root = vault / "论文根"
+    paper_dir = papers_root / "方向" / "论文A"
+    paper_dir.mkdir(parents=True)
+    (paper_dir / "a.pdf").write_bytes(PDF_V1)
+
+    papers_root_ = papers_root
+
+    class _Cfg:
+        vault_path = vault
+        vault_root = vault
+        papers_root = papers_root_
+        papers_max_depth = 6
+
+        @property
+        def papers_root_or_default(self):
+            return self.papers_root
+
+    monkeypatch.setattr(app_state, "_state", {"cfg": _Cfg()}, raising=False)
+
+    storage = PaperStorage(tmp_path / "c.db")
+    service = VaultWriteService(vault, backup_root=tmp_path / "bk")
+    pid, sid = new_paper_id(), new_source_id()
+    storage.upsert_paper(Paper(paper_id=pid, folder_relpath="方向/论文A", display_title="t"))
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="a.pdf",
+            sha256="a" * 64,
+        )
+    )
+    adopted = ensure_adopted(
+        storage,
+        service,
+        storage.get_paper(pid),
+        storage.list_sources(pid),
+        operation="status_change",
+        papers_root_rel="论文根",
+    )
+    storage.upsert_paper(adopted, allow_folder_move=True)
+
+    errors: list[str] = []
+
+    def worker(index: int) -> None:
+        try:
+            paper = storage.get_paper(pid)
+            paper.paper_tags = [f"tag{index}"]
+            update_manifest(
+                storage, service, paper, storage.list_sources(pid), papers_root_rel="论文根"
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"concurrent manifest updates must converge, got {errors}"
+    manifest = paper_dir / "paper.workbench.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    assert isinstance(document.get("tags"), list), "the manifest must stay valid JSON"
+    storage.close()
+
+
+def test_scenario_stale_lock_reclaim_does_not_steal_a_live_pid(tmp_path: Path):
+    """自攻击：pid 可能被系统复用给无关进程，此时不得回收.
+
+    Reclaiming a live pid's lock would hand the vault to two writers, which is
+    the exact hazard the lock exists to prevent. Being conservative — refusing
+    until an operator confirms — is the correct trade.
+    """
+    import subprocess
+    import sys as _sys
+
+    from backend.app.paper.ownership import VaultWriteLock, VaultAlreadyOwnedError
+
+    long_lived = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        lock_path = tmp_path / "v.lock"
+        lock_path.write_text(f"pid={long_lived.pid}\nvault=/some/other\n", encoding="utf-8")
+        contender = VaultWriteLock(lock_path, vault_root=tmp_path / "vault")
+        with pytest.raises(VaultAlreadyOwnedError):
+            contender.acquire()
+    finally:
+        long_lived.terminate()
+        long_lived.wait(timeout=10)
