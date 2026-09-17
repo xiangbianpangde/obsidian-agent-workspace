@@ -641,6 +641,9 @@ def create_note(paper_id: str, body: NoteCreate):
             paper,
             storage.list_sources(paper_id, include_inactive=True),
             papers_root_rel=str(_papers_root_ptr()),
+            # The note's actual filename, so a custom name is recorded rather
+            # than assumed to be notes.md.
+            note_rel_path=rel,
         )
     except ManifestError as exc:
         # The note itself is safely on disk and in the row; a manifest failure

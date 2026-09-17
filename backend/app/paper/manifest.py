@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import MANIFEST_FILENAME
+from . import DEFAULT_NOTE_FILENAME, MANIFEST_FILENAME
 from .contracts import validate_manifest
 from .models import (
     BindingOrigin,
@@ -77,7 +77,9 @@ def manifest_relpath(paper: Paper) -> str:
     return MANIFEST_FILENAME
 
 
-def build_manifest(paper: Paper, sources: List[PaperSource]) -> Dict[str, Any]:
+def build_manifest(
+    paper: Paper, sources: List[PaperSource], note_rel_path: Optional[str] = None
+) -> Dict[str, Any]:
     """Serialise a paper and its bindings into a manifest document.
 
     Paths are stored relative to the manifest's own folder so the binding
@@ -99,7 +101,9 @@ def build_manifest(paper: Paper, sources: List[PaperSource]) -> Dict[str, Any]:
             for source in sources
         ],
         "note": (
-            {"note_id": paper.note_id, "path": _note_name(paper)} if paper.note_id else None
+            {"note_id": paper.note_id, "path": _note_name(paper, note_rel_path)}
+            if paper.note_id
+            else None
         ),
         "annotation_store": "paper.annotations.json",
         "tags": list(paper.paper_tags),
@@ -112,9 +116,17 @@ def build_manifest(paper: Paper, sources: List[PaperSource]) -> Dict[str, Any]:
     return payload
 
 
-def _note_name(paper: Paper) -> str:
-    """Note filename. The manifest only records the name, never a full path."""
-    return "notes.md"
+def _note_name(paper: Paper, note_rel_path: Optional[str] = None) -> str:
+    """Note filename for the manifest.
+
+    Records the name, never a full path, so the binding survives the paper folder
+    being renamed. The name comes from the note's actual binding rather than a
+    constant: a note created with a custom filename would otherwise be recorded
+    as ``notes.md`` and become unrecoverable after a rebuild.
+    """
+    if note_rel_path:
+        return note_rel_path
+    return DEFAULT_NOTE_FILENAME
 
 
 def parse_manifest(
@@ -360,6 +372,7 @@ def update_manifest(
     sources: List[PaperSource],
     *,
     papers_root_rel: str = "",
+    note_rel_path: Optional[str] = None,
     attempts: int = 5,
 ) -> Paper:
     """Rewrite an adopted paper's manifest after its bindings change.
@@ -380,7 +393,7 @@ def update_manifest(
     rel = f"{base}/{paper.folder_relpath}/{MANIFEST_FILENAME}" if base else (
         f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
     )
-    document = build_manifest(paper, sources)
+    document = build_manifest(paper, sources, note_rel_path)
 
     existing = read_manifest_file(service, rel)
     if existing is None:

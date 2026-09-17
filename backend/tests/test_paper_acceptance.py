@@ -1470,3 +1470,23 @@ def test_scenario_stale_lock_reclaim_does_not_steal_a_live_pid(tmp_path: Path):
     finally:
         long_lived.terminate()
         long_lived.wait(timeout=10)
+
+
+def test_scenario_manifest_records_a_custom_note_filename(workbench_like):
+    """评审者指出：_note_name 硬编码 notes.md，别名笔记会记错文件名.
+
+    A note created with a custom filename would be recorded as notes.md, so a
+    rebuild would look for a file that does not exist and the note would be
+    lost — silently, since the manifest looked well-formed.
+    """
+    client, storage, pid, _ = workbench_like
+    created = client.post(
+        f"/api/paper/papers/{pid}/note",
+        json={"content": "# 别名笔记", "rel_path": "我的阅读笔记.md"},
+    )
+    assert created.status_code == 200, created.text
+
+    document = json.loads(client.manifest_path().read_text(encoding="utf-8"))
+    assert document["note"]["path"] == "我的阅读笔记.md", (
+        "the manifest must record the note's real filename, not an assumed one"
+    )
