@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,6 +67,9 @@ class AdoptedIdentity:
     sources: List[Dict[str, Any]]
     note_path: Optional[str] = None
     note_id: Optional[str] = None
+    title_override: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    external_ids: Dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self):
         """Iterate as (paper_id, sources, note_path, note_id).
@@ -351,6 +354,28 @@ def ensure_adopted(
                 f"adoption race produced two identities for {paper.folder_relpath}: "
                 f"{paper.paper_id} vs {existing_id}"
             )
+
+        # P0-H: If manual_binding, compare winning manifest payload against requested sources!
+        if operation == "manual_binding":
+            req_map = {
+                s.rel_path: (
+                    s.role.value if hasattr(s.role, "value") else str(s.role),
+                    s.is_primary,
+                    s.active,
+                )
+                for s in sources
+            }
+            ex_map = {
+                s["path"]: (s["role"], s.get("primary", False), s.get("active", True))
+                for s in entries
+            }
+            if req_map != ex_map:
+                from .writer import ConflictError
+
+                raise ConflictError(
+                    f"concurrent adoption conflict on {paper.folder_relpath}: winning manifest has different sources"
+                )
+
         paper.manifest_relpath = MANIFEST_FILENAME
         return paper
 
@@ -382,6 +407,9 @@ def load_adopted_identity(
         sources=parsed.sources,
         note_path=parsed.note_path,
         note_id=parsed.note_id,
+        title_override=document.get("title_override"),
+        tags=list(document.get("tags") or []),
+        external_ids=document.get("external_ids") or {},
     )
 
 

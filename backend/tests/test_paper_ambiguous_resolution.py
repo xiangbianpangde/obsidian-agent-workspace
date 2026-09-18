@@ -22,6 +22,7 @@ from backend.app.paper.models import (
     PaperSource,
     PaperStatus,
     SourceRole,
+    new_note_id,
     new_paper_id,
     new_source_id,
 )
@@ -492,4 +493,105 @@ def test_p0_e_cas_failure_rolls_back_concurrent_resolve(env):
             expected_state=BindingState.AMBIGUOUS,
         )
     assert "cas failure" in str(exc_info.value).lower()
+
+
+def test_p0_f_rename_recovery_preserves_custom_note_path_and_metadata(env):
+    """P0-F: rename recovery 更新 manifest 时必须保留 custom-note.md 路径与元数据."""
+    folder = env["papers"] / "方向K" / "CustomNoteRenamePaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+    (folder / "my-custom-note.md").write_text("# Custom Note\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    nid = new_note_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "title_override": "Custom Title",
+        "tags": ["AI"],
+        "note": {"note_id": nid, "path": "my-custom-note.md"},
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "paper.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Initial index
+    indexer.index_papers(dry_run=False)
+
+    # Rename paper.pdf -> renamed.pdf on disk
+    (folder / "paper.pdf").rename(folder / "renamed.pdf")
+
+    # Reindex (triggers rename recovery)
+    indexer.index_papers(dry_run=False)
+
+    # Check manifest on disk: note.path MUST be my-custom-note.md, NOT notes.md!
+    mf_after = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert mf_after["note"]["path"] == "my-custom-note.md"
+    assert mf_after["note"]["note_id"] == nid
+    assert mf_after["title_override"] == "Custom Title"
+    assert mf_after["tags"] == ["AI"]
+
+    # Rebuild database from scratch and verify note binding recovered
+    env["storage"].close()
+    env["db"].unlink()
+    for p in (Path(str(env["db"]) + "-wal"), Path(str(env["db"]) + "-shm")):
+        p.unlink(missing_ok=True)
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    p_rebuilt = storage.get_paper(pid)
+    assert p_rebuilt is not None
+    assert p_rebuilt.note_id == nid
+
+
+def test_p0_h_ensure_adopted_race_conflicting_payload_rejected(env):
+    """P0-H: 并发采纳竞争中，若胜者 manifest 与当前请求 payload 冲突必须抛出 ConflictError."""
+    from backend.app.paper.writer import ConflictError
+
+    folder = env["papers"] / "方向L" / "RaceConflictPaper"
+    folder.mkdir(parents=True)
+    (folder / "A.md").write_text("# A\n", encoding="utf-8")
+    (folder / "B.md").write_text("# B\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    storage = PaperStorage(env["db"])
+    service = env["service"]
+
+    # Winner writes manifest with A.md
+    winner_paper = Paper(paper_id=pid, folder_relpath="方向L/RaceConflictPaper")
+    winner_sources = [
+        PaperSource(
+            source_id=new_source_id(),
+            paper_id=pid,
+            role=SourceRole.TRANSLATION_FULL,
+            rel_path="A.md",
+            is_primary=True,
+        )
+    ]
+    ensure_adopted(storage, service, winner_paper, winner_sources, operation="manual_binding", papers_root_rel="论文")
+
+    # Loser attempts ensure_adopted with B.md (conflicting payload)
+    loser_paper = Paper(paper_id=pid, folder_relpath="方向L/RaceConflictPaper")
+    loser_sources = [
+        PaperSource(
+            source_id=new_source_id(),
+            paper_id=pid,
+            role=SourceRole.TRANSLATION_FULL,
+            rel_path="B.md",
+            is_primary=True,
+        )
+    ]
+    with pytest.raises(ConflictError) as exc_info:
+        ensure_adopted(storage, service, loser_paper, loser_sources, operation="manual_binding", papers_root_rel="论文")
+    assert "winning manifest has different sources" in str(exc_info.value)
+
 

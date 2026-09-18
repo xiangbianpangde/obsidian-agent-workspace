@@ -334,6 +334,8 @@ def index_papers(dry_run: bool = False) -> dict:
                     if service is not None:
                         try:
                             # Update manifest on disk so rename is Vault-authoritative (P0-B Option 2)
+                            # P0-F: Preserve canonical note_path, title_override and tags!
+                            note_path = getattr(adopted, "note_path", None) if adopted else None
                             live_sources = [s for s in storage.list_sources(paper.paper_id) if s.active]
                             update_manifest(
                                 storage,
@@ -341,6 +343,7 @@ def index_papers(dry_run: bool = False) -> dict:
                                 paper,
                                 live_sources,
                                 papers_root_rel=papers_root_rel,
+                                note_rel_path=note_path,
                             )
                         except Exception as exc:
                             result_errors.append(
