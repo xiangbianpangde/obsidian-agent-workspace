@@ -26,6 +26,7 @@ from backend.app.paper.manifest import (
     load_adopted_identity,
     manifest_to_sources,
     read_manifest_file,
+    update_manifest,
 )
 from backend.app.paper.models import (
     BindingOrigin,
@@ -233,6 +234,7 @@ def index_papers(dry_run: bool = False) -> dict:
             s.rel_path: s for s in storage.list_sources(paper.paper_id, include_inactive=True)
         }
         paper_dir = root / paper.folder_relpath
+        confirmed_live_paths: set[str] = set()
         # Source ids recorded in the manifest are authoritative for the same
         # reason the paper id is.
         manifest_sources = (
@@ -296,6 +298,8 @@ def index_papers(dry_run: bool = False) -> dict:
                 source.paper_id = paper.paper_id
                 storage.upsert_source(source)
                 sources_written += 1
+                if source.active:
+                    confirmed_live_paths.add(source.rel_path)
             elif missing_manifest_sources:
                 # Rename recovery: check if a missing manifest source was renamed to this file
                 matched_missing = None
@@ -313,18 +317,35 @@ def index_papers(dry_run: bool = False) -> dict:
                         matched_missing = ms
 
                 if matched_missing is not None:
-                    source.source_id = new_source_id()
+                    source.source_id = (prior.source_id if prior else new_source_id())
                     source.role = matched_missing.role
                     source.is_primary = matched_missing.is_primary
                     source.active = True
                     source.is_candidate = False
                     source.binding_origin = BindingOrigin.MANIFEST
                     source.created_at = prior.created_at if prior else source.created_at
-                    source.source_version = 1
+                    source.source_version = _next_version(prior, source)
                     source.paper_id = paper.paper_id
                     storage.upsert_source(source)
                     sources_written += 1
+                    confirmed_live_paths.add(source.rel_path)
                     missing_manifest_sources.remove(matched_missing)
+
+                    if service is not None:
+                        try:
+                            # Update manifest on disk so rename is Vault-authoritative (P0-B Option 2)
+                            live_sources = [s for s in storage.list_sources(paper.paper_id) if s.active]
+                            update_manifest(
+                                storage,
+                                service,
+                                paper,
+                                live_sources,
+                                papers_root_rel=papers_root_rel,
+                            )
+                        except Exception as exc:
+                            result_errors.append(
+                                f"manifest rename update failed for {paper.folder_relpath}: {exc}"
+                            )
             elif prior is not None and adopted is None:
                 # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
@@ -335,6 +356,8 @@ def index_papers(dry_run: bool = False) -> dict:
                 source.paper_id = paper.paper_id
                 storage.upsert_source(source)
                 sources_written += 1
+                if source.active:
+                    confirmed_live_paths.add(source.rel_path)
 
         # Also persist any source declared in the manifest that was not seen
         # on disk (e.g. inactive entries or temporarily missing files).
@@ -351,14 +374,9 @@ def index_papers(dry_run: bool = False) -> dict:
                 storage.upsert_source(m_source)
                 sources_written += 1
 
-        # Retire bindings the scan no longer sees. Without this a renamed or
-        # removed file stays active forever, so the paper keeps offering a PDF
-        # that is not on disk and the reader 404s on a source it was told about.
-        # Deactivation, never deletion: the row keeps its identity and history
-        # (ADR-002).
-        seen_paths = {s.rel_path for s in paper.sources}
+        # Retire bindings the scan no longer sees.
         for rel_path, prior_source in existing_sources.items():
-            if prior_source.active and rel_path not in seen_paths:
+            if prior_source.active and rel_path not in confirmed_live_paths:
                 storage.deactivate_source(prior_source.source_id)
                 retired += 1
 

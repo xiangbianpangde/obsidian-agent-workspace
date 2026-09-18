@@ -525,6 +525,14 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
         paper = _require_paper(storage, paper_id)
 
         manifest_file = paper_folder / MANIFEST_FILENAME
+        # Check manifest file symlink (P0-C)
+        try:
+            st_mf = os.lstat(manifest_file)
+            if stat_mod.S_ISLNK(st_mf.st_mode) or not stat_mod.S_ISREG(st_mf.st_mode):
+                raise HTTPException(400, f"manifest file {manifest_file} is a symlink or special file")
+        except FileNotFoundError:
+            pass
+
         if manifest_file.is_file():
             try:
                 raw = manifest_file.read_bytes()
@@ -538,15 +546,70 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                     for s in existing_doc.get("sources", [])
                 }
                 if req_sources_map == ex_sources_map:
-                    # P0-6: Idempotent match! Reconcile and roll-forward into ADOPTED in SQLite.
+                    # P0-6 & P0-A: Idempotent match! Reconcile with canonical validation
                     resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
+                    missing_active = False
+                    semantic_invalid = False
+
                     for s in resolved_sources:
-                        t = paper_folder / s.rel_path
-                        if t.is_file() and not os.path.islink(t):
+                        lexical = paper_folder
+                        has_symlink = False
+                        for part in Path(s.rel_path).parts:
+                            lexical = lexical / part
+                            try:
+                                st_l = os.lstat(lexical)
+                                if stat_mod.S_ISLNK(st_l.st_mode):
+                                    has_symlink = True
+                                    break
+                            except FileNotFoundError:
+                                break
+
+                        t = lexical
+                        if t.is_file() and not has_symlink and not os.path.islink(t):
                             st_f = t.stat()
                             s.size_bytes = st_f.st_size
                             s.mtime_ns = st_f.st_mtime_ns
                             s.sha256 = _sha256_file(t)
+
+                            if s.active:
+                                if s.role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF):
+                                    if not s.rel_path.lower().endswith(".pdf") or not _looks_like_pdf(t):
+                                        semantic_invalid = True
+                                else:
+                                    if not s.rel_path.lower().endswith(".md"):
+                                        semantic_invalid = True
+                                    else:
+                                        try:
+                                            with t.open("rb") as f:
+                                                f.read(4096).decode("utf-8")
+                                        except UnicodeDecodeError:
+                                            semantic_invalid = True
+                        else:
+                            if s.active:
+                                missing_active = True
+                                s.missing_since = utc_now()
+                                s.active = False
+                            if has_symlink:
+                                semantic_invalid = True
+
+                    has_active = any(s.active for s in resolved_sources)
+                    primary_pdf_count = len(
+                        [s for s in resolved_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
+                    )
+                    primary_tr_count = len(
+                        [s for s in resolved_sources if s.is_primary and s.role.is_translation and s.active]
+                    )
+                    semantic_valid = (
+                        has_active
+                        and not semantic_invalid
+                        and primary_pdf_count <= 1
+                        and primary_tr_count <= 1
+                    )
+
+                    # P0-A: If active source missing or semantic invalid, MUST stay DEGRADED!
+                    target_binding_state = (
+                        BindingState.DEGRADED if (missing_active or not semantic_valid) else BindingState.ADOPTED
+                    )
 
                     canon_title = existing_doc.get("title_override")
                     canon_tags = list(existing_doc.get("tags") or [])
@@ -560,6 +623,8 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                         paper_tags=canon_tags,
                         note_id=canon_note_id,
                         external_ids=canon_ext_ids,
+                        binding_state=target_binding_state,
+                        expected_state=paper.binding_state,
                     )
                     updated_paper = storage.get_paper(paper_id)
                     return _no_store(
@@ -745,7 +810,7 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
             storage.fail_write_intent(intent, str(exc))
             raise HTTPException(500, f"cannot write manifest: {exc}") from exc
 
-        # 5. Atomically commit to SQLite in a single transaction (no DELETE)
+        # 5. Atomically commit to SQLite in a single transaction with CAS (P0-E)
         try:
             storage.commit_resolved_adoption(
                 paper.paper_id,
@@ -754,6 +819,8 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                 paper_tags=paper.paper_tags,
                 note_id=paper.note_id,
                 external_ids=paper.external_ids,
+                binding_state=BindingState.ADOPTED,
+                expected_state=BindingState.AMBIGUOUS,
             )
             storage.commit_write_intent(intent)
         except Exception as exc:

@@ -338,7 +338,23 @@ def discover_papers(config: ScanConfig) -> ScanResult:
 
         folder_relpath = current.relative_to(root).as_posix()
         manifest_file = current / MANIFEST_FILENAME
-        if manifest_file.is_file():
+        manifest_exists = False
+        try:
+            st_mf = os.lstat(manifest_file)
+            if stat_mod.S_ISLNK(st_mf.st_mode) or not stat_mod.S_ISREG(st_mf.st_mode):
+                # P0-C: Manifest file itself is a symlink or special file -> FAIL CLOSED!
+                result.errors.append(
+                    f"manifest file {manifest_file} is a symlink or special file in {folder_relpath}"
+                )
+                continue
+            manifest_exists = True
+        except FileNotFoundError:
+            manifest_exists = False
+        except OSError as exc:
+            result.errors.append(f"cannot lstat manifest in {folder_relpath}: {exc}")
+            continue
+
+        if manifest_exists:
             try:
                 raw = manifest_file.read_bytes()
                 manifest_doc = json.loads(raw.decode("utf-8"))
@@ -435,7 +451,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
 
                 manifest_sources.append(source)
 
-            # Direct files on disk not declared in manifest: potential rename candidates (ADR-006)
+            # Direct files on disk not declared in manifest: candidate / potential rename sources (ADR-006)
             manifest_paths = {s.rel_path for s in manifest_sources}
             direct_files = [e for e in entries if e.is_file() and not e.is_symlink()]
             for f in direct_files:
@@ -470,14 +486,15 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                     manifest_sources.append(source)
 
             # Semantic validity check:
-            # - P0-1: Bound sources ONLY come from manifest. No undeclared files added!
+            # - P0-1: Bound sources ONLY come from manifest. Candidates do not participate in health!
             # - P0-2: No heuristic primary elevation. primary is strictly what manifest declared.
-            has_active = any(s.active for s in manifest_sources)
+            manifest_only = [s for s in manifest_sources if not s.is_candidate]
+            has_active = any(s.active for s in manifest_only)
             primary_pdf_count = len(
-                [s for s in manifest_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
+                [s for s in manifest_only if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
             )
             primary_tr_count = len(
-                [s for s in manifest_sources if s.is_primary and s.role.is_translation and s.active]
+                [s for s in manifest_only if s.is_primary and s.role.is_translation and s.active]
             )
             semantic_valid = (
                 has_active

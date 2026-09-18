@@ -354,3 +354,142 @@ def test_p0_7_resolve_title_override_single_authority(env):
     # Verify manifest on disk carries the exact same title_override
     manifest = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["title_override"] == "Authoritative Title Override"
+
+
+def test_p0_a_degraded_manifest_not_elevated_by_idempotent_resolve(env):
+    """P0-A: 已有 DEGRADED Manifest 决不能被幂等 resolve 错误提升为 ADOPTED."""
+    folder = env["papers"] / "方向G" / "DegradedResolvePaper"
+    folder.mkdir(parents=True)
+    # gone.md does NOT exist on disk!
+
+    pid = new_paper_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": new_source_id(),
+                "role": "TRANSLATION_FULL",
+                "path": "gone.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Index: must be DEGRADED
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper(pid)
+    assert paper.binding_state == BindingState.DEGRADED
+
+    # Call /resolve with matching payload: must NOT become ADOPTED!
+    client = env["client"]
+    res = client.post(
+        f"/api/paper/papers/{pid}/resolve",
+        json={
+            "sources": [
+                {"rel_path": "gone.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+            ]
+        },
+    )
+    assert res.status_code == 200
+    # Must remain DEGRADED because gone.md is still missing on disk!
+    assert res.json()["binding_state"] == "DEGRADED"
+    assert storage.get_paper(pid).binding_state == BindingState.DEGRADED
+
+
+def test_p0_c_manifest_symlink_fails_closed(env):
+    """P0-C: Manifest 自身的符号链接必须被 scanner 和 resolve 严格拒绝."""
+    folder = env["papers"] / "方向H" / "ManifestSymlinkPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    ext_manifest = env["vault"] / "external_manifest.json"
+    ext_manifest.write_text('{"paper_id": "pw_external_hack"}', encoding="utf-8")
+
+    manifest_file = folder / MANIFEST_FILENAME
+    try:
+        manifest_file.symlink_to(ext_manifest)
+    except OSError:
+        pytest.skip("Symlink not supported")
+
+    # Scanner must fail closed and record error
+    res = discover_papers(ScanConfig(root=env["papers"]))
+    assert any("is a symlink" in err for err in res.errors)
+    assert not any(p.folder_relpath.endswith("ManifestSymlinkPaper") for p in res.papers)
+
+
+def test_p0_d_legacy_unbound_sources_retired_when_manifest_present(env):
+    """P0-D: 历史 SQLite 中的未声明 active non-candidate 来源重扫后必须退休."""
+    folder = env["papers"] / "方向I" / "LegacyRetirePaper"
+    folder.mkdir(parents=True)
+    (folder / "bound.md").write_text("# Bound\n", encoding="utf-8")
+    (folder / "legacy_extra.md").write_text("# Extra\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": new_source_id(),
+                "role": "TRANSLATION_FULL",
+                "path": "bound.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Simulate legacy state in DB: legacy_extra.md was previously marked active=1
+    storage = PaperStorage(env["db"])
+    paper = Paper(paper_id=pid, folder_relpath="方向I/LegacyRetirePaper", display_title="Legacy")
+    storage.upsert_paper(paper, allow_folder_move=True)
+    extra_sid = new_source_id()
+    storage.upsert_source(
+        PaperSource(
+            source_id=extra_sid,
+            paper_id=pid,
+            role=SourceRole.OTHER_MARKDOWN,
+            rel_path="legacy_extra.md",
+            active=True,
+            is_candidate=False,
+        )
+    )
+
+    # Re-index: bound.md must be active, and legacy_extra.md must be retired (active=0)!
+    indexer.index_papers(dry_run=False)
+
+    sources = {s.rel_path: s for s in storage.list_sources(pid, include_inactive=True)}
+    assert sources["bound.md"].active is True
+    assert sources["legacy_extra.md"].active is False
+
+
+def test_p0_e_cas_failure_rolls_back_concurrent_resolve(env):
+    """P0-E: 跨进程并发冲突时 CAS 严格拒绝并回滚事务."""
+    storage = PaperStorage(env["db"])
+    pid = new_paper_id()
+    paper = Paper(
+        paper_id=pid,
+        folder_relpath="方向J/CASPaper",
+        display_title="CAS",
+        binding_state=BindingState.RESOLVED,  # Concurrently moved away from AMBIGUOUS!
+    )
+    storage.upsert_paper(paper, allow_folder_move=True)
+
+    with pytest.raises(Exception) as exc_info:
+        storage.commit_resolved_adoption(
+            pid,
+            sources=[],
+            binding_state=BindingState.ADOPTED,
+            expected_state=BindingState.AMBIGUOUS,
+        )
+    assert "cas failure" in str(exc_info.value).lower()
+

@@ -526,8 +526,10 @@ class PaperStorage:
         paper_tags: Optional[List[str]] = None,
         note_id: Optional[str] = None,
         external_ids: Optional[Dict[str, Any]] = None,
+        binding_state: BindingState = BindingState.ADOPTED,
+        expected_state: Optional[BindingState] = None,
     ) -> None:
-        """Atomically persist resolved sources and advance paper to ADOPTED in one transaction."""
+        """Atomically persist resolved sources and advance paper state in one transaction with CAS."""
         from . import MANIFEST_FILENAME
         from .models import MediaKind
 
@@ -582,7 +584,7 @@ class PaperStorage:
                             vals,
                         )
 
-                # 3. Update the paper aggregate row
+                # 3. Update the paper aggregate row with CAS
                 pri_pdf = next(
                     (
                         s
@@ -602,28 +604,38 @@ class PaperStorage:
                 pdf_id = pri_pdf.source_id if pri_pdf else None
                 tr_id = pri_tr.source_id if pri_tr else None
 
+                where_clause = "WHERE paper_id = ?"
+                where_params = [
+                    binding_state.value,
+                    MANIFEST_FILENAME,
+                    pdf_id,
+                    tr_id,
+                    title_override,
+                    tags_json,
+                    note_id,
+                    ext_json,
+                    stamp,
+                    paper_id,
+                ]
+                if expected_state is not None:
+                    where_clause += " AND binding_state = ?"
+                    where_params.append(expected_state.value)
+
                 cur.execute(
-                    "UPDATE papers SET binding_state = ?, ambiguity_reason = NULL, "
-                    "manifest_relpath = ?, primary_pdf_source_id = ?, primary_translation_source_id = ?, "
-                    "title_override = COALESCE(?, title_override), "
-                    "paper_tags_json = COALESCE(?, paper_tags_json), "
-                    "note_id = COALESCE(?, note_id), "
-                    "external_ids_json = COALESCE(?, external_ids_json), "
-                    "updated_at = ? "
-                    "WHERE paper_id = ? AND (binding_state = 'AMBIGUOUS' OR manifest_relpath IS NOT NULL)",
-                    (
-                        BindingState.ADOPTED.value,
-                        MANIFEST_FILENAME,
-                        pdf_id,
-                        tr_id,
-                        title_override,
-                        tags_json,
-                        note_id,
-                        ext_json,
-                        stamp,
-                        paper_id,
-                    ),
+                    f"UPDATE papers SET binding_state = ?, ambiguity_reason = NULL, "
+                    f"manifest_relpath = ?, primary_pdf_source_id = ?, primary_translation_source_id = ?, "
+                    f"title_override = COALESCE(?, title_override), "
+                    f"paper_tags_json = COALESCE(?, paper_tags_json), "
+                    f"note_id = COALESCE(?, note_id), "
+                    f"external_ids_json = COALESCE(?, external_ids_json), "
+                    f"updated_at = ? "
+                    f"{where_clause}",
+                    where_params,
                 )
+                if expected_state is not None and cur.rowcount != 1:
+                    raise sqlite3.OperationalError(
+                        f"CAS failure: paper {paper_id} state changed concurrently (expected {expected_state.value})"
+                    )
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")
