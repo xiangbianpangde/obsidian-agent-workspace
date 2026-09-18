@@ -545,7 +545,11 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                     s["path"]: (s["role"], s.get("primary", False), s.get("active", True))
                     for s in existing_doc.get("sources", [])
                 }
-                if req_sources_map == ex_sources_map:
+                title_matches = (
+                    body.title_override is None
+                    or body.title_override == existing_doc.get("title_override")
+                )
+                if req_sources_map == ex_sources_map and title_matches:
                     # P0-6 & P0-A: Idempotent match! Reconcile with canonical validation
                     resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
                     missing_active = False
@@ -806,6 +810,9 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                 operation="manual_binding",
                 papers_root_rel=str(base) if str(base) != "." else "",
             )
+        except ConflictError as exc:
+            storage.fail_write_intent(intent, str(exc))
+            raise HTTPException(409, f"concurrent conflict: {exc}") from exc
         except Exception as exc:
             storage.fail_write_intent(intent, str(exc))
             raise HTTPException(500, f"cannot write manifest: {exc}") from exc

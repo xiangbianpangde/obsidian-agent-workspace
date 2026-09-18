@@ -196,8 +196,21 @@ def index_papers(dry_run: bool = False) -> dict:
                 # notes and annotations.
             paper.paper_id = manifest_id
             paper.manifest_relpath = MANIFEST_FILENAME
+            # Manifest is the authority for tags, title_override, external_ids (ADR-007)
+            if hasattr(adopted, "tags") and adopted.tags is not None:
+                paper.paper_tags = list(adopted.tags)
+            if hasattr(adopted, "title_override") and adopted.title_override is not None:
+                paper.title_override = adopted.title_override
+            if hasattr(adopted, "external_ids") and adopted.external_ids:
+                paper.external_ids = dict(adopted.external_ids)
+            if hasattr(adopted, "note_id") and adopted.note_id:
+                paper.note_id = adopted.note_id
         elif existing:
             paper.paper_id = existing.paper_id
+            paper.paper_tags = existing.paper_tags
+            paper.title_override = existing.title_override
+            paper.external_ids = existing.external_ids
+            paper.note_id = existing.note_id
         else:
             paper.paper_id = new_paper_id()
 
@@ -208,10 +221,11 @@ def index_papers(dry_run: bool = False) -> dict:
             paper.last_opened_at = existing.last_opened_at
             paper.completed_at = existing.completed_at
             paper.status_changed_at = existing.status_changed_at
-            paper.note_id = existing.note_id
-            paper.paper_tags = existing.paper_tags
             paper.created_at = existing.created_at
             paper.updated_at = utc_now()
+            if not adopted:
+                paper.note_id = existing.note_id
+                paper.paper_tags = existing.paper_tags
             updated += 1
         else:
             created += 1
@@ -326,29 +340,40 @@ def index_papers(dry_run: bool = False) -> dict:
                     source.created_at = prior.created_at if prior else source.created_at
                     source.source_version = _next_version(prior, source)
                     source.paper_id = paper.paper_id
-                    storage.upsert_source(source)
-                    sources_written += 1
-                    confirmed_live_paths.add(source.rel_path)
-                    missing_manifest_sources.remove(matched_missing)
 
+                    # P0-G: Update manifest on disk FIRST before syncing SQLite!
+                    manifest_ok = True
                     if service is not None:
                         try:
-                            # Update manifest on disk so rename is Vault-authoritative (P0-B Option 2)
-                            # P0-F: Preserve canonical note_path, title_override and tags!
                             note_path = getattr(adopted, "note_path", None) if adopted else None
-                            live_sources = [s for s in storage.list_sources(paper.paper_id) if s.active]
+                            # Construct canonical live sources set for manifest
+                            canonical_manifest_sources = []
+                            for ms_key, ms_val in manifest_sources.items():
+                                if ms_key == matched_missing.rel_path:
+                                    canonical_manifest_sources.append(source)
+                                elif (paper_dir / ms_key).is_file():
+                                    canonical_manifest_sources.append(ms_val)
+
                             update_manifest(
                                 storage,
                                 service,
                                 paper,
-                                live_sources,
+                                canonical_manifest_sources,
                                 papers_root_rel=papers_root_rel,
                                 note_rel_path=note_path,
                             )
                         except Exception as exc:
+                            manifest_ok = False
                             result_errors.append(
                                 f"manifest rename update failed for {paper.folder_relpath}: {exc}"
                             )
+
+                    # Only synchronize SQLite if manifest on disk was successfully updated!
+                    if manifest_ok:
+                        storage.upsert_source(source)
+                        sources_written += 1
+                        confirmed_live_paths.add(source.rel_path)
+                        missing_manifest_sources.remove(matched_missing)
             elif prior is not None and adopted is None:
                 # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
@@ -460,7 +485,7 @@ def index_papers(dry_run: bool = False) -> dict:
         "retired": retired,
         "notes_restored": notes_restored,
         "binding_states": dict(states),
-        "errors": result.errors,
+        "errors": result.errors + result_errors,
     }
 
 

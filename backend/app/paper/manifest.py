@@ -369,11 +369,12 @@ def ensure_adopted(
                 s["path"]: (s["role"], s.get("primary", False), s.get("active", True))
                 for s in entries
             }
-            if req_map != ex_map:
+            winner_title = existing.get("title_override")
+            if req_map != ex_map or winner_title != paper.title_override:
                 from .writer import ConflictError
 
                 raise ConflictError(
-                    f"concurrent adoption conflict on {paper.folder_relpath}: winning manifest has different sources"
+                    f"concurrent adoption conflict on {paper.folder_relpath}: winning manifest has different sources or title"
                 )
 
         paper.manifest_relpath = MANIFEST_FILENAME

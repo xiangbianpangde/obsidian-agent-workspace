@@ -518,6 +518,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                 binding_state=binding_state,
                 note_id=parsed_manifest.note_id,
                 paper_tags=list(manifest_doc.get("tags") or []),
+                external_ids=dict(manifest_doc.get("external_ids") or {}),
                 primary_pdf_source_id=primary_pdf.source_id if primary_pdf else None,
                 primary_translation_source_id=primary_tr.source_id if primary_tr else None,
                 sources=manifest_sources,

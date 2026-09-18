@@ -592,6 +592,153 @@ def test_p0_h_ensure_adopted_race_conflicting_payload_rejected(env):
     ]
     with pytest.raises(ConflictError) as exc_info:
         ensure_adopted(storage, service, loser_paper, loser_sources, operation="manual_binding", papers_root_rel="论文")
-    assert "winning manifest has different sources" in str(exc_info.value)
+    assert "winning manifest has different sources or title" in str(exc_info.value)
+
+
+def test_reviewer_1_update_manifest_failure_fault_injection(env, monkeypatch):
+    """P0-G 故障注入：若 update_manifest 失败，SQLite 绝不同步，且错误被报告."""
+    folder = env["papers"] / "方向M" / "FaultInjectRenamePaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "paper.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Initial index
+    indexer.index_papers(dry_run=False)
+
+    # Rename paper.pdf -> renamed.pdf
+    (folder / "paper.pdf").rename(folder / "renamed.pdf")
+
+    # Fault injection: make update_manifest raise IOError
+    def mock_fail_update(*args, **kwargs):
+        raise IOError("Injected disk error during manifest update")
+
+    import backend.scripts.paper_index as index_mod
+    monkeypatch.setattr(index_mod, "update_manifest", mock_fail_update)
+
+    rep = index_mod.index_papers(dry_run=False)
+    # 1. Error must be reported in errors list
+    assert any("Injected disk error" in err for err in rep["errors"])
+
+    # 2. SQLite must NOT be updated with renamed.pdf as active!
+    storage = PaperStorage(env["db"])
+    active_sources = [s for s in storage.list_sources(pid) if s.active]
+    active_paths = {s.rel_path for s in active_sources}
+    assert "renamed.pdf" not in active_paths, "renamed.pdf must not be active in SQLite when manifest update failed!"
+
+
+def test_reviewer_2_manifest_authority_over_stale_sqlite_tags(env):
+    """ADR-007: 重扫时 Manifest 权威标签必须覆盖 SQLite 的陈旧标签."""
+    folder = env["papers"] / "方向N" / "StaleSqliteTagsPaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "tags": ["ManifestTagA", "ManifestTagB"],  # Authoritative tags in manifest!
+        "title_override": "ManifestTitle",
+        "sources": [
+            {
+                "source_id": new_source_id(),
+                "role": "TRANSLATION_FULL",
+                "path": "doc.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Pre-seed stale row in SQLite
+    storage = PaperStorage(env["db"])
+    paper = Paper(
+        paper_id=pid,
+        folder_relpath="方向N/StaleSqliteTagsPaper",
+        display_title="StaleTitle",
+        title_override="OldSqliteTitle",
+        paper_tags=["OldSqliteTag"],
+    )
+    storage.upsert_paper(paper, allow_folder_move=True)
+
+    # Reindex: Manifest authority must prevail!
+    indexer.index_papers(dry_run=False)
+
+    updated = storage.get_paper(pid)
+    assert updated.paper_tags == ["ManifestTagA", "ManifestTagB"], "Manifest tags must overwrite stale SQLite tags!"
+    assert updated.title_override == "ManifestTitle", "Manifest title_override must overwrite stale SQLite title!"
+
+
+def test_reviewer_3_resolve_race_conflicting_title_returns_409(env):
+    """P0-H: /resolve 竞争中胜者 title_override 冲突时，必须返回 HTTP 409（而不是 500）."""
+    folder = env["papers"] / "方向O" / "ResolveTitleRacePaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    # Winner pre-creates manifest with Title Winner
+    winner_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "title_override": "TitleWinner",
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "TRANSLATION_FULL",
+                "path": "doc.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(winner_doc), encoding="utf-8")
+
+    storage = PaperStorage(env["db"])
+    paper = Paper(
+        paper_id=pid,
+        folder_relpath="方向O/ResolveTitleRacePaper",
+        display_title="Doc",
+        binding_state=BindingState.AMBIGUOUS,
+    )
+    storage.upsert_paper(paper, allow_folder_move=True)
+
+    client = env["client"]
+    # Loser attempts resolve with conflicting title
+    res = client.post(
+        f"/api/paper/papers/{pid}/resolve",
+        json={
+            "sources": [
+                {"rel_path": "doc.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+            ],
+            "title_override": "TitleLoser",  # Different title!
+        },
+    )
+    # Must return 409 (not 500!)
+    assert res.status_code == 409
+    assert "conflict" in res.text.lower()
+
 
 
