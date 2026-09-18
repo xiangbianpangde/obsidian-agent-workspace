@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .models import (
+    BindingOrigin,
     BindingState,
     Paper,
     PaperNote,
@@ -41,7 +42,7 @@ DEFAULT_PAPER_DIR = Path.home() / ".personal-ai-workspace" / "papers"
 DEFAULT_DB_PATH = DEFAULT_PAPER_DIR / "papers.db"
 
 #: Bump together with ``_MIGRATIONS``.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def secure_harden_path(db_path: Path) -> None:
@@ -199,10 +200,16 @@ CREATE INDEX IF NOT EXISTS idx_write_intents_state
     ON paper_write_intents(state, created_at);
 """
 
+_MIGRATION_2 = """
+ALTER TABLE papers ADD COLUMN ambiguity_reason TEXT;
+ALTER TABLE paper_sources ADD COLUMN is_candidate INTEGER NOT NULL DEFAULT 0;
+"""
+
 #: Ordered migrations. Index 0 upgrades user_version 0 -> 1, and so on.
 #: Each entry is (target_version, sql). Never edit a published entry; append.
 _MIGRATIONS: List[tuple[int, str]] = [
     (1, _MIGRATION_1),
+    (2, _MIGRATION_2),
 ]
 
 
@@ -357,6 +364,7 @@ class PaperStorage:
         self,
         status: Optional[PaperStatus] = None,
         category_relpath: Optional[str] = None,
+        binding_state: Optional[BindingState] = None,
         include_inactive: bool = False,
     ) -> List[Paper]:
         sql = "SELECT * FROM papers WHERE 1=1"
@@ -367,6 +375,9 @@ class PaperStorage:
         if category_relpath is not None:
             sql += " AND category_relpath = ?"
             params.append(category_relpath)
+        if binding_state is not None:
+            sql += " AND binding_state = ?"
+            params.append(BindingState(binding_state).value)
         if not include_inactive:
             sql += " AND inactive_at IS NULL"
         sql += " ORDER BY display_title COLLATE NOCASE"
@@ -491,16 +502,131 @@ class PaperStorage:
             f"{key}=excluded.{key}" for key in row if key != "source_id"
         )
         with self._lock:
+            existing = self._conn.execute(
+                "SELECT source_id FROM paper_sources WHERE paper_id = ? AND rel_path_key_nfc = ?",
+                (source.paper_id, source.rel_path_key_nfc or source.rel_path),
+            ).fetchone()
+            if existing is not None and existing["source_id"] != source.source_id:
+                # Update the existing row's source_id in place without SQL DELETE
+                self._conn.execute(
+                    "UPDATE paper_sources SET source_id = ? WHERE source_id = ?",
+                    (source.source_id, existing["source_id"]),
+                )
             self._conn.execute(
                 f"INSERT INTO paper_sources ({columns}) VALUES ({placeholders}) "
                 f"ON CONFLICT(source_id) DO UPDATE SET {updates}",
                 list(row.values()),
             )
 
-    def list_sources(self, paper_id: str, include_inactive: bool = False) -> List[PaperSource]:
+    def commit_resolved_adoption(
+        self,
+        paper_id: str,
+        sources: List[PaperSource],
+        title_override: Optional[str] = None,
+    ) -> None:
+        """Atomically persist resolved sources and advance paper to ADOPTED in one transaction."""
+        from . import MANIFEST_FILENAME
+        from .models import MediaKind
+
+        stamp = utc_now()
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE;")
+            try:
+                # 1. Deactivate candidate sources that were NOT included in the resolution (Zero Delete)
+                cur.execute(
+                    "UPDATE paper_sources SET active = 0, updated_at = ? "
+                    "WHERE paper_id = ? AND active = 1",
+                    (stamp, paper_id),
+                )
+
+                # 2. Insert or update the resolved sources
+                for s in sources:
+                    row = s.to_row()
+                    row["active"] = int(s.active)
+                    row["is_candidate"] = 0
+                    row["binding_origin"] = BindingOrigin.MANUAL.value
+                    cols = list(row.keys())
+                    vals = list(row.values())
+
+                    existing = cur.execute(
+                        "SELECT source_id FROM paper_sources WHERE paper_id = ? AND rel_path_key_nfc = ?",
+                        (paper_id, s.rel_path_key_nfc or s.rel_path),
+                    ).fetchone()
+                    if existing is not None:
+                        set_clause = ", ".join(
+                            f"{c} = ?" for c in cols if c != "paper_id"
+                        )
+                        update_vals = [row[c] for c in cols if c != "paper_id"] + [
+                            existing["source_id"]
+                        ]
+                        cur.execute(
+                            f"UPDATE paper_sources SET {set_clause} WHERE source_id = ?",
+                            update_vals,
+                        )
+                    else:
+                        placeholders = ", ".join("?" for _ in cols)
+                        col_str = ", ".join(cols)
+                        updates = ", ".join(
+                            f"{c}=excluded.{c}" for c in cols if c != "source_id"
+                        )
+                        cur.execute(
+                            f"INSERT INTO paper_sources ({col_str}) VALUES ({placeholders}) "
+                            f"ON CONFLICT(source_id) DO UPDATE SET {updates}",
+                            vals,
+                        )
+
+                # 3. Update the paper aggregate row
+                pri_pdf = next(
+                    (
+                        s
+                        for s in sources
+                        if s.is_primary and s.media_kind is MediaKind.PDF and s.active
+                    ),
+                    None,
+                )
+                pri_tr = next(
+                    (
+                        s
+                        for s in sources
+                        if s.is_primary and s.role.is_translation and s.active
+                    ),
+                    None,
+                )
+                pdf_id = pri_pdf.source_id if pri_pdf else None
+                tr_id = pri_tr.source_id if pri_tr else None
+
+                cur.execute(
+                    "UPDATE papers SET binding_state = ?, ambiguity_reason = NULL, "
+                    "manifest_relpath = ?, primary_pdf_source_id = ?, primary_translation_source_id = ?, "
+                    "title_override = COALESCE(?, title_override), updated_at = ? "
+                    "WHERE paper_id = ?",
+                    (
+                        BindingState.ADOPTED.value,
+                        MANIFEST_FILENAME,
+                        pdf_id,
+                        tr_id,
+                        title_override,
+                        stamp,
+                        paper_id,
+                    ),
+                )
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+
+    def list_sources(
+        self,
+        paper_id: str,
+        include_inactive: bool = False,
+        include_candidates: bool = False,
+    ) -> List[PaperSource]:
         sql = "SELECT * FROM paper_sources WHERE paper_id = ?"
         if not include_inactive:
             sql += " AND active = 1"
+        if not include_candidates:
+            sql += " AND is_candidate = 0"
         sql += " ORDER BY role"
         with self._lock:
             rows = self._conn.execute(sql, (paper_id,)).fetchall()
@@ -767,6 +893,7 @@ class PaperStorage:
             last_opened_at=row["last_opened_at"],
             completed_at=row["completed_at"],
             status_changed_at=row["status_changed_at"],
+            ambiguity_reason=row["ambiguity_reason"] if "ambiguity_reason" in row.keys() else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             inactive_at=row["inactive_at"],
@@ -781,7 +908,7 @@ class PaperStorage:
             rel_path=row["rel_path"],
             rel_path_key_nfc=row["rel_path_key_nfc"],
             is_primary=bool(row["is_primary"]),
-            binding_origin=row["binding_origin"],
+            binding_origin=BindingOrigin(row["binding_origin"]),
             binding_confidence=row["binding_confidence"],
             size_bytes=row["size_bytes"],
             mtime_ns=row["mtime_ns"],
@@ -791,6 +918,7 @@ class PaperStorage:
             language=row["language"],
             page_count=row["page_count"],
             active=bool(row["active"]),
+            is_candidate=bool(row["is_candidate"]) if "is_candidate" in row.keys() else False,
             missing_since=row["missing_since"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

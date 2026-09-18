@@ -16,10 +16,14 @@ Authority split (ADR-007) is visible in the shapes here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import os
+import stat as stat_mod
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -28,7 +32,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..state import get_cfg
-from . import ANNOTATION_STORE_FILENAME, storage as paper_storage
+from . import ANNOTATION_STORE_FILENAME, MANIFEST_FILENAME, storage as paper_storage
 from .contracts import (
     ANCHOR_SCHEMA_VERSION_RESOLVABLE,
     validate_annotations,
@@ -41,17 +45,25 @@ from .manifest import (
     AdoptionRequired,
     ManifestError,
     ensure_adopted,
+    manifest_to_sources,
+    parse_manifest,
     update_manifest,
 )
 from .models import (
+    BindingOrigin,
+    BindingState,
+    MediaKind,
     Paper,
     PaperNote,
     PaperSource,
     PaperStatus,
+    SourceRole,
     new_annotation_id,
     new_note_id,
+    new_source_id,
     utc_now,
 )
+from .scanner import _LAYOUT_RE, _looks_like_pdf, _sha256_file
 from .writer import (
     AlreadyExistsError,
     ConflictError,
@@ -170,6 +182,18 @@ def _papers_root() -> Path:
 class StatusUpdate(BaseModel):
     status: str = Field(..., description="UNREAD | READING | COMPLETED")
     reason: Optional[str] = None
+
+
+class ResolveSourceItem(BaseModel):
+    rel_path: str = Field(..., min_length=1, max_length=1024)
+    role: str
+    is_primary: bool = False
+    active: bool = True
+
+
+class ResolvePaperRequest(BaseModel):
+    sources: list[ResolveSourceItem] = Field(..., min_length=1)
+    title_override: Optional[str] = Field(None, max_length=512)
 
 
 class NoteCreate(BaseModel):
@@ -291,6 +315,7 @@ def _paper_payload(paper: Paper, source_count: int = 0) -> Dict[str, Any]:
         "first_opened_at": paper.first_opened_at,
         "last_opened_at": paper.last_opened_at,
         "completed_at": paper.completed_at,
+        "ambiguity_reason": paper.ambiguity_reason,
         "source_count": source_count,
         "inactive_at": paper.inactive_at,
     }
@@ -314,6 +339,8 @@ def _source_payload(source: PaperSource) -> Dict[str, Any]:
         "is_primary": source.is_primary,
         "source_version": source.source_version,
         "size_bytes": source.size_bytes,
+        "is_candidate": getattr(source, "is_candidate", False),
+        "binding_origin": source.binding_origin.value if hasattr(source.binding_origin, "value") else str(source.binding_origin),
         "active": source.active,
         "missing_since": source.missing_since,
     }
@@ -337,6 +364,12 @@ def _adopt(
     """
     if operation not in DEPENDENT_OPERATIONS:
         raise HTTPException(500, f"internal: unknown adoption trigger {operation}")
+
+    if paper.binding_state is BindingState.AMBIGUOUS and operation != "manual_binding":
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
 
     # Adoption writes the manifest ahead of whatever dependent state follows, so
     # a crash in between leaves a paper that is adopted but missing the step
@@ -382,6 +415,7 @@ def _adopt(
 def list_papers(
     status: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
+    binding_state: Optional[str] = Query(None),
 ):
     storage = _storage()
     parsed_status = None
@@ -391,10 +425,26 @@ def list_papers(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-    papers = storage.list_papers(status=parsed_status, category_relpath=category)
+    parsed_binding_state = None
+    if binding_state:
+        try:
+            parsed_binding_state = BindingState(binding_state)
+        except ValueError as exc:
+            raise HTTPException(400, f"unknown binding_state: {binding_state}") from exc
+
+    papers = storage.list_papers(
+        status=parsed_status,
+        category_relpath=category,
+        binding_state=parsed_binding_state,
+    )
     payload = []
     for paper in papers:
-        sources = storage.list_sources(paper.paper_id)
+        include_cand = (paper.binding_state is BindingState.AMBIGUOUS)
+        sources = storage.list_sources(
+            paper.paper_id,
+            include_inactive=False,
+            include_candidates=include_cand,
+        )
         payload.append(_paper_payload(paper, source_count=len(sources)))
     return _no_store({"papers": payload, "count": len(payload)})
 
@@ -403,14 +453,21 @@ def list_papers(
 def get_paper(paper_id: str):
     storage = _storage()
     paper = _require_paper(storage, paper_id)
-    return _no_store(_paper_payload(paper, source_count=len(storage.list_sources(paper_id))))
+    include_cand = (paper.binding_state is BindingState.AMBIGUOUS)
+    sources = storage.list_sources(
+        paper_id, include_inactive=False, include_candidates=include_cand
+    )
+    return _no_store(_paper_payload(paper, source_count=len(sources)))
 
 
 @router.get("/papers/{paper_id}/sources")
 def list_sources(paper_id: str):
     storage = _storage()
-    _require_paper(storage, paper_id)
-    sources = storage.list_sources(paper_id, include_inactive=False)
+    paper = _require_paper(storage, paper_id)
+    include_cand = (paper.binding_state is BindingState.AMBIGUOUS)
+    sources = storage.list_sources(
+        paper_id, include_inactive=False, include_candidates=include_cand
+    )
     # Display order follows the documented preference: a full translation is
     # more useful than a guide, which beats a raw extraction (ADR-006).
     # Sorted purely by role rank — letting `is_primary` lead would put the
@@ -423,6 +480,11 @@ def list_sources(paper_id: str):
 def set_status(paper_id: str, body: StatusUpdate):
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
     # Identity must be anchored before the reading state is recorded.
     paper = _adopt(storage, paper, "status_change")
     try:
@@ -437,6 +499,247 @@ def set_status(paper_id: str, body: StatusUpdate):
 
     storage.set_status(paper_id, target, reason=body.reason)
     return _no_store({"ok": True, "status": target.value})
+
+
+@router.post("/papers/{paper_id}/resolve")
+def resolve_paper(paper_id: str, body: ResolvePaperRequest):
+    """Confirm source bindings for an AMBIGUOUS paper and adopt it (ADR-006).
+
+    This transitions the paper from AMBIGUOUS to ADOPTED by creating its
+    canonical manifest in the Vault. Reading status remains UNREAD until a
+    primary source is successfully opened by the user.
+    """
+    storage = _storage()
+    paper = _require_paper(storage, paper_id)
+
+    cfg = get_cfg()
+    papers_root = cfg.papers_root_or_default
+    paper_folder = (papers_root / paper.folder_relpath).resolve()
+    if not paper_folder.is_dir():
+        raise HTTPException(404, f"paper folder not found on disk: {paper.folder_relpath}")
+
+    # Cross-process lock and concurrency check (Probe 5)
+    with _paper_lock(paper_id):
+        # Reload paper from storage in case state changed
+        paper = _require_paper(storage, paper_id)
+
+        manifest_file = paper_folder / MANIFEST_FILENAME
+        if manifest_file.is_file():
+            try:
+                raw = manifest_file.read_bytes()
+                existing_doc = json.loads(raw.decode("utf-8"))
+                parsed = parse_manifest(existing_doc)
+                req_sources_map = {
+                    s.rel_path: (s.role, s.is_primary, s.active) for s in body.sources
+                }
+                ex_sources_map = {
+                    s["path"]: (s["role"], s.get("primary", False), s.get("active", True))
+                    for s in existing_doc.get("sources", [])
+                }
+                if req_sources_map == ex_sources_map:
+                    # Idempotent match! Reconcile and roll-forward into ADOPTED in SQLite.
+                    resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
+                    for s in resolved_sources:
+                        t = paper_folder / s.rel_path
+                        if t.is_file() and not os.path.islink(t):
+                            st_f = t.stat()
+                            s.size_bytes = st_f.st_size
+                            s.mtime_ns = st_f.st_mtime_ns
+                            s.sha256 = _sha256_file(t)
+
+                    storage.commit_resolved_adoption(paper.paper_id, resolved_sources, body.title_override)
+                    updated_paper = storage.get_paper(paper_id)
+                    return _no_store(
+                        _paper_payload(updated_paper, source_count=len([s for s in resolved_sources if s.active]))
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(409, f"cannot reconcile existing manifest: {exc}") from exc
+            raise HTTPException(
+                409, "CONCURRENT_CONFLICT: paper has already been resolved with different bindings"
+            )
+
+        if paper.binding_state is not BindingState.AMBIGUOUS:
+            raise HTTPException(
+                400,
+                f"paper {paper_id} is not in AMBIGUOUS state (current: {paper.binding_state.value})",
+            )
+
+        # 1. Validate body.sources
+        active_sources = [s for s in body.sources if s.active]
+        if not active_sources:
+            raise HTTPException(400, "at least one source must be active")
+        if not any(s.is_primary for s in active_sources):
+            raise HTTPException(400, "at least one active source must be marked is_primary")
+
+        # 2. Strict path defense and role validation for each source
+        seen_rel_paths = set()
+        for item in body.sources:
+            rel = item.rel_path.strip()
+            if not rel or rel.startswith("/") or rel.startswith("\\"):
+                raise HTTPException(400, f"invalid path: {item.rel_path}")
+            if "\\" in rel or "\0" in rel or ":" in rel:
+                raise HTTPException(400, f"path contains forbidden characters: {rel}")
+
+            if rel.startswith("./") or rel.startswith("../") or "/../" in rel or "/./" in rel or rel in (".", ".."):
+                raise HTTPException(400, f"path traversal forbidden: {rel}")
+
+            p_parts = Path(rel).parts
+            if any(part in ("..", ".", "") for part in p_parts):
+                raise HTTPException(400, f"path traversal forbidden: {rel}")
+
+            if rel in (MANIFEST_FILENAME, ANNOTATION_STORE_FILENAME, "notes.md"):
+                raise HTTPException(400, f"cannot bind workbench internal file as source: {rel}")
+            if _LAYOUT_RE.search(rel):
+                raise HTTPException(400, f"cannot bind layout artefact as source: {rel}")
+
+            if rel in seen_rel_paths:
+                raise HTTPException(400, f"duplicate source path in request: {rel}")
+            seen_rel_paths.add(rel)
+
+            # Check raw lexical path BEFORE resolving symlinks (P0 security boundary)
+            lexical_path = paper_folder
+            for part in p_parts:
+                lexical_path = lexical_path / part
+                try:
+                    st_lex = os.lstat(lexical_path)
+                    if stat_mod.S_ISLNK(st_lex.st_mode):
+                        raise HTTPException(400, f"symlink component forbidden: {rel}")
+                except FileNotFoundError:
+                    raise HTTPException(400, f"source file not found: {rel}")
+
+            if not lexical_path.is_file() or os.path.islink(lexical_path):
+                raise HTTPException(400, f"source path must be a regular file: {rel}")
+
+            # Containment check after resolve
+            resolved_target = lexical_path.resolve()
+            try:
+                resolved_target.relative_to(paper_folder.resolve())
+            except ValueError:
+                raise HTTPException(400, f"path escapes paper folder: {rel}")
+
+            # Validate role
+            try:
+                role = SourceRole(item.role)
+            except ValueError:
+                raise HTTPException(400, f"unknown source role: {item.role}")
+
+            if role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF):
+                if not rel.lower().endswith(".pdf"):
+                    raise HTTPException(400, f"role {role.value} requires a .pdf file, got: {rel}")
+                if not _looks_like_pdf(resolved_target):
+                    raise HTTPException(400, f"file {rel} does not have valid PDF magic header (%PDF-)")
+            else:
+                if not rel.lower().endswith(".md"):
+                    raise HTTPException(400, f"role {role.value} requires a .md file, got: {rel}")
+                try:
+                    with open(resolved_target, "rb") as f:
+                        f.read(4096).decode("utf-8")
+                except UnicodeDecodeError:
+                    raise HTTPException(400, f"file {rel} is not valid UTF-8 text")
+
+        # Check primary constraints
+        primary_pdfs = [
+            s
+            for s in active_sources
+            if s.is_primary
+            and SourceRole(s.role) in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF)
+        ]
+        if len(primary_pdfs) > 1:
+            raise HTTPException(400, "at most one PDF can be marked as primary")
+
+        primary_trs = [
+            s
+            for s in active_sources
+            if s.is_primary and SourceRole(s.role).is_translation
+        ]
+        if len(primary_trs) > 1:
+            raise HTTPException(400, "at most one translation can be marked as primary")
+
+        # 3. Build PaperSource objects
+        existing_sources = {
+            s.rel_path: s
+            for s in storage.list_sources(
+                paper_id, include_inactive=True, include_candidates=True
+            )
+        }
+
+        resolved_sources: list[PaperSource] = []
+        for item in body.sources:
+            rel = item.rel_path.strip()
+            target = paper_folder / rel
+            prior = existing_sources.get(rel)
+            sid = prior.source_id if prior else new_source_id()
+            if sid.startswith("src_cand_"):
+                sid = new_source_id()
+
+            stat = target.stat()
+            h = hashlib.sha256(target.read_bytes()).hexdigest()
+
+            role = SourceRole(item.role)
+            media = (
+                MediaKind.PDF
+                if role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF)
+                else MediaKind.MARKDOWN
+            )
+            mime = "application/pdf" if media is MediaKind.PDF else "text/markdown"
+
+            source = PaperSource(
+                source_id=sid,
+                paper_id=paper_id,
+                role=role,
+                rel_path=rel,
+                rel_path_key_nfc=unicodedata.normalize("NFC", rel),
+                is_primary=item.is_primary,
+                binding_origin=BindingOrigin.MANUAL,
+                binding_confidence=1.0,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                sha256=h,
+                source_version=prior.source_version if prior else 1,
+                mime_type=mime,
+                active=item.active,
+                is_candidate=False,
+            )
+            resolved_sources.append(source)
+
+        # 4. Atomic manifest adoption (ADR-006 / ADR-007)
+        base = _papers_root_ptr()
+        intent = storage.begin_write_intent(
+            paper.paper_id,
+            "resolve",
+            {
+                "folder_relpath": paper.folder_relpath,
+                "sources": [s.to_row() for s in resolved_sources],
+                "title_override": body.title_override,
+            },
+        )
+        try:
+            paper = ensure_adopted(
+                storage,
+                _service(),
+                paper,
+                resolved_sources,
+                operation="manual_binding",
+                papers_root_rel=str(base) if str(base) != "." else "",
+            )
+        except Exception as exc:
+            storage.fail_write_intent(intent, str(exc))
+            raise HTTPException(500, f"cannot write manifest: {exc}") from exc
+
+        # 5. Atomically commit to SQLite in a single transaction (no DELETE)
+        try:
+            storage.commit_resolved_adoption(paper.paper_id, resolved_sources, body.title_override)
+            storage.commit_write_intent(intent)
+        except Exception as exc:
+            storage.fail_write_intent(intent, str(exc))
+            raise HTTPException(500, f"database commit failed: {exc}") from exc
+
+        updated_paper = storage.get_paper(paper_id)
+        return _no_store(
+            _paper_payload(updated_paper, source_count=len([s for s in resolved_sources if s.active]))
+        )
 
 
 # --------------------------------------------------------------- workspace
@@ -466,6 +769,11 @@ def save_workspace_state(paper_id: str, body: WorkspaceStateUpdate):
 
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
     paper = _adopt(storage, paper, "workspace_state")
     existing = storage.get_workspace_state(paper_id)
 
@@ -572,6 +880,11 @@ def create_note(paper_id: str, body: NoteCreate):
     """Create the note on first write. A paper without a note is legal."""
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
     if storage.get_note_for_paper(paper_id) is not None:
         raise HTTPException(409, "note already exists for this paper")
     # The note will reference this paper, so the identity must already exist in
@@ -712,6 +1025,11 @@ def _ensure_note_frontmatter(text: str, paper_id: str, note_id: str) -> str:
 def save_note(paper_id: str, body: NoteSave):
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
     note = storage.get_note_for_paper(paper_id)
     if note is None:
         raise HTTPException(404, "note not found; create it first")
@@ -968,6 +1286,11 @@ def _flatten_annotation(record: Dict[str, Any]) -> Dict[str, Any]:
 def create_annotation(paper_id: str, body: AnnotationCreate):
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
 
     if body.kind not in ANNOTATION_KINDS:
         raise HTTPException(400, f"unknown annotation kind: {body.kind}")
@@ -1029,6 +1352,11 @@ def delete_annotation(paper_id: str, annotation_id: str):
     """
     storage = _storage()
     paper = _require_paper(storage, paper_id)
+    if paper.binding_state is BindingState.AMBIGUOUS:
+        raise HTTPException(
+            409,
+            "RESOLUTION_REQUIRED: paper has ambiguous bindings and must be resolved before state can be recorded",
+        )
 
     box: Dict[str, Any] = {}
 

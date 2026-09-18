@@ -115,6 +115,14 @@ export class NoteEditor extends EventTarget {
     });
   }
 
+  /** Clear the editor and show placeholder for unadopted or empty paper. */
+  clear(message = '待确认论文暂无笔记') {
+    this._setText('');
+    this._setState(message);
+    this.hash = null;
+    this.noteId = null;
+  }
+
   /** Load a note into the editor. Absent notes are legal (ADR-006). */
   async load() {
     const epoch = this._epoch;

@@ -14,21 +14,28 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from typing import Any
 from collections import Counter
 from pathlib import Path
 
 from backend.app.config import load_config
-from backend.app.paper.models import utc_now
 from backend.app.paper import ANNOTATION_STORE_FILENAME, MANIFEST_FILENAME
 from backend.app.paper.manifest import (
     load_adopted_identity,
     manifest_to_sources,
     read_manifest_file,
 )
+from backend.app.paper.models import (
+    BindingOrigin,
+    BindingState,
+    PaperNote,
+    PaperStatus,
+    new_paper_id,
+    utc_now,
+)
 from backend.app.paper.scanner import ScanConfig, discover_papers
-from backend.app.paper.models import PaperNote
 from backend.app.paper.storage import PaperStorage
 from backend.app.paper.writer import VaultWriteService
 
@@ -190,8 +197,6 @@ def index_papers(dry_run: bool = False) -> dict:
         elif existing:
             paper.paper_id = existing.paper_id
         else:
-            from backend.app.paper.models import new_paper_id
-
             paper.paper_id = new_paper_id()
 
         if existing:
@@ -254,6 +259,7 @@ def index_papers(dry_run: bool = False) -> dict:
         workbench_owned.add(ANNOTATION_STORE_FILENAME)
         workbench_owned.add(MANIFEST_FILENAME)
 
+        paper_dir = root / paper.folder_relpath
         for source in paper.sources:
             if source.rel_path in workbench_owned:
                 # Skip binding, but do not touch any existing row: a stale
@@ -269,6 +275,13 @@ def index_papers(dry_run: bool = False) -> dict:
                 # otherwise a PDF replaced in place would keep version 1 and
                 # `?version=1` would keep serving the new bytes.
                 source.source_id = from_manifest.source_id
+                source.role = from_manifest.role
+                source.is_primary = from_manifest.is_primary
+                on_disk = (paper_dir / source.rel_path).is_file() and not (paper_dir / source.rel_path).is_symlink()
+                source.active = from_manifest.active if on_disk else False
+                if not on_disk and from_manifest.active:
+                    source.missing_since = (prior.missing_since if prior else None) or utc_now()
+                source.binding_origin = BindingOrigin.MANIFEST
                 source.created_at = prior.created_at if prior else source.created_at
                 source.source_version = _next_version(prior, source)
                 if prior and _unchanged(prior, source):
@@ -283,6 +296,21 @@ def index_papers(dry_run: bool = False) -> dict:
             source.paper_id = paper.paper_id
             storage.upsert_source(source)
             sources_written += 1
+
+        # Also persist any source declared in the manifest that was not seen
+        # on disk (e.g. inactive entries or temporarily missing files).
+        for rel_path, m_source in manifest_sources.items():
+            if rel_path not in {s.rel_path for s in paper.sources}:
+                prior = existing_sources.get(rel_path)
+                m_source.paper_id = paper.paper_id
+                if prior:
+                    m_source.created_at = prior.created_at
+                on_disk = (paper_dir / rel_path).is_file() and not (paper_dir / rel_path).is_symlink()
+                m_source.active = m_source.active if on_disk else False
+                if not on_disk and m_source.active:
+                    m_source.missing_since = (prior.missing_since if prior else None) or utc_now()
+                storage.upsert_source(m_source)
+                sources_written += 1
 
         # Retire bindings the scan no longer sees. Without this a renamed or
         # removed file stays active forever, so the paper keeps offering a PDF
@@ -306,9 +334,63 @@ def index_papers(dry_run: bool = False) -> dict:
             paper.primary_translation_source_id = primary_tr.source_id
         storage.upsert_paper(paper, allow_folder_move=True)
 
-    states = Counter(p.binding_state.value for p in result.papers)
+    # Process ambiguous papers so they are recorded in SQLite and visible in the
+    # UI for human confirmation rather than remaining unindexed (ADR-006).
+    for paper in result.ambiguous:
+        parts = paper.folder_relpath.split("/")
+        paper.category_relpath = parts[0] if len(parts) > 1 else ""
+
+        if dry_run:
+            continue
+
+        existing = storage.get_paper_by_folder(paper.folder_relpath)
+        if existing:
+            paper.paper_id = existing.paper_id
+            # Preserve existing user-set reading status (Probe 9)
+            paper.status = existing.status
+            paper.first_opened_at = existing.first_opened_at
+            paper.last_opened_at = existing.last_opened_at
+            paper.completed_at = existing.completed_at
+            paper.note_id = existing.note_id
+            paper.title_override = existing.title_override
+        else:
+            paper.paper_id = new_paper_id()
+            paper.status = PaperStatus.UNREAD
+
+        paper.binding_state = BindingState.AMBIGUOUS
+        storage.upsert_paper(paper, allow_folder_move=True)
+
+        existing_sources = {
+            s.rel_path: s
+            for s in storage.list_sources(
+                paper.paper_id, include_inactive=True, include_candidates=True
+            )
+        }
+
+        seen_paths = set()
+        for source in paper.sources:
+            prior = existing_sources.get(source.rel_path)
+            if prior is not None:
+                source.source_id = prior.source_id
+            else:
+                # Deterministic candidate source ID (Probe 2)
+                h = hashlib.sha256(f"{paper.paper_id}:{source.rel_path_key_nfc}".encode()).hexdigest()[:16]
+                source.source_id = f"src_cand_{h}"
+            source.paper_id = paper.paper_id
+            source.is_candidate = True
+            source.binding_origin = BindingOrigin.DISCOVERY
+            source.is_primary = False
+            storage.upsert_source(source)
+            seen_paths.add(source.rel_path)
+
+        for rel_path, prior_source in existing_sources.items():
+            if prior_source.active and rel_path not in seen_paths:
+                storage.deactivate_source(prior_source.source_id)
+
+    all_papers = list(result.papers) + list(result.ambiguous)
+    states = Counter(p.binding_state.value for p in all_papers)
     return {
-        "papers_found": len(result.papers),
+        "papers_found": len(all_papers),
         "ambiguous": len(result.ambiguous),
         "mineru_containers": len(result.mineru_containers),
         "created": created,

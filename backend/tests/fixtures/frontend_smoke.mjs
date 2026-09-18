@@ -185,4 +185,14 @@ for (const method of ['open', 'goToPage', 'getCurrentPage', 'getPageCount', 'get
   check(`PdfBridge.${method} exists`, typeof bridge[method] === 'function');
 }
 
+const { api } = modules['api.js'];
+for (const method of [
+  'listPapers', 'getPaper', 'createPaper', 'listSources', 'sourceContentUrl',
+  'setStatus', 'getWorkspaceState', 'saveWorkspaceState', 'getNote', 'saveNote',
+  'createNote', 'sourceText', 'sourceAssetUrl', 'listAnnotations',
+  'createAnnotation', 'deleteAnnotation', 'getConfig', 'resolvePaper',
+]) {
+  check(`api.${method} exists`, typeof api[method] === 'function');
+}
+
 console.log(JSON.stringify({ total: checks.length, failures }));

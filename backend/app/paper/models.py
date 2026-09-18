@@ -150,6 +150,7 @@ class BindingOrigin(str, Enum):
     MANIFEST = "MANIFEST"
     STRICT_RULE = "STRICT_RULE"
     MANUAL = "MANUAL"
+    DISCOVERY = "DISCOVERY"
 
 
 class AnnotationKind(str, Enum):
@@ -183,6 +184,7 @@ class PaperSource:
     language: Optional[str] = None
     page_count: Optional[int] = None
     active: bool = True
+    is_candidate: bool = False
     missing_since: Optional[str] = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -210,6 +212,7 @@ class PaperSource:
             "language": self.language,
             "page_count": self.page_count,
             "active": int(self.active),
+            "is_candidate": int(self.is_candidate),
             "missing_since": self.missing_since,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -280,6 +283,7 @@ class Paper:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     inactive_at: Optional[str] = None
+    ambiguity_reason: Optional[str] = None
     sources: List[PaperSource] = field(default_factory=list)
 
     @property
@@ -308,6 +312,7 @@ class Paper:
             "last_opened_at": self.last_opened_at,
             "completed_at": self.completed_at,
             "status_changed_at": self.status_changed_at,
+            "ambiguity_reason": self.ambiguity_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "inactive_at": self.inactive_at,

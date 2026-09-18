@@ -98,6 +98,7 @@ export class PdfBridge extends EventTarget {
     if (!this.iframe) {
       this._createIframe();
     }
+    this.show();
 
     this._readyPromise = new Promise((resolve, reject) => {
       this._readyResolve = resolve;

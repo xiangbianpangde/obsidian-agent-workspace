@@ -34,11 +34,12 @@ async function request(url, options = {}) {
 }
 
 export const api = {
-  /** Paper list, optionally filtered by status or category. */
-  listPapers({ status = null, category = null } = {}) {
+  /** Paper list, optionally filtered by status, category, or binding state. */
+  listPapers({ status = null, category = null, bindingState = null } = {}) {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (category) params.set('category', category);
+    if (bindingState) params.set('binding_state', bindingState);
     const qs = params.toString();
     return request(`${BASE}/papers${qs ? `?${qs}` : ''}`);
   },
@@ -49,6 +50,15 @@ export const api = {
 
   createPaper(payload) {
     return request(`${BASE}/papers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Confirm source bindings for an AMBIGUOUS paper and adopt it (ADR-006). */
+  resolvePaper(paperId, payload) {
+    return request(`${BASE}/papers/${encodeURIComponent(paperId)}/resolve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

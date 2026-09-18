@@ -35,6 +35,7 @@ from typing import Dict, Optional, Tuple
 
 __all__ = [
     "WriteError",
+    "FileNotFoundWriteError",
     "ConflictError",
     "PathRejected",
     "AlreadyExistsError",
@@ -48,6 +49,10 @@ TEMP_PREFIX = ".ws-paper-tmp-"
 
 class WriteError(Exception):
     """Base class for write failures."""
+
+
+class FileNotFoundWriteError(WriteError, FileNotFoundError):
+    """The requested file does not exist on disk."""
 
 
 class PathRejected(WriteError):
@@ -275,8 +280,10 @@ class VaultWriteService:
     # ---------------------------------------------------------------- public
     def read(self, rel_path: str) -> Tuple[bytes, str]:
         full = self.resolve(rel_path)
+        if not full.exists():
+            raise FileNotFoundWriteError(f"file not found: {rel_path}")
         if not full.is_file():
-            raise WriteError(f"file not found: {rel_path}")
+            raise WriteError(f"not a regular file: {rel_path}")
         if full.is_symlink():
             raise PathRejected(f"symlink rejected: {rel_path}")
         data = full.read_bytes()

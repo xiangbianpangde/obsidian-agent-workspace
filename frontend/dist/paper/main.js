@@ -164,7 +164,13 @@ export class PaperWorkbench {
 
   async loadPapers() {
     try {
-      const data = await api.listPapers({ status: this.statusFilter });
+      const opts = {};
+      if (this.statusFilter === 'AMBIGUOUS') {
+        opts.bindingState = 'AMBIGUOUS';
+      } else if (this.statusFilter) {
+        opts.status = this.statusFilter;
+      }
+      const data = await api.listPapers(opts);
       this.papers = data.papers || [];
       this._renderPaperList();
     } catch (error) {
@@ -187,10 +193,16 @@ export class PaperWorkbench {
       if (this.selected && this.selected.paper_id === paper.paper_id) {
         button.classList.add('is-active');
       }
+      const isAmbiguous = paper.binding_state === 'AMBIGUOUS';
+      const statusLabel = isAmbiguous
+        ? '待确认'
+        : (STATUS_LABELS[paper.status] || paper.status);
+      const statusAttr = isAmbiguous ? 'AMBIGUOUS' : paper.status;
+
       button.innerHTML = `
         <span class="paper-item-title">${escapeHtml(paper.title || paper.display_title || '未命名')}</span>
         <span class="paper-item-meta">
-          <span class="paper-status" data-status="${escapeHtml(paper.status)}">${STATUS_LABELS[paper.status] || paper.status}</span>
+          <span class="paper-status" data-status="${escapeHtml(statusAttr)}">${escapeHtml(statusLabel)}</span>
           ${paper.source_count ? `<span class="paper-badge">${paper.source_count} 来源</span>` : ''}
         </span>`;
       button.addEventListener('click', () => this.selectPaper(paper.paper_id));
@@ -219,8 +231,18 @@ export class PaperWorkbench {
       this.el.title.textContent = paper.title || paper.display_title || '未命名';
       this._renderMeta();
       this._renderPaperList();
-      this._renderSources();
       this._renderStatusButton();
+
+      if (paper.binding_state === 'AMBIGUOUS') {
+        this._renderAmbiguityResolutionPanel();
+        return;
+      }
+
+      if (this._resolutionHost) {
+        this._resolutionHost.style.display = 'none';
+      }
+
+      this._renderSources();
 
       // Mark READING only once a readable source actually loads, never on a
       // mere list click (ADR-007).
@@ -230,7 +252,10 @@ export class PaperWorkbench {
         await this.markOpened();
       } else {
         const md = this.sources.find((s) => s.media_kind === 'MARKDOWN');
-        if (md) await this.openSource(md.source_id);
+        if (md) {
+          await this.openSource(md.source_id);
+          await this.markOpened();
+        }
       }
 
       await Promise.all([this.note.loadFor(paperId), this.workspaceState.loadFor(paperId)]);
@@ -295,10 +320,14 @@ export class PaperWorkbench {
   _renderMeta() {
     const paper = this.selected;
     if (!paper) return;
+    const isAmbiguous = paper.binding_state === 'AMBIGUOUS';
+    const statusText = isAmbiguous
+      ? '待人工确认'
+      : (STATUS_LABELS[paper.status] || paper.status);
     const parts = [
-      STATUS_LABELS[paper.status] || paper.status,
+      statusText,
       paper.category_relpath,
-      `${this.sources.length} 个来源`,
+      `${this.sources.length} 个${isAmbiguous ? '候选' : ''}来源`,
     ].filter(Boolean);
     this.el.meta.textContent = parts.join(' · ');
   }
@@ -306,10 +335,165 @@ export class PaperWorkbench {
   _renderStatusButton() {
     const paper = this.selected;
     if (!paper || !this.el.statusButton) return;
+    if (paper.binding_state === 'AMBIGUOUS') {
+      this.el.statusButton.hidden = true;
+      return;
+    }
+    this.el.statusButton.hidden = false;
     const next = { UNREAD: 'READING', READING: 'COMPLETED', COMPLETED: 'READING' }[paper.status];
     const nextLabel = { UNREAD: '开始阅读', READING: '标记看完', COMPLETED: '重新阅读' }[paper.status];
     this.el.statusButton.textContent = nextLabel;
     this.el.statusButton.dataset.next = next;
+  }
+
+  _renderAmbiguityResolutionPanel() {
+    this.el.sourceTabs.innerHTML = '';
+    if (this.pdf && typeof this.pdf.hide === 'function') {
+      this.pdf.hide();
+    }
+    if (this.el.statusButton) this.el.statusButton.hidden = true;
+    if (this.note) {
+      if (typeof this.note.clear === 'function') {
+        this.note.clear('待确认论文暂无笔记');
+      } else if (typeof this.note._setText === 'function') {
+        this.note._setText('');
+        if (typeof this.note._setState === 'function') {
+          this.note._setState('待确认论文暂无笔记');
+        }
+      }
+    }
+    this.el.markdownHost.innerHTML = '<p class="paper-muted" style="padding:24px;">当前论文待确认来源绑定。请在左侧面板选择角色与首要主文件并确认采纳。</p>';
+
+    let reasonDesc = '该论文夹存在多个候选来源或未检测到 PDF 原文，请确认文件角色和主文件。';
+    if (this.selected.ambiguity_reason === 'NO_PDF_MARKDOWN_ONLY') {
+      reasonDesc = '未在该论文夹中检测到 PDF 原文。系统共发现了以下候选 Markdown 文档，请确认各文档的角色与首要主阅读文件以完成采纳。';
+    } else if (this.selected.ambiguity_reason === 'MULTIPLE_PDFS') {
+      reasonDesc = '该论文夹中包含多个候选 PDF 原文。请指定首要阅读的原文 PDF，其余文件可作为附加材料或忽略。';
+    }
+
+    const sources = this.sources || [];
+    const panelHtml = `
+      <div class="paper-resolution-panel">
+        <div class="paper-resolution-banner">
+          <span class="paper-resolution-badge">待人工确认</span>
+          <h3>来源绑定消歧与采纳</h3>
+          <p class="paper-resolution-desc">${escapeHtml(reasonDesc)}</p>
+        </div>
+
+        <form class="paper-resolution-form" id="resolution-form">
+          <table class="paper-resolution-table">
+            <thead>
+              <tr>
+                <th style="width: 48px; text-align: center;">主文件</th>
+                <th style="min-width: 120px;">候选文件名</th>
+                <th style="width: 120px;">分配角色</th>
+                <th style="width: 50px; text-align: right;">大小</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sources.map((s, idx) => {
+                const isPdf = s.media_kind === 'PDF';
+                return `
+                <tr>
+                  <td style="text-align: center;">
+                    <input type="radio" name="primary_choice" value="${escapeHtml(s.rel_path)}" ${idx === 0 ? 'checked' : ''} />
+                  </td>
+                  <td>
+                    <span class="paper-resolution-filename">${escapeHtml(s.rel_path)}</span>
+                  </td>
+                  <td>
+                    <select class="paper-select paper-resolution-role" data-relpath="${escapeHtml(s.rel_path)}">
+                      ${isPdf ? `
+                        <option value="ORIGINAL_PDF" ${s.role === 'ORIGINAL_PDF' ? 'selected' : ''}>原文 PDF</option>
+                        <option value="SUPPLEMENTAL_PDF" ${s.role === 'SUPPLEMENTAL_PDF' ? 'selected' : ''}>附加 PDF</option>
+                      ` : `
+                        <option value="TRANSLATION_FULL" ${s.role === 'TRANSLATION_FULL' || idx === 0 ? 'selected' : ''}>全文翻译</option>
+                        <option value="TRANSLATION_GUIDE" ${s.role === 'TRANSLATION_GUIDE' ? 'selected' : ''}>翻译导读</option>
+                        <option value="EXTRACTED_MARKDOWN" ${s.role === 'EXTRACTED_MARKDOWN' ? 'selected' : ''}>解析 Markdown</option>
+                        <option value="OTHER_MARKDOWN" ${s.role === 'OTHER_MARKDOWN' ? 'selected' : ''}>其他 Markdown</option>
+                      `}
+                      <option value="IGNORE">忽略（不绑定）</option>
+                    </select>
+                  </td>
+                  <td class="paper-resolution-size" style="text-align: right;">
+                    ${s.size_bytes ? `${Math.round(s.size_bytes / 1024)} KB` : '-'}
+                  </td>
+                </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+
+          <div class="paper-resolution-actions">
+            <button type="submit" class="paper-resolve-submit-btn">确认绑定并采纳论文</button>
+            <span class="paper-resolution-msg"></span>
+          </div>
+        </form>
+      </div>
+    `;
+
+    if (!this._resolutionHost) {
+      this._resolutionHost = document.createElement('div');
+      this._resolutionHost.className = 'paper-resolution-host';
+      this.el.pdfHost.appendChild(this._resolutionHost);
+    }
+    this._resolutionHost.style.display = 'block';
+    this._resolutionHost.innerHTML = panelHtml;
+
+    const form = this._resolutionHost.querySelector('#resolution-form');
+    const msgEl = this._resolutionHost.querySelector('.paper-resolution-msg');
+    const submitBtn = this._resolutionHost.querySelector('.paper-resolve-submit-btn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msgEl.className = 'paper-resolution-msg';
+      msgEl.textContent = '';
+      submitBtn.disabled = true;
+
+      const checkedRadio = form.querySelector('input[name="primary_choice"]:checked');
+      const primaryPath = checkedRadio ? checkedRadio.value : null;
+
+      const roleSelects = form.querySelectorAll('.paper-resolution-role');
+      const payloadSources = [];
+
+      for (const sel of roleSelects) {
+        const relPath = sel.dataset.relpath;
+        const role = sel.value;
+        if (role === 'IGNORE') continue;
+
+        payloadSources.push({
+          rel_path: relPath,
+          role: role,
+          is_primary: relPath === primaryPath,
+          active: true,
+        });
+      }
+
+      if (!payloadSources.length) {
+        msgEl.className = 'paper-resolution-msg is-error';
+        msgEl.textContent = '至少需要绑定一个文件！';
+        submitBtn.disabled = false;
+        return;
+      }
+
+      if (!payloadSources.some((s) => s.is_primary)) {
+        payloadSources[0].is_primary = true;
+      }
+
+      try {
+        msgEl.textContent = '正在采纳并固化 Manifest...';
+        await api.resolvePaper(this.selected.paper_id, { sources: payloadSources });
+        msgEl.className = 'paper-resolution-msg is-ok';
+        msgEl.textContent = '采纳成功！';
+        if (this._resolutionHost) this._resolutionHost.style.display = 'none';
+        await this.loadPapers();
+        await this.selectPaper(this.selected.paper_id);
+      } catch (err) {
+        msgEl.className = 'paper-resolution-msg is-error';
+        msgEl.textContent = `采纳失败: ${err.message}`;
+        submitBtn.disabled = false;
+      }
+    });
   }
 
   /** UNREAD -> READING fires on a successful source load, not on a list click. */
@@ -552,6 +736,7 @@ const SHELL_HTML = `
       <option value="UNREAD">未看</option>
       <option value="READING">正在看</option>
       <option value="COMPLETED">看完</option>
+      <option value="AMBIGUOUS">待确认</option>
     </select>
     <span class="paper-spacer"></span>
     <button type="button" class="paper-status-btn" data-role="status-button">开始阅读</button>

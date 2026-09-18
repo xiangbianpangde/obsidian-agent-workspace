@@ -26,12 +26,15 @@ binding, because a wrong binding silently attaches the wrong file to a paper.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import MANIFEST_FILENAME
+from .manifest import manifest_to_sources, parse_manifest
 from .models import (
     BindingOrigin,
     BindingState,
@@ -204,6 +207,65 @@ def _dir_depth(base: Path, current: Path) -> int:
         return 0
 
 
+def _build_candidate_sources(
+    paper_id: str,
+    reader_pdfs: Sequence[Path],
+    real_md: Dict[str, SourceRole],
+    current: Path,
+) -> List[PaperSource]:
+    """Collect candidate sources for an ambiguous paper.
+
+    Candidates are tagged with `binding_origin=BindingOrigin.DISCOVERY` and
+    `is_candidate=True` so readers, annotations and workspace state do not treat
+    them as confirmed bindings before human resolution (ADR-006).
+    """
+    candidates: List[PaperSource] = []
+    for pdf in reader_pdfs:
+        source = PaperSource(
+            source_id=new_source_id(),
+            paper_id=paper_id,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path=pdf.name,
+            rel_path_key_nfc=_nfc_key(pdf.name),
+            is_primary=False,
+            binding_origin=BindingOrigin.DISCOVERY,
+            is_candidate=True,
+            binding_confidence=0.5,
+            mime_type="application/pdf",
+        )
+        try:
+            stat = pdf.stat()
+            source.size_bytes = stat.st_size
+            source.mtime_ns = stat.st_mtime_ns
+            source.sha256 = _sha256_file(pdf)
+        except OSError:
+            pass
+        candidates.append(source)
+
+    for name, role in sorted(real_md.items()):
+        source = PaperSource(
+            source_id=new_source_id(),
+            paper_id=paper_id,
+            role=role,
+            rel_path=name,
+            rel_path_key_nfc=_nfc_key(name),
+            is_primary=False,
+            binding_origin=BindingOrigin.DISCOVERY,
+            is_candidate=True,
+            binding_confidence=0.5,
+            mime_type="text/markdown",
+        )
+        try:
+            stat = (current / name).stat()
+            source.size_bytes = stat.st_size
+            source.mtime_ns = stat.st_mtime_ns
+            source.sha256 = _sha256_file(current / name)
+        except OSError:
+            pass
+        candidates.append(source)
+    return candidates
+
+
 def _pick_primary_pdf(
     pdf_names: List[str], folder_name: str
 ) -> Tuple[Optional[str], List[str]]:
@@ -272,6 +334,163 @@ def discover_papers(config: ScanConfig) -> ScanResult:
             result.mineru_containers.append(current.relative_to(root).as_posix())
             continue
 
+        folder_relpath = current.relative_to(root).as_posix()
+        manifest_file = current / MANIFEST_FILENAME
+        if manifest_file.is_file():
+            try:
+                raw = manifest_file.read_bytes()
+                manifest_doc = json.loads(raw.decode("utf-8"))
+                if not isinstance(manifest_doc, dict):
+                    raise ValueError("manifest is not a JSON object")
+                parsed_manifest = parse_manifest(manifest_doc)
+            except Exception as exc:
+                # Corrupt or unreadable manifest: FAIL CLOSED.
+                # Must not silently create a new identity or treat as ambiguous.
+                result.errors.append(f"corrupt manifest in {folder_relpath}: {exc}")
+                continue
+
+            manifest_sources_map: Dict[str, PaperSource] = {}
+            missing_active = False
+            primary_pdf = None
+            primary_tr = None
+
+            for s_entry in parsed_manifest.sources:
+                rel_path = s_entry["path"]
+                try:
+                    role = SourceRole(s_entry["role"])
+                except ValueError:
+                    role = SourceRole.OTHER_MARKDOWN
+                is_pri = bool(s_entry.get("primary", False))
+                act = bool(s_entry.get("active", True))
+
+                source = PaperSource(
+                    source_id=s_entry["source_id"],
+                    paper_id=parsed_manifest.paper_id,
+                    role=role,
+                    rel_path=rel_path,
+                    rel_path_key_nfc=_nfc_key(rel_path),
+                    is_primary=is_pri,
+                    binding_origin=BindingOrigin.MANIFEST,
+                    binding_confidence=1.0,
+                    active=act,
+                )
+                target_file = current / rel_path
+                if target_file.is_file() and not target_file.is_symlink():
+                    try:
+                        stat = target_file.stat()
+                        source.size_bytes = stat.st_size
+                        source.mtime_ns = stat.st_mtime_ns
+                        source.sha256 = _sha256_file(target_file)
+                    except OSError:
+                        pass
+                else:
+                    if act:
+                        missing_active = True
+                        source.missing_since = utc_now()
+                        source.active = False
+
+                if is_pri and role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF) and act:
+                    primary_pdf = source
+                if is_pri and role.is_translation and act:
+                    primary_tr = source
+
+                manifest_sources_map[rel_path] = source
+
+            # Also discover direct files on disk not declared in manifest (e.g. renamed or added files)
+            direct_files = [e for e in entries if e.is_file() and not e.is_symlink()]
+            for f in direct_files:
+                if f.name == MANIFEST_FILENAME or f.name in manifest_sources_map:
+                    continue
+                if _LAYOUT_RE.search(f.name):
+                    continue
+                if f.name.lower().endswith(_PDF_SUFFIX):
+                    source = PaperSource(
+                        source_id=new_source_id(),
+                        paper_id=parsed_manifest.paper_id,
+                        role=SourceRole.SUPPLEMENTAL_PDF,
+                        rel_path=f.name,
+                        rel_path_key_nfc=_nfc_key(f.name),
+                        is_primary=False,
+                        binding_origin=BindingOrigin.DISCOVERY,
+                        mime_type="application/pdf",
+                    )
+                    try:
+                        st = f.stat()
+                        source.size_bytes = st.st_size
+                        source.mtime_ns = st.st_mtime_ns
+                        source.sha256 = _sha256_file(f)
+                    except OSError:
+                        pass
+                    manifest_sources_map[f.name] = source
+                elif f.name.lower().endswith(_MD_SUFFIX):
+                    m_role = classify_markdown_role(f.name)
+                    if m_role is not None:
+                        source = PaperSource(
+                            source_id=new_source_id(),
+                            paper_id=parsed_manifest.paper_id,
+                            role=m_role,
+                            rel_path=f.name,
+                            rel_path_key_nfc=_nfc_key(f.name),
+                            is_primary=False,
+                            binding_origin=BindingOrigin.DISCOVERY,
+                            mime_type="text/markdown",
+                        )
+                        try:
+                            st = f.stat()
+                            source.size_bytes = st.st_size
+                            source.mtime_ns = st.st_mtime_ns
+                            source.sha256 = _sha256_file(f)
+                        except OSError:
+                            pass
+                        manifest_sources_map[f.name] = source
+
+            all_sources = list(manifest_sources_map.values())
+            has_active = any(s.active for s in all_sources)
+            primary_pdf = next(
+                (s for s in all_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active),
+                None,
+            )
+            if primary_pdf is None:
+                active_pdfs = [s for s in all_sources if s.media_kind is MediaKind.PDF and s.active]
+                if len(active_pdfs) == 1:
+                    active_pdfs[0].is_primary = True
+                    primary_pdf = active_pdfs[0]
+
+            primary_tr = next(
+                (s for s in all_sources if s.is_primary and s.role.is_translation and s.active),
+                None,
+            )
+
+            primary_pdf_count = len(
+                [s for s in all_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
+            )
+            primary_tr_count = len(
+                [s for s in all_sources if s.is_primary and s.role.is_translation and s.active]
+            )
+            semantic_valid = has_active and primary_pdf_count <= 1 and primary_tr_count <= 1
+
+            if not semantic_valid or missing_active:
+                binding_state = BindingState.DEGRADED
+            else:
+                binding_state = BindingState.ADOPTED
+
+            paper = Paper(
+                paper_id=parsed_manifest.paper_id,
+                folder_relpath=folder_relpath,
+                display_title=current.name,
+                title_override=manifest_doc.get("title_override"),
+                category_relpath="",
+                manifest_relpath=MANIFEST_FILENAME,
+                binding_state=binding_state,
+                note_id=parsed_manifest.note_id,
+                paper_tags=list(manifest_doc.get("tags") or []),
+                primary_pdf_source_id=primary_pdf.source_id if primary_pdf else None,
+                primary_translation_source_id=primary_tr.source_id if primary_tr else None,
+                sources=all_sources,
+            )
+            result.papers.append(paper)
+            continue
+
         direct_files = [e for e in entries if e.is_file()]
 
         pdf_files = [e for e in direct_files if e.name.lower().endswith(_PDF_SUFFIX)]
@@ -294,7 +513,6 @@ def discover_papers(config: ScanConfig) -> ScanResult:
             # Not a paper folder. Recursion is handled by rglob.
             continue
 
-        folder_relpath = current.relative_to(root).as_posix()
         paper = Paper(
             paper_id="",  # assigned only at adoption; discovery is identity-free
             folder_relpath=folder_relpath,
@@ -306,6 +524,10 @@ def discover_papers(config: ScanConfig) -> ScanResult:
         if not has_pdf:
             # Only markdown, no PDF: do not auto-adopt (ADR-006). Report it.
             paper.binding_state = BindingState.AMBIGUOUS
+            paper.ambiguity_reason = "NO_PDF_MARKDOWN_ONLY"
+            paper.sources = _build_candidate_sources(
+                paper.paper_id, reader_pdfs, real_md, current
+            )
             result.ambiguous.append(paper)
             continue
 
@@ -314,6 +536,10 @@ def discover_papers(config: ScanConfig) -> ScanResult:
 
         if ambiguous_pdfs:
             paper.binding_state = BindingState.AMBIGUOUS
+            paper.ambiguity_reason = "MULTIPLE_PDFS"
+            paper.sources = _build_candidate_sources(
+                paper.paper_id, reader_pdfs, real_md, current
+            )
             result.ambiguous.append(paper)
             continue
 

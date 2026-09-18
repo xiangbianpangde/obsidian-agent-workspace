@@ -28,6 +28,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import quote
@@ -169,15 +170,26 @@ def _get_source_or_404(source_id: str) -> Tuple[PaperSource, Path]:
     except ValueError as exc:
         raise HTTPException(500, "papers root escapes the vault; refusing to serve") from exc
 
-    full = papers_root / paper.folder_relpath / source.rel_path
-    resolved = full.resolve(strict=False)
+    paper_dir = (papers_root / paper.folder_relpath).resolve()
+    lexical = paper_dir
+    for part in Path(source.rel_path).parts:
+        lexical = lexical / part
+        try:
+            st = os.lstat(lexical)
+            if stat.S_ISLNK(st.st_mode):
+                raise HTTPException(400, f"symlink forbidden: {source.rel_path}")
+        except FileNotFoundError:
+            raise HTTPException(404, f"source file is missing on disk: {source.rel_path}")
+
+    if not lexical.is_file() or os.path.islink(lexical):
+        raise HTTPException(404, f"source file is missing or is a symlink: {source.rel_path}")
+
+    resolved = lexical.resolve(strict=False)
     try:
         resolved.relative_to(cfg.vault_root)
     except ValueError as exc:
         raise HTTPException(400, "resolved source path escapes the vault") from exc
 
-    if not resolved.is_file():
-        raise HTTPException(404, f"source file is missing on disk: {source.rel_path}")
     return source, resolved
 
 
@@ -348,6 +360,17 @@ def _resolve_source_relative(markdown_path: Path, asset_ref: str) -> Path:
         raise HTTPException(400, "asset reference may not traverse upwards")
 
     base = markdown_path.parent
+    # Lexical symlink check
+    lexical = base
+    for part in parts:
+        lexical = lexical / part
+        try:
+            st = os.lstat(lexical)
+            if stat.S_ISLNK(st.st_mode):
+                raise HTTPException(400, "symlinked assets are not permitted")
+        except FileNotFoundError:
+            break
+
     candidate = (base / asset_ref).resolve(strict=False)
 
     try:

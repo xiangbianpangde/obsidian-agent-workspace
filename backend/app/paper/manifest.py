@@ -234,8 +234,8 @@ def reconcile_with_manifest(
         paper.title_override = document["title_override"]
     if isinstance(document.get("tags"), list):
         paper.paper_tags = list(document["tags"])
-    if note_path:
-        paper.note_id = paper.note_id or None
+    if note_id:
+        paper.note_id = note_id
     return paper
 
 
@@ -268,15 +268,20 @@ class AdoptionRequired(Exception):
 
 
 def read_manifest_file(service: Any, rel_path: str) -> Optional[Dict[str, Any]]:
-    """Read and validate a manifest, or return None when absent.
+    """Read and validate a manifest, or return None ONLY when absent.
 
-    A present-but-invalid manifest raises: treating it as absent would let a
-    corrupt file cause a paper to be re-identified under a fresh UUID.
+    A present-but-invalid or unreadable manifest raises: treating it as absent would let a
+    corrupt or permission-denied file cause a paper to be re-identified under a fresh UUID.
     """
     try:
         raw, _digest = service.read(rel_path)
-    except Exception:
+    except FileNotFoundError:
         return None
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "file not found" in msg or "no such file" in msg:
+            return None
+        raise ManifestError(f"unreadable manifest at {rel_path}: {exc}") from exc
     try:
         document = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
