@@ -685,6 +685,15 @@ class PaperStorage:
                 (stamp, source_id),
             )
 
+    def deactivate_source_by_path(self, paper_id: str, rel_path: str) -> None:
+        """Deactivate a source by paper_id and relative path (zero-delete)."""
+        stamp = utc_now()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE paper_sources SET active = 0, updated_at = ? WHERE paper_id = ? AND rel_path = ?",
+                (stamp, paper_id, rel_path),
+            )
+
     def mark_sources_missing(self, paper_id: str, missing: Iterable[str]) -> None:
         """Record that the named bound files vanished externally.
 

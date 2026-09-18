@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+import unicodedata
 from typing import Any
 from collections import Counter
 from pathlib import Path
@@ -32,6 +33,7 @@ from backend.app.paper.models import (
     BindingOrigin,
     BindingState,
     PaperNote,
+    PaperSource,
     PaperStatus,
     new_paper_id,
     new_source_id,
@@ -331,22 +333,38 @@ def index_papers(dry_run: bool = False) -> dict:
                         matched_missing = ms
 
                 if matched_missing is not None:
-                    source.source_id = (prior.source_id if prior else new_source_id())
+                    # P0-I: In-place migration of the source identity!
+                    # Keep the exact same source_id from manifest
+                    source.source_id = matched_missing.source_id
                     source.role = matched_missing.role
                     source.is_primary = matched_missing.is_primary
                     source.active = True
                     source.is_candidate = False
                     source.binding_origin = BindingOrigin.MANIFEST
                     source.created_at = prior.created_at if prior else source.created_at
-                    source.source_version = _next_version(prior, source)
+                    source.source_version = _next_version(matched_missing, source)
                     source.paper_id = paper.paper_id
 
-                    # P0-G: Update manifest on disk FIRST before syncing SQLite!
+                    # P0-G: Intent-backed controlled write transaction!
+                    rename_intent = None
+                    if storage is not None:
+                        rename_intent = storage.begin_write_intent(
+                            paper.paper_id,
+                            "rename_source",
+                            {
+                                "old_path": matched_missing.rel_path,
+                                "new_path": source.rel_path,
+                                "source_id": matched_missing.source_id,
+                                "papers_root_rel": papers_root_rel,
+                                "folder_relpath": paper.folder_relpath,
+                            },
+                        )
+
+                    # Update manifest on disk FIRST before syncing SQLite!
                     manifest_ok = True
                     if service is not None:
                         try:
                             note_path = getattr(adopted, "note_path", None) if adopted else None
-                            # Construct canonical live sources set for manifest
                             canonical_manifest_sources = []
                             for ms_key, ms_val in manifest_sources.items():
                                 if ms_key == matched_missing.rel_path:
@@ -364,16 +382,34 @@ def index_papers(dry_run: bool = False) -> dict:
                             )
                         except Exception as exc:
                             manifest_ok = False
+                            if rename_intent:
+                                storage.fail_write_intent(rename_intent, str(exc))
                             result_errors.append(
                                 f"manifest rename update failed for {paper.folder_relpath}: {exc}"
                             )
 
                     # Only synchronize SQLite if manifest on disk was successfully updated!
                     if manifest_ok:
+                        old_retired_source = PaperSource(
+                            source_id=f"{matched_missing.source_id}_ret_{hashlib.sha256(matched_missing.rel_path.encode()).hexdigest()[:8]}",
+                            paper_id=paper.paper_id,
+                            role=matched_missing.role,
+                            rel_path=matched_missing.rel_path,
+                            rel_path_key_nfc=unicodedata.normalize("NFC", matched_missing.rel_path),
+                            is_primary=False,
+                            binding_origin=BindingOrigin.MANIFEST,
+                            active=False,
+                            missing_since=utc_now(),
+                        )
+                        storage.upsert_source(old_retired_source)
+
                         storage.upsert_source(source)
                         sources_written += 1
                         confirmed_live_paths.add(source.rel_path)
                         missing_manifest_sources.remove(matched_missing)
+
+                        if rename_intent:
+                            storage.commit_write_intent(rename_intent)
             elif prior is not None and adopted is None:
                 # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
@@ -405,7 +441,7 @@ def index_papers(dry_run: bool = False) -> dict:
         # Retire bindings the scan no longer sees.
         for rel_path, prior_source in existing_sources.items():
             if prior_source.active and rel_path not in confirmed_live_paths:
-                storage.deactivate_source(prior_source.source_id)
+                storage.deactivate_source_by_path(paper.paper_id, rel_path)
                 retired += 1
 
         # Re-point the paper at whichever source ends up primary this run.

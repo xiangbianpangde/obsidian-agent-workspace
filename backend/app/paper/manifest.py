@@ -377,6 +377,13 @@ def ensure_adopted(
                     f"concurrent adoption conflict on {paper.folder_relpath}: winning manifest has different sources or title"
                 )
 
+            # P0-K: Winner won the race! Adopt the winner's canonical source_ids
+            # so SQLite never persists a different source_id than what is recorded on disk!
+            winner_ids = {e["path"]: e["source_id"] for e in entries}
+            for s in sources:
+                if s.rel_path in winner_ids:
+                    s.source_id = winner_ids[s.rel_path]
+
         paper.manifest_relpath = MANIFEST_FILENAME
         return paper
 

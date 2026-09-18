@@ -741,4 +741,118 @@ def test_reviewer_3_resolve_race_conflicting_title_returns_409(env):
     assert "conflict" in res.text.lower()
 
 
+def test_p0_i_source_id_and_version_stability_across_rename(env):
+    """P0-I: rename recovery 原地迁移 source_id，保证旧 ID 稳定继承与版本递增."""
+    folder = env["papers"] / "方向P" / "IdentityStabilityPaper"
+    folder.mkdir(parents=True)
+    (folder / "old.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid_old = new_source_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid_old,
+                "role": "ORIGINAL_PDF",
+                "path": "old.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Initial index
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    src_before = storage.get_source(sid_old)
+    assert src_before.rel_path == "old.pdf"
+    version_before = src_before.source_version
+
+    # Rename old.pdf -> renamed.pdf
+    (folder / "old.pdf").rename(folder / "renamed.pdf")
+
+    # Re-index
+    indexer.index_papers(dry_run=False)
+
+    # 1. Verify renamed.pdf has the EXACT SAME source_id!
+    src_after = storage.get_source(sid_old)
+    assert src_after is not None, "source_id must not be lost or changed on rename!"
+    assert src_after.rel_path == "renamed.pdf"
+    assert src_after.active is True
+    assert src_after.source_version > version_before
+
+    # 2. Verify Manifest on disk records the exact same source_id!
+    mf = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    renamed_entry = next(s for s in mf["sources"] if s["path"] == "renamed.pdf")
+    assert renamed_entry["source_id"] == sid_old
+
+    # 3. Rebuild database from scratch: verify source_id remains exact sid_old
+    env["storage"].close()
+    env["db"].unlink()
+    indexer.index_papers(dry_run=False)
+    storage_rebuilt = PaperStorage(env["db"])
+    src_rebuilt = storage_rebuilt.get_source(sid_old)
+    assert src_rebuilt is not None
+    assert src_rebuilt.rel_path == "renamed.pdf"
+
+
+def test_p0_k_concurrent_identical_payload_adopts_winner_source_id(env):
+    """P0-K: 两个并发请求提交相同 sources 时，后者必须继承胜者的 canonical source_id."""
+    folder = env["papers"] / "方向Q" / "WinnerSourceIdPaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    sid_winner = new_source_id()
+    # Winner created manifest with sid_winner
+    winner_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid_winner,
+                "role": "TRANSLATION_FULL",
+                "path": "doc.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(winner_doc), encoding="utf-8")
+
+    # Loser calls ensure_adopted with same path, but different in-memory source_id
+    storage = PaperStorage(env["db"])
+    service = env["service"]
+    loser_paper = Paper(paper_id=pid, folder_relpath="方向Q/WinnerSourceIdPaper")
+    loser_sid = new_source_id()
+    loser_source = PaperSource(
+        source_id=loser_sid,  # Different local ID
+        paper_id=pid,
+        role=SourceRole.TRANSLATION_FULL,
+        rel_path="doc.md",
+        is_primary=True,
+    )
+
+    # ensure_adopted should adopt winner's source_id
+    adopted_paper = ensure_adopted(
+        storage,
+        service,
+        loser_paper,
+        [loser_source],
+        operation="manual_binding",
+        papers_root_rel="论文",
+    )
+    assert adopted_paper.manifest_relpath == MANIFEST_FILENAME
+    # loser_source must have been updated to winner's canonical source_id!
+    assert loser_source.source_id == sid_winner
+
+
+
 

@@ -148,6 +148,9 @@ def _recover_one(
     if operation == "resolve":
         return _recover_resolve(storage, service, intent_id, paper, payload)
 
+    if operation == "rename_source":
+        return _recover_rename_source(storage, service, intent_id, paper, payload)
+
     return RecoveryOutcome(
         intent_id=intent_id,
         paper_id=paper_id,
@@ -498,4 +501,98 @@ def _recover_resolve(
         resolved=True,
         action="completed",
         detail="manifest reconciled and SQLite rolled forward to ADOPTED",
+    )
+
+
+def _recover_rename_source(
+    storage: Any, service: Any, intent_id: str, paper: Paper, payload: Dict[str, Any]
+) -> RecoveryOutcome:
+    """Recover an interrupted source rename write transaction (P0-G).
+
+    If Manifest was published with the new path, roll forward SQLite.
+    If Manifest was not published, retire intent without modifying SQLite.
+    """
+    from . import MANIFEST_FILENAME
+    from .manifest import parse_manifest, read_manifest_file
+
+    base = _papers_root_rel(payload)
+    manifest_rel = str(Path(base, paper.folder_relpath, MANIFEST_FILENAME)) if base else str(
+        Path(paper.folder_relpath, MANIFEST_FILENAME)
+    )
+
+    doc = None
+    try:
+        doc = read_manifest_file(service, manifest_rel)
+    except Exception as exc:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="failed",
+            detail=f"cannot read manifest during rename recovery: {exc}",
+        )
+
+    if doc is None:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="no-evidence",
+            detail=f"no manifest found at {manifest_rel}; rename write never completed",
+        )
+
+    new_path = payload.get("new_path")
+    old_path = payload.get("old_path")
+    source_id = payload.get("source_id")
+
+    parsed = parse_manifest(doc)
+    has_new_path = any(s.get("path") == new_path for s in parsed.sources)
+
+    if not has_new_path:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="no-evidence",
+            detail=f"manifest does not contain new path {new_path}; rename never landed",
+        )
+
+    source_entry = next(s for s in parsed.sources if s.get("path") == new_path)
+    from .models import BindingOrigin, SourceRole
+    role = SourceRole(source_entry.get("role", "ORIGINAL_PDF"))
+    is_pri = bool(source_entry.get("primary", False))
+
+    paper_dir = Path(service.vault_root, base, paper.folder_relpath) if base else Path(service.vault_root, paper.folder_relpath)
+    target_file = paper_dir / new_path
+
+    new_source = PaperSource(
+        source_id=source_id or source_entry.get("source_id", ""),
+        paper_id=paper.paper_id,
+        role=role,
+        rel_path=new_path,
+        is_primary=is_pri,
+        binding_origin=BindingOrigin.MANIFEST,
+        active=True,
+    )
+    if target_file.is_file():
+        st = target_file.stat()
+        new_source.size_bytes = st.st_size
+        new_source.mtime_ns = st.st_mtime_ns
+        from .scanner import _sha256_file
+        new_source.sha256 = _sha256_file(target_file)
+
+    storage.upsert_source(new_source)
+    if old_path:
+        storage.deactivate_source_by_path(paper.paper_id, old_path)
+
+    return RecoveryOutcome(
+        intent_id=intent_id,
+        paper_id=paper.paper_id,
+        operation="rename_source",
+        resolved=True,
+        action="completed",
+        detail=f"rename rolled forward for {new_path}",
     )
