@@ -391,7 +391,7 @@ def index_papers(dry_run: bool = False) -> dict:
                     # Only synchronize SQLite if manifest on disk was successfully updated!
                     if manifest_ok:
                         old_retired_source = PaperSource(
-                            source_id=f"{matched_missing.source_id}_ret_{hashlib.sha256(matched_missing.rel_path.encode()).hexdigest()[:8]}",
+                            source_id=new_source_id(),
                             paper_id=paper.paper_id,
                             role=matched_missing.role,
                             rel_path=matched_missing.rel_path,

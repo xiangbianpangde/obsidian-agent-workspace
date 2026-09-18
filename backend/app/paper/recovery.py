@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import Paper, PaperNote, utc_now
+from .models import Paper, PaperNote, PaperSource, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -560,33 +560,67 @@ def _recover_rename_source(
             detail=f"manifest does not contain new path {new_path}; rename never landed",
         )
 
-    source_entry = next(s for s in parsed.sources if s.get("path") == new_path)
-    from .models import BindingOrigin, SourceRole
-    role = SourceRole(source_entry.get("role", "ORIGINAL_PDF"))
-    is_pri = bool(source_entry.get("primary", False))
+    try:
+        from .manifest import manifest_to_sources
+        from .models import BindingOrigin, BindingState, MediaKind, SourceRole
 
-    paper_dir = Path(service.vault_root, base, paper.folder_relpath) if base else Path(service.vault_root, paper.folder_relpath)
-    target_file = paper_dir / new_path
+        paper_dir = (
+            Path(service.vault_root, base, paper.folder_relpath)
+            if base
+            else Path(service.vault_root, paper.folder_relpath)
+        )
+        resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
+        missing_active = False
 
-    new_source = PaperSource(
-        source_id=source_id or source_entry.get("source_id", ""),
-        paper_id=paper.paper_id,
-        role=role,
-        rel_path=new_path,
-        is_primary=is_pri,
-        binding_origin=BindingOrigin.MANIFEST,
-        active=True,
-    )
-    if target_file.is_file():
-        st = target_file.stat()
-        new_source.size_bytes = st.st_size
-        new_source.mtime_ns = st.st_mtime_ns
-        from .scanner import _sha256_file
-        new_source.sha256 = _sha256_file(target_file)
+        for s in resolved_sources:
+            t = paper_dir / s.rel_path
+            if t.is_file():
+                st = t.stat()
+                s.size_bytes = st.st_size
+                s.mtime_ns = st.st_mtime_ns
+                from .scanner import _sha256_file
 
-    storage.upsert_source(new_source)
-    if old_path:
-        storage.deactivate_source_by_path(paper.paper_id, old_path)
+                s.sha256 = _sha256_file(t)
+            elif s.active:
+                missing_active = True
+
+        target_state = BindingState.DEGRADED if missing_active else BindingState.ADOPTED
+
+        storage.commit_resolved_adoption(
+            paper.paper_id,
+            resolved_sources,
+            title_override=doc.get("title_override"),
+            paper_tags=list(doc.get("tags") or []),
+            note_id=parsed.note_id,
+            external_ids=doc.get("external_ids") or {},
+            binding_state=target_state,
+        )
+
+        if old_path:
+            from .models import SourceRole, new_source_id
+
+            role = resolved_sources[0].role if resolved_sources else SourceRole.ORIGINAL_PDF
+            old_retired_source = PaperSource(
+                source_id=new_source_id(),
+                paper_id=paper.paper_id,
+                role=role,
+                rel_path=old_path,
+                is_primary=False,
+                binding_origin=BindingOrigin.MANIFEST,
+                active=False,
+                missing_since=utc_now(),
+            )
+            storage.upsert_source(old_retired_source)
+            storage.deactivate_source_by_path(paper.paper_id, old_path)
+    except Exception as exc:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="failed",
+            detail=f"commit_resolved_adoption failed during rename recovery: {exc}",
+        )
 
     return RecoveryOutcome(
         intent_id=intent_id,
@@ -594,5 +628,5 @@ def _recover_rename_source(
         operation="rename_source",
         resolved=True,
         action="completed",
-        detail=f"rename rolled forward for {new_path}",
+        detail=f"rename rolled forward for {new_path} with aggregate state updated to {target_state.value}",
     )

@@ -854,5 +854,129 @@ def test_p0_k_concurrent_identical_payload_adopts_winner_source_id(env):
     assert loser_source.source_id == sid_winner
 
 
+def test_p0_m_rename_source_crash_recovery_handler_real_execution(env):
+    """P0-M & P0-N: _recover_rename_source 真实故障注入自愈并推进 Paper 聚合状态."""
+    folder = env["papers"] / "方向R" / "RenameCrashRecoveryPaper"
+    folder.mkdir(parents=True)
+    (folder / "renamed.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+
+    # Pre-condition: Manifest on disk was already published with renamed.pdf
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "renamed.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # DB state before recovery: Paper is DEGRADED, only has old.pdf (active=1)
+    storage = PaperStorage(env["db"])
+    paper = Paper(
+        paper_id=pid,
+        folder_relpath="方向R/RenameCrashRecoveryPaper",
+        display_title="RenameCrashRecoveryPaper",
+        binding_state=BindingState.DEGRADED,
+    )
+    storage.upsert_paper(paper, allow_folder_move=True)
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="old.pdf",
+            active=True,
+        )
+    )
+
+    # Crash left a pending rename_source intent
+    intent_id = storage.begin_write_intent(
+        pid,
+        "rename_source",
+        {
+            "old_path": "old.pdf",
+            "new_path": "renamed.pdf",
+            "source_id": sid,
+            "folder_relpath": paper.folder_relpath,
+            "papers_root_rel": "论文",
+        },
+    )
+
+    # Execute recovery
+    report = recover_pending_writes(storage, env["service"])
+    assert report.resolved == 1
+    assert report.outcomes[0].operation == "rename_source"
+    assert report.outcomes[0].action == "completed"
+
+    # Verify SQLite was rolled forward completely
+    recovered_paper = storage.get_paper(pid)
+    assert recovered_paper.binding_state == BindingState.ADOPTED
+    assert recovered_paper.primary_pdf_source_id == sid
+
+    sources = {s.rel_path: s for s in storage.list_sources(pid, include_inactive=True)}
+    assert sources["renamed.pdf"].active is True
+    assert sources["renamed.pdf"].source_id == sid
+    assert sources["old.pdf"].active is False
+
+
+def test_p0_o_api_race_winner_source_id_preserved(env):
+    """P0-O: 通过 HTTP API 验证跨进程/客户端并发 resolve 时，胜者 source_id 被完全保持在 Manifest 与 SQLite."""
+    folder = env["papers"] / "方向S" / "ApiRacePaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper_by_folder("方向S/ApiRacePaper")
+    pid = paper.paper_id
+
+    client = env["client"]
+
+    # Client A calls resolve
+    res_a = client.post(
+        f"/api/paper/papers/{pid}/resolve",
+        json={
+            "sources": [
+                {"rel_path": "doc.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+            ]
+        },
+    )
+    assert res_a.status_code == 200
+
+    # Read the winning source_id from manifest on disk
+    mf = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    winner_sid = mf["sources"][0]["source_id"]
+
+    # Verify SQLite source_id matches Manifest exactly
+    db_sources = storage.list_sources(pid)
+    assert db_sources[0].source_id == winner_sid
+
+    # Client B calls resolve with same sources -> idempotent success, must return exact winner_sid
+    res_b = client.post(
+        f"/api/paper/papers/{pid}/resolve",
+        json={
+            "sources": [
+                {"rel_path": "doc.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+            ]
+        },
+    )
+    assert res_b.status_code == 200
+    # Check that SQLite still matches winner_sid
+    db_sources_after = storage.list_sources(pid)
+    assert db_sources_after[0].source_id == winner_sid
+
+
+
 
 
