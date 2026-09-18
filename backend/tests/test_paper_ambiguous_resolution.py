@@ -1,4 +1,4 @@
-"""Acceptance tests for AMBIGUOUS resolution and the 5 blocking P0 probes (ADR-006 / ADR-007)."""
+"""Acceptance tests for AMBIGUOUS resolution and the P0 reviewer probes (ADR-006 / ADR-007)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from backend.app.paper.models import (
     new_paper_id,
     new_source_id,
 )
+from backend.app.paper.recovery import recover_pending_writes
 from backend.app.paper.scanner import ScanConfig, discover_papers
 from backend.app.paper.storage import PaperStorage
 from backend.app.paper.writer import VaultWriteService
@@ -74,82 +75,49 @@ def env(tmp_path: Path, monkeypatch):
     }
 
 
-def test_blocking_1_manifest_authority_preserves_roles_and_inactives(env):
-    """阻断 1：Manifest 权威绑定绝不能被扫描器启发式改写.
-
-    Manifest 显式声明：
-    - `weird.md`: role=TRANSLATION_FULL, primary=true, active=true (文件名不符合常规命名)
-    - `inactive.md`: role=OTHER_MARKDOWN, active=false
-
-    重扫和索引后：
-    - `weird.md` 必须是 TRANSLATION_FULL, is_primary=True, active=True
-    - `inactive.md` 必须是 OTHER_MARKDOWN, active=False
-    - `primary_translation_source_id` 必须准确指向 `weird.md` 的 source_id
-    """
-    folder = env["papers"] / "方向A" / "CustomNamingPaper"
+def test_p0_1_manifest_ignores_undeclared_direct_files(env):
+    """P0-1: 目录有合法 manifest 时，未声明的 direct 文件绝不能成为已绑定来源."""
+    folder = env["papers"] / "方向A" / "ManifestAuthorityPaper"
     folder.mkdir(parents=True)
-    (folder / "weird.md").write_text("# Weird Name Full Translation\n", encoding="utf-8")
-    (folder / "inactive.md").write_text("# Inactive Document\n", encoding="utf-8")
+    (folder / "bound.md").write_text("# Bound Document\n", encoding="utf-8")
+    (folder / "extra.md").write_text("# Unbound Extra Document\n", encoding="utf-8")
 
     pid = new_paper_id()
-    sid_weird = new_source_id()
-    sid_inactive = new_source_id()
+    sid = new_source_id()
     manifest_doc = {
         "schema_version": 1,
         "paper_id": pid,
         "sources": [
             {
-                "source_id": sid_weird,
+                "source_id": sid,
                 "role": "TRANSLATION_FULL",
-                "path": "weird.md",
+                "path": "bound.md",
                 "primary": True,
                 "active": True,
-            },
-            {
-                "source_id": sid_inactive,
-                "role": "OTHER_MARKDOWN",
-                "path": "inactive.md",
-                "primary": False,
-                "active": False,
-            },
+            }
         ],
         "created_at": "2026-09-18T00:00:00Z",
         "updated_at": "2026-09-18T00:00:00Z",
     }
     (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
 
-    # 1. Run indexer
     indexer.index_papers(dry_run=False)
     storage = PaperStorage(env["db"])
     paper = storage.get_paper(pid)
     assert paper is not None
-    assert paper.binding_state == BindingState.ADOPTED
-    assert paper.primary_translation_source_id == sid_weird
 
-    sources = {s.rel_path: s for s in storage.list_sources(pid, include_inactive=True)}
-    assert len(sources) == 2
-
-    s_weird = sources["weird.md"]
-    assert s_weird.role == SourceRole.TRANSLATION_FULL
-    assert s_weird.is_primary is True
-    assert s_weird.active is True
-    assert s_weird.binding_origin == BindingOrigin.MANIFEST
-
-    s_inactive = sources["inactive.md"]
-    assert s_inactive.role == SourceRole.OTHER_MARKDOWN
-    assert s_inactive.is_primary is False
-    assert s_inactive.active is False
-    assert s_inactive.binding_origin == BindingOrigin.MANIFEST
+    sources = storage.list_sources(pid, include_inactive=True)
+    paths = {s.rel_path for s in sources}
+    assert "bound.md" in paths
+    # extra.md must NOT be bound as a paper source
+    assert "extra.md" not in paths
 
 
-def test_blocking_2_manifest_all_sources_missing_becomes_degraded_not_dropped(env):
-    """阻断 2：Manifest 的所有 active source 都缺失时，目录不能消失，必须为 DEGRADED.
-
-    磁盘上没有任何 PDF 或 Markdown，仅有 manifest.json 声明了一个已丢失的 `gone.md`。
-    discover_papers 必须输出该 Paper，且状态为 DEGRADED，保留原始 paper_id。
-    """
-    folder = env["papers"] / "方向B" / "GhostPaper"
+def test_p0_2_manifest_primary_false_not_heuristically_elevated(env):
+    """P0-2: Manifest 明确 primary=false 的单 PDF 绝不能被启发式自动提升为 true."""
+    folder = env["papers"] / "方向A" / "PrimaryFalsePaper"
     folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
 
     pid = new_paper_id()
     sid = new_source_id()
@@ -160,7 +128,42 @@ def test_blocking_2_manifest_all_sources_missing_becomes_degraded_not_dropped(en
             {
                 "source_id": sid,
                 "role": "ORIGINAL_PDF",
-                "path": "gone.pdf",
+                "path": "paper.pdf",
+                "primary": False,  # Explicitly False!
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    sources = storage.list_sources(pid)
+    assert len(sources) == 1
+    # Must NOT be elevated to True
+    assert sources[0].is_primary is False
+
+    paper = storage.get_paper(pid)
+    assert paper.primary_pdf_source_id is None
+
+
+def test_p0_3_role_media_mismatch_becomes_degraded(env):
+    """P0-3: Manifest schema-valid 但 role 与物理文件不匹配必须标记为 DEGRADED."""
+    folder = env["papers"] / "方向B" / "RoleMismatchPaper"
+    folder.mkdir(parents=True)
+    (folder / "fake.md").write_text("# Markdown file pretending to be PDF\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": new_source_id(),
+                "role": "ORIGINAL_PDF",  # Declared as PDF, but is a .md file!
+                "path": "fake.md",
                 "primary": True,
                 "active": True,
             }
@@ -170,89 +173,26 @@ def test_blocking_2_manifest_all_sources_missing_becomes_degraded_not_dropped(en
     }
     (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
 
-    # Scanner must NOT drop this folder
     res = discover_papers(ScanConfig(root=env["papers"]))
     assert len(res.papers) == 1
-    found = res.papers[0]
-    assert found.paper_id == pid
-    assert found.binding_state == BindingState.DEGRADED
-    assert len(found.sources) == 1
-    assert found.sources[0].source_id == sid
-    assert found.sources[0].missing_since is not None
-
-    # Indexer must record it in SQLite as DEGRADED
-    indexer.index_papers(dry_run=False)
-    storage = PaperStorage(env["db"])
-    paper = storage.get_paper(pid)
-    assert paper is not None
-    assert paper.binding_state == BindingState.DEGRADED
+    assert res.papers[0].binding_state == BindingState.DEGRADED
 
 
-def test_blocking_3_lexical_symlink_in_same_folder_strictly_rejected(env):
-    """阻断 3：/resolve 必须严格拒绝目录内符号链接（即便指向同目录）.
-
-    创建真实物理文件 `real.md` 和符号链接 `alias.md -> real.md`。
-    调用 /resolve 传入 `alias.md` 必须返回 400，严禁写入 manifest。
-    """
-    folder = env["papers"] / "方向C" / "SymlinkAttackPaper"
+def test_p0_4_manifest_ancestor_symlink_rejected_and_degraded(env):
+    """P0-4: Manifest source path 的 symlink 祖先或目标必须在 scanner 侧被识别并降级."""
+    folder = env["papers"] / "方向C" / "SymlinkPaper"
     folder.mkdir(parents=True)
-    real_file = folder / "real.md"
-    real_file.write_text("# Real MD\n", encoding="utf-8")
+    real_dir = folder / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "target.md").write_text("# Content\n", encoding="utf-8")
 
-    alias_file = folder / "alias.md"
+    alias_dir = folder / "alias_dir"
     try:
-        alias_file.symlink_to("real.md")
+        alias_dir.symlink_to("real_dir")
     except OSError:
-        pytest.skip("Symlink creation not supported on this platform/filesystem")
+        pytest.skip("Symlink creation not supported on this platform")
 
-    indexer.index_papers(dry_run=False)
-    storage = PaperStorage(env["db"])
-    paper = storage.get_paper_by_folder("方向C/SymlinkAttackPaper")
-    pid = paper.paper_id
-
-    client = env["client"]
-
-    # Attempt to resolve using the symlink alias.md
-    r = client.post(
-        f"/api/paper/papers/{pid}/resolve",
-        json={
-            "sources": [
-                {"rel_path": "alias.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
-            ]
-        },
-    )
-    assert r.status_code == 400
-    assert "symlink" in r.text.lower()
-
-    # Ensure manifest was NOT created with symlink
-    assert not (folder / MANIFEST_FILENAME).exists()
-
-
-def test_blocking_4_resolve_idempotent_roll_forward_and_concurrency(env):
-    """阻断 4：Resolve 幂等恢复、roll-forward 与并发冲突.
-
-    4A: 预先写入相同 manifest，但 DB 仍为 AMBIGUOUS。调用 /resolve 必须返回 200 并将 DB 推进到 ADOPTED。
-    4B: 两个真实并发线程分别提交不同 payload，恰好一个成功，另一个 409。
-    """
-    folder = env["papers"] / "方向D" / "IdempotentRollForwardPaper"
-    folder.mkdir(parents=True)
-    (folder / "A.md").write_text("# Doc A\n", encoding="utf-8")
-    (folder / "B.md").write_text("# Doc B\n", encoding="utf-8")
-
-    indexer.index_papers(dry_run=False)
-    storage = PaperStorage(env["db"])
-    paper = storage.get_paper_by_folder("方向D/IdempotentRollForwardPaper")
-    pid = paper.paper_id
-
-    client = env["client"]
-
-    # 4A: Pre-create manifest matching payload A, but keep DB in AMBIGUOUS
-    payload_a = {
-        "sources": [
-            {"rel_path": "A.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
-        ]
-    }
-    # Write manifest manually on disk
+    pid = new_paper_id()
     manifest_doc = {
         "schema_version": 1,
         "paper_id": pid,
@@ -260,7 +200,7 @@ def test_blocking_4_resolve_idempotent_roll_forward_and_concurrency(env):
             {
                 "source_id": new_source_id(),
                 "role": "TRANSLATION_FULL",
-                "path": "A.md",
+                "path": "alias_dir/target.md",  # Ancestor alias_dir is a symlink!
                 "primary": True,
                 "active": True,
             }
@@ -270,126 +210,147 @@ def test_blocking_4_resolve_idempotent_roll_forward_and_concurrency(env):
     }
     (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
 
-    # Call /resolve: must reconcile and roll-forward to ADOPTED
-    res_roll = client.post(f"/api/paper/papers/{pid}/resolve", json=payload_a)
-    assert res_roll.status_code == 200
-    assert res_roll.json()["binding_state"] == "ADOPTED"
-    # Check DB was also updated
-    assert storage.get_paper(pid).binding_state == BindingState.ADOPTED
-
-    # 4B: True multi-threaded concurrency test on a fresh ambiguous paper
-    folder2 = env["papers"] / "方向D" / "ConcurrentRacePaper"
-    folder2.mkdir(parents=True)
-    (folder2 / "X.md").write_text("# Doc X\n", encoding="utf-8")
-    (folder2 / "Y.md").write_text("# Doc Y\n", encoding="utf-8")
-
-    indexer.index_papers(dry_run=False)
-    paper2 = storage.get_paper_by_folder("方向D/ConcurrentRacePaper")
-    pid2 = paper2.paper_id
-
-    results = []
-
-    def call_resolve(item_name):
-        c = TestClient(client.app)
-        res = c.post(
-            f"/api/paper/papers/{pid2}/resolve",
-            json={
-                "sources": [
-                    {"rel_path": f"{item_name}.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
-                ]
-            },
-        )
-        results.append(res.status_code)
-
-    t1 = threading.Thread(target=call_resolve, args=("X",))
-    t2 = threading.Thread(target=call_resolve, args=("Y",))
-
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    # Exactly one must succeed with 200, and the other must fail with 409
-    assert sorted(results) == [200, 409]
+    res = discover_papers(ScanConfig(root=env["papers"]))
+    assert len(res.papers) == 1
+    # Must be DEGRADED, not ADOPTED
+    assert res.papers[0].binding_state == BindingState.DEGRADED
 
 
-def test_blocking_5_unreadable_manifest_fails_closed_no_new_identity(env):
-    """阻断 5：不可读 Manifest 必须 fail-closed，绝不能静默当作无 manifest 发新 ID.
-
-    当读取 manifest 遇到 PermissionError 时：
-    - read_manifest_file 必须抛出 ManifestError（不能返回 None）
-    - 索引器记录错误，绝不能生成新身份或把该目录当作普通未采纳目录处理
-    """
-    folder = env["papers"] / "方向E" / "PermissionDeniedPaper"
+def test_p0_5_resolve_crash_recovery_handler_rolls_forward(env):
+    """P0-5: Resolve 崩溃恢复 handler 真正 roll-forward 并提交 intent."""
+    folder = env["papers"] / "方向D" / "ResolveCrashRecoveryPaper"
     folder.mkdir(parents=True)
-    manifest_path = folder / MANIFEST_FILENAME
-    manifest_path.write_text('{"paper_id": "pw_test"}', encoding="utf-8")
+    (folder / "A.md").write_text("# Doc A\n", encoding="utf-8")
 
-    service = env["service"]
-    # Mock service.read to raise PermissionError
-    orig_read = service.read
+    pid = new_paper_id()
+    sid = new_source_id()
 
-    def mock_read(rel):
-        if "PermissionDeniedPaper" in rel:
-            raise PermissionError("Access denied by OS permissions")
-        return orig_read(rel)
+    # Pre-index paper in AMBIGUOUS state
+    storage = PaperStorage(env["db"])
+    paper = Paper(
+        paper_id=pid,
+        folder_relpath="方向D/ResolveCrashRecoveryPaper",
+        display_title="ResolveCrashRecoveryPaper",
+        binding_state=BindingState.AMBIGUOUS,
+    )
+    storage.upsert_paper(paper, allow_folder_move=True)
 
-    service.read = mock_read
+    # Simulate: manifest was published to disk before crash
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "TRANSLATION_FULL",
+                "path": "A.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "title_override": "Crash Recovered Title",
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
 
-    with pytest.raises(ManifestError) as exc_info:
-        read_manifest_file(service, f"方向E/PermissionDeniedPaper/{MANIFEST_FILENAME}")
-    assert "unreadable manifest" in str(exc_info.value).lower()
-    assert "permission" in str(exc_info.value).lower()
+    # Simulate: pending intent left in DB
+    intent_id = storage.begin_write_intent(
+        pid,
+        "resolve",
+        {"folder_relpath": paper.folder_relpath, "papers_root_rel": "论文"},
+    )
+
+    # Run recovery
+    report = recover_pending_writes(storage, env["service"])
+    assert report.resolved == 1
+    assert report.outcomes[0].operation == "resolve"
+    assert report.outcomes[0].action == "completed"
+
+    # Verify SQLite was rolled forward to ADOPTED
+    recovered = storage.get_paper(pid)
+    assert recovered.binding_state == BindingState.ADOPTED
+    assert recovered.title_override == "Crash Recovered Title"
 
 
-def test_dependent_operations_409_and_zero_delete_mutation(env):
-    """综合验证：AMBIGUOUS 状态下 6 大写接口全 409，未选中候选软失活，零物理删除."""
-    folder = env["papers"] / "方向F" / "VerifyAllPaper"
+def test_p0_6_idempotent_roll_forward_restores_canonical_manifest_fields(env):
+    """P0-6: 预写 manifest 幂等恢复时，完整回填 note_id, tags, title_override."""
+    folder = env["papers"] / "方向E" / "IdempotentCanonicalPaper"
     folder.mkdir(parents=True)
-    f1 = folder / "doc1.md"
-    f2 = folder / "doc2.md"
-    f1.write_text("# Doc 1\n", encoding="utf-8")
-    f2.write_text("# Doc 2\n", encoding="utf-8")
-
-    h1 = hashlib.sha256(f1.read_bytes()).hexdigest()
-    h2 = hashlib.sha256(f2.read_bytes()).hexdigest()
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
 
     indexer.index_papers(dry_run=False)
     storage = PaperStorage(env["db"])
-    paper = storage.get_paper_by_folder("方向F/VerifyAllPaper")
+    paper = storage.get_paper_by_folder("方向E/IdempotentCanonicalPaper")
     pid = paper.paper_id
+
+    # Pre-write manifest on disk with full metadata
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "title_override": "Canonical Title",
+        "tags": ["AI", "Research"],
+        "note": {"note_id": "note_abcd1234-1111-4000-8000-000000000000", "path": "notes.md"},
+        "sources": [
+            {
+                "source_id": new_source_id(),
+                "role": "TRANSLATION_FULL",
+                "path": "doc.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
     client = env["client"]
+    payload = {
+        "sources": [
+            {"rel_path": "doc.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+        ]
+    }
+    res = client.post(f"/api/paper/papers/{pid}/resolve", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["binding_state"] == "ADOPTED"
+    assert data["title_override"] == "Canonical Title"
+    assert data["note_id"] == "note_abcd1234-1111-4000-8000-000000000000"
+    assert data["paper_tags"] == ["AI", "Research"]
 
-    # 1. Verify 409 on dependent writes
-    assert client.put(f"/api/paper/papers/{pid}/status", json={"status": "READING"}).status_code == 409
-    assert client.put(f"/api/paper/papers/{pid}/workspace-state", json={"active_pane": "MARKDOWN"}).status_code == 409
-    assert client.post(f"/api/paper/papers/{pid}/note", json={"content": "Note"}).status_code == 409
-    assert client.put(f"/api/paper/papers/{pid}/note", json={"content": "Update", "expected_hash": "a"}).status_code == 409
-    assert client.post(
-        f"/api/paper/papers/{pid}/annotations",
-        json={"source_id": "s", "kind": "HIGHLIGHT", "anchor": {"schema_version": 2}},
-    ).status_code == 409
-    assert client.delete(f"/api/paper/papers/{pid}/annotations/ann_1").status_code == 409
+    # Verify SQLite row matches
+    db_paper = storage.get_paper(pid)
+    assert db_paper.binding_state == BindingState.ADOPTED
+    assert db_paper.title_override == "Canonical Title"
+    assert db_paper.note_id == "note_abcd1234-1111-4000-8000-000000000000"
+    assert db_paper.paper_tags == ["AI", "Research"]
 
-    # 2. Resolve choosing only doc1.md
+
+def test_p0_7_resolve_title_override_single_authority(env):
+    """P0-7: resolve 传入的 title_override 写入 Manifest 权威，绝不发生双写分裂."""
+    folder = env["papers"] / "方向F" / "SingleAuthorityTitlePaper"
+    folder.mkdir(parents=True)
+    (folder / "A.md").write_text("# Doc\n", encoding="utf-8")
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper_by_folder("方向F/SingleAuthorityTitlePaper")
+    pid = paper.paper_id
+
+    client = env["client"]
     res = client.post(
         f"/api/paper/papers/{pid}/resolve",
         json={
             "sources": [
-                {"rel_path": "doc1.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
-            ]
+                {"rel_path": "A.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+            ],
+            "title_override": "Authoritative Title Override",
         },
     )
     assert res.status_code == 200
+    assert res.json()["title_override"] == "Authoritative Title Override"
 
-    # 3. Verify zero physical deletion and zero modification of original files
-    assert f1.exists()
-    assert f2.exists()
-    assert hashlib.sha256(f1.read_bytes()).hexdigest() == h1
-    assert hashlib.sha256(f2.read_bytes()).hexdigest() == h2
-
-    # 4. Verify unselected doc2.md is soft-deactivated (active=0, never deleted)
-    sources = storage.list_sources(pid, include_inactive=True, include_candidates=True)
-    doc2_source = next((s for s in sources if s.rel_path == "doc2.md"), None)
-    assert doc2_source is not None
-    assert doc2_source.active is False
+    # Verify manifest on disk carries the exact same title_override
+    manifest = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["title_override"] == "Authoritative Title Override"

@@ -145,6 +145,9 @@ def _recover_one(
     if operation == "create_annotation_store":
         return _recover_annotation_store(storage, service, intent_id, paper, payload)
 
+    if operation == "resolve":
+        return _recover_resolve(storage, service, intent_id, paper, payload)
+
     return RecoveryOutcome(
         intent_id=intent_id,
         paper_id=paper_id,
@@ -420,4 +423,79 @@ def _recover_annotation_store(
         resolved=True,
         action="already-consistent",
         detail=detail,
+    )
+
+
+def _recover_resolve(
+    storage: Any, service: Any, intent_id: str, paper: Paper, payload: Dict[str, Any]
+) -> RecoveryOutcome:
+    """Recover an interrupted resolve operation (P0-5).
+
+    If manifest was published to disk, reconcile canonical sources, note, tags
+    and advance SQLite from AMBIGUOUS to ADOPTED in one transaction.
+    """
+    from . import MANIFEST_FILENAME
+    from .manifest import manifest_to_sources, parse_manifest, read_manifest_file
+
+    base = _papers_root_rel(payload)
+    manifest_rel = str(Path(base, paper.folder_relpath, MANIFEST_FILENAME)) if base else str(
+        Path(paper.folder_relpath, MANIFEST_FILENAME)
+    )
+
+    doc = None
+    try:
+        doc = read_manifest_file(service, manifest_rel)
+    except Exception as exc:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="resolve",
+            resolved=False,
+            action="failed",
+            detail=f"cannot read manifest during recovery: {exc}",
+        )
+
+    if doc is None:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="resolve",
+            resolved=False,
+            action="no-evidence",
+            detail=f"no manifest found at {manifest_rel}; write never completed",
+        )
+
+    try:
+        parsed = parse_manifest(doc)
+        resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
+        title_override = doc.get("title_override")
+        paper_tags = list(doc.get("tags") or [])
+        note_id = parsed.note_id
+        ext_ids = doc.get("external_ids") or {}
+
+        storage.commit_resolved_adoption(
+            paper.paper_id,
+            resolved_sources,
+            title_override=title_override,
+            paper_tags=paper_tags,
+            note_id=note_id,
+            external_ids=ext_ids,
+        )
+    except Exception as exc:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="resolve",
+            resolved=False,
+            action="failed",
+            detail=f"commit_resolved_adoption failed: {exc}",
+        )
+
+    return RecoveryOutcome(
+        intent_id=intent_id,
+        paper_id=paper.paper_id,
+        operation="resolve",
+        resolved=True,
+        action="completed",
+        detail="manifest reconciled and SQLite rolled forward to ADOPTED",
     )

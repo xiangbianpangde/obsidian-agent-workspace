@@ -523,12 +523,18 @@ class PaperStorage:
         paper_id: str,
         sources: List[PaperSource],
         title_override: Optional[str] = None,
+        paper_tags: Optional[List[str]] = None,
+        note_id: Optional[str] = None,
+        external_ids: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically persist resolved sources and advance paper to ADOPTED in one transaction."""
         from . import MANIFEST_FILENAME
         from .models import MediaKind
 
         stamp = utc_now()
+        tags_json = json.dumps(paper_tags, ensure_ascii=False) if paper_tags is not None else None
+        ext_json = json.dumps(external_ids, ensure_ascii=False) if external_ids is not None else None
+
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN IMMEDIATE;")
@@ -599,14 +605,21 @@ class PaperStorage:
                 cur.execute(
                     "UPDATE papers SET binding_state = ?, ambiguity_reason = NULL, "
                     "manifest_relpath = ?, primary_pdf_source_id = ?, primary_translation_source_id = ?, "
-                    "title_override = COALESCE(?, title_override), updated_at = ? "
-                    "WHERE paper_id = ?",
+                    "title_override = COALESCE(?, title_override), "
+                    "paper_tags_json = COALESCE(?, paper_tags_json), "
+                    "note_id = COALESCE(?, note_id), "
+                    "external_ids_json = COALESCE(?, external_ids_json), "
+                    "updated_at = ? "
+                    "WHERE paper_id = ? AND (binding_state = 'AMBIGUOUS' OR manifest_relpath IS NOT NULL)",
                     (
                         BindingState.ADOPTED.value,
                         MANIFEST_FILENAME,
                         pdf_id,
                         tr_id,
                         title_override,
+                        tags_json,
+                        note_id,
+                        ext_json,
                         stamp,
                         paper_id,
                     ),

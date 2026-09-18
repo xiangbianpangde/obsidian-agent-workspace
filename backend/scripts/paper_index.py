@@ -33,6 +33,7 @@ from backend.app.paper.models import (
     PaperNote,
     PaperStatus,
     new_paper_id,
+    new_source_id,
     utc_now,
 )
 from backend.app.paper.scanner import ScanConfig, discover_papers
@@ -231,6 +232,7 @@ def index_papers(dry_run: bool = False) -> dict:
         existing_sources = {
             s.rel_path: s for s in storage.list_sources(paper.paper_id, include_inactive=True)
         }
+        paper_dir = root / paper.folder_relpath
         # Source ids recorded in the manifest are authoritative for the same
         # reason the paper id is.
         manifest_sources = (
@@ -244,6 +246,11 @@ def index_papers(dry_run: bool = False) -> dict:
             if adopted
             else {}
         )
+        missing_manifest_sources = [
+            m
+            for m in manifest_sources.values()
+            if not (paper_dir / m.rel_path).is_file()
+        ]
         # Files the workbench itself created must not be bound as paper sources.
         # `notes.md` carries the paper's own reading notes; presenting it as an
         # "other markdown" source lets a user open their notes in the translation
@@ -286,16 +293,48 @@ def index_papers(dry_run: bool = False) -> dict:
                 source.source_version = _next_version(prior, source)
                 if prior and _unchanged(prior, source):
                     source.sha256 = prior.sha256
-            elif prior is not None:
+                source.paper_id = paper.paper_id
+                storage.upsert_source(source)
+                sources_written += 1
+            elif missing_manifest_sources:
+                # Rename recovery: check if a missing manifest source was renamed to this file
+                matched_missing = None
+                for ms in missing_manifest_sources:
+                    if source.sha256 and ms.sha256 and source.sha256 == ms.sha256:
+                        matched_missing = ms
+                        break
+                    p_ms = existing_sources.get(ms.rel_path)
+                    if p_ms and p_ms.sha256 and source.sha256 and p_ms.sha256 == source.sha256:
+                        matched_missing = ms
+                        break
+                if not matched_missing and len(missing_manifest_sources) == 1:
+                    ms = missing_manifest_sources[0]
+                    if ms.media_kind == source.media_kind:
+                        matched_missing = ms
+
+                if matched_missing is not None:
+                    source.source_id = new_source_id()
+                    source.role = matched_missing.role
+                    source.is_primary = matched_missing.is_primary
+                    source.active = True
+                    source.is_candidate = False
+                    source.binding_origin = BindingOrigin.MANIFEST
+                    source.created_at = prior.created_at if prior else source.created_at
+                    source.source_version = 1
+                    source.paper_id = paper.paper_id
+                    storage.upsert_source(source)
+                    sources_written += 1
+                    missing_manifest_sources.remove(matched_missing)
+            elif prior is not None and adopted is None:
                 # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
                 source.created_at = prior.created_at
                 source.source_version = _next_version(prior, source)
                 if _unchanged(prior, source):
                     source.sha256 = prior.sha256
-            source.paper_id = paper.paper_id
-            storage.upsert_source(source)
-            sources_written += 1
+                source.paper_id = paper.paper_id
+                storage.upsert_source(source)
+                sources_written += 1
 
         # Also persist any source declared in the manifest that was not seen
         # on disk (e.g. inactive entries or temporarily missing files).

@@ -303,6 +303,7 @@ def _paper_payload(paper: Paper, source_count: int = 0) -> Dict[str, Any]:
         "paper_id": paper.paper_id,
         "title": paper.title,
         "display_title": paper.display_title,
+        "title_override": paper.title_override,
         "folder_relpath": paper.folder_relpath,
         "category_relpath": paper.category_relpath,
         "binding_state": paper.binding_state.value,
@@ -537,7 +538,7 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                     for s in existing_doc.get("sources", [])
                 }
                 if req_sources_map == ex_sources_map:
-                    # Idempotent match! Reconcile and roll-forward into ADOPTED in SQLite.
+                    # P0-6: Idempotent match! Reconcile and roll-forward into ADOPTED in SQLite.
                     resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
                     for s in resolved_sources:
                         t = paper_folder / s.rel_path
@@ -547,7 +548,19 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                             s.mtime_ns = st_f.st_mtime_ns
                             s.sha256 = _sha256_file(t)
 
-                    storage.commit_resolved_adoption(paper.paper_id, resolved_sources, body.title_override)
+                    canon_title = existing_doc.get("title_override")
+                    canon_tags = list(existing_doc.get("tags") or [])
+                    canon_note_id = parsed.note_id
+                    canon_ext_ids = existing_doc.get("external_ids") or {}
+
+                    storage.commit_resolved_adoption(
+                        paper.paper_id,
+                        resolved_sources,
+                        title_override=canon_title,
+                        paper_tags=canon_tags,
+                        note_id=canon_note_id,
+                        external_ids=canon_ext_ids,
+                    )
                     updated_paper = storage.get_paper(paper_id)
                     return _no_store(
                         _paper_payload(updated_paper, source_count=len([s for s in resolved_sources if s.active]))
@@ -704,6 +717,10 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
             )
             resolved_sources.append(source)
 
+        # P0-7: Set title_override on paper BEFORE ensure_adopted creates manifest
+        if body.title_override is not None:
+            paper.title_override = body.title_override
+
         # 4. Atomic manifest adoption (ADR-006 / ADR-007)
         base = _papers_root_ptr()
         intent = storage.begin_write_intent(
@@ -730,7 +747,14 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
 
         # 5. Atomically commit to SQLite in a single transaction (no DELETE)
         try:
-            storage.commit_resolved_adoption(paper.paper_id, resolved_sources, body.title_override)
+            storage.commit_resolved_adoption(
+                paper.paper_id,
+                resolved_sources,
+                title_override=body.title_override,
+                paper_tags=paper.paper_tags,
+                note_id=paper.note_id,
+                external_ids=paper.external_ids,
+            )
             storage.commit_write_intent(intent)
         except Exception as exc:
             storage.fail_write_intent(intent, str(exc))

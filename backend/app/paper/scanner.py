@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat as stat_mod
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -349,8 +351,9 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                 result.errors.append(f"corrupt manifest in {folder_relpath}: {exc}")
                 continue
 
-            manifest_sources_map: Dict[str, PaperSource] = {}
+            manifest_sources: List[PaperSource] = []
             missing_active = False
+            semantic_invalid = False
             primary_pdf = None
             primary_tr = None
 
@@ -360,6 +363,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                     role = SourceRole(s_entry["role"])
                 except ValueError:
                     role = SourceRole.OTHER_MARKDOWN
+                    semantic_invalid = True
                 is_pri = bool(s_entry.get("primary", False))
                 act = bool(s_entry.get("active", True))
 
@@ -374,45 +378,87 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                     binding_confidence=1.0,
                     active=act,
                 )
-                target_file = current / rel_path
-                if target_file.is_file() and not target_file.is_symlink():
+
+                # Check lexical path for symlinks (P0-4: symlink ancestor check)
+                lexical = current
+                has_symlink = False
+                for part in Path(rel_path).parts:
+                    lexical = lexical / part
                     try:
-                        stat = target_file.stat()
-                        source.size_bytes = stat.st_size
-                        source.mtime_ns = stat.st_mtime_ns
+                        st_lex = os.lstat(lexical)
+                        if stat_mod.S_ISLNK(st_lex.st_mode):
+                            has_symlink = True
+                            break
+                    except FileNotFoundError:
+                        break
+
+                target_file = lexical
+                file_exists = target_file.is_file() and not has_symlink and not os.path.islink(target_file)
+
+                if has_symlink:
+                    result.errors.append(f"manifest source {rel_path} contains symlink in {folder_relpath}")
+                    semantic_invalid = True
+
+                if file_exists:
+                    try:
+                        st = target_file.stat()
+                        source.size_bytes = st.st_size
+                        source.mtime_ns = st.st_mtime_ns
                         source.sha256 = _sha256_file(target_file)
                     except OSError:
                         pass
+
+                    # P0-3: Semantic role and media validation on physical file
+                    if act:
+                        if role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF):
+                            if not rel_path.lower().endswith(_PDF_SUFFIX) or not _looks_like_pdf(target_file):
+                                semantic_invalid = True
+                        else:
+                            if not rel_path.lower().endswith(_MD_SUFFIX):
+                                semantic_invalid = True
+                            else:
+                                try:
+                                    with target_file.open("rb") as f:
+                                        f.read(4096).decode("utf-8")
+                                except UnicodeDecodeError:
+                                    semantic_invalid = True
                 else:
                     if act:
                         missing_active = True
                         source.missing_since = utc_now()
                         source.active = False
 
-                if is_pri and role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF) and act:
+                if is_pri and role in (SourceRole.ORIGINAL_PDF, SourceRole.SUPPLEMENTAL_PDF) and source.active:
                     primary_pdf = source
-                if is_pri and role.is_translation and act:
+                if is_pri and role.is_translation and source.active:
                     primary_tr = source
 
-                manifest_sources_map[rel_path] = source
+                manifest_sources.append(source)
 
-            # Also discover direct files on disk not declared in manifest (e.g. renamed or added files)
+            # Direct files on disk not declared in manifest: potential rename candidates (ADR-006)
+            manifest_paths = {s.rel_path for s in manifest_sources}
             direct_files = [e for e in entries if e.is_file() and not e.is_symlink()]
             for f in direct_files:
-                if f.name == MANIFEST_FILENAME or f.name in manifest_sources_map:
+                if f.name == MANIFEST_FILENAME or f.name in manifest_paths:
                     continue
                 if _LAYOUT_RE.search(f.name):
                     continue
-                if f.name.lower().endswith(_PDF_SUFFIX):
+                f_role = (
+                    SourceRole.SUPPLEMENTAL_PDF
+                    if f.name.lower().endswith(_PDF_SUFFIX)
+                    else classify_markdown_role(f.name)
+                )
+                if f_role is not None:
                     source = PaperSource(
                         source_id=new_source_id(),
                         paper_id=parsed_manifest.paper_id,
-                        role=SourceRole.SUPPLEMENTAL_PDF,
+                        role=f_role,
                         rel_path=f.name,
                         rel_path_key_nfc=_nfc_key(f.name),
                         is_primary=False,
                         binding_origin=BindingOrigin.DISCOVERY,
-                        mime_type="application/pdf",
+                        is_candidate=True,
+                        active=False,
                     )
                     try:
                         st = f.stat()
@@ -421,53 +467,24 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                         source.sha256 = _sha256_file(f)
                     except OSError:
                         pass
-                    manifest_sources_map[f.name] = source
-                elif f.name.lower().endswith(_MD_SUFFIX):
-                    m_role = classify_markdown_role(f.name)
-                    if m_role is not None:
-                        source = PaperSource(
-                            source_id=new_source_id(),
-                            paper_id=parsed_manifest.paper_id,
-                            role=m_role,
-                            rel_path=f.name,
-                            rel_path_key_nfc=_nfc_key(f.name),
-                            is_primary=False,
-                            binding_origin=BindingOrigin.DISCOVERY,
-                            mime_type="text/markdown",
-                        )
-                        try:
-                            st = f.stat()
-                            source.size_bytes = st.st_size
-                            source.mtime_ns = st.st_mtime_ns
-                            source.sha256 = _sha256_file(f)
-                        except OSError:
-                            pass
-                        manifest_sources_map[f.name] = source
+                    manifest_sources.append(source)
 
-            all_sources = list(manifest_sources_map.values())
-            has_active = any(s.active for s in all_sources)
-            primary_pdf = next(
-                (s for s in all_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active),
-                None,
-            )
-            if primary_pdf is None:
-                active_pdfs = [s for s in all_sources if s.media_kind is MediaKind.PDF and s.active]
-                if len(active_pdfs) == 1:
-                    active_pdfs[0].is_primary = True
-                    primary_pdf = active_pdfs[0]
-
-            primary_tr = next(
-                (s for s in all_sources if s.is_primary and s.role.is_translation and s.active),
-                None,
-            )
-
+            # Semantic validity check:
+            # - P0-1: Bound sources ONLY come from manifest. No undeclared files added!
+            # - P0-2: No heuristic primary elevation. primary is strictly what manifest declared.
+            has_active = any(s.active for s in manifest_sources)
             primary_pdf_count = len(
-                [s for s in all_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
+                [s for s in manifest_sources if s.is_primary and s.media_kind is MediaKind.PDF and s.active]
             )
             primary_tr_count = len(
-                [s for s in all_sources if s.is_primary and s.role.is_translation and s.active]
+                [s for s in manifest_sources if s.is_primary and s.role.is_translation and s.active]
             )
-            semantic_valid = has_active and primary_pdf_count <= 1 and primary_tr_count <= 1
+            semantic_valid = (
+                has_active
+                and not semantic_invalid
+                and primary_pdf_count <= 1
+                and primary_tr_count <= 1
+            )
 
             if not semantic_valid or missing_active:
                 binding_state = BindingState.DEGRADED
@@ -486,7 +503,7 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                 paper_tags=list(manifest_doc.get("tags") or []),
                 primary_pdf_source_id=primary_pdf.source_id if primary_pdf else None,
                 primary_translation_source_id=primary_tr.source_id if primary_tr else None,
-                sources=all_sources,
+                sources=manifest_sources,
             )
             result.papers.append(paper)
             continue
