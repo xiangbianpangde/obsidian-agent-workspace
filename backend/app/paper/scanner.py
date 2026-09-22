@@ -25,6 +25,7 @@ binding, because a wrong binding silently attaches the wrong file to a paper.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -313,10 +314,11 @@ def is_valid_utf8_text(path: Path, sniff_bytes: int = 4096) -> bool:
     entirely well-formed. (Measured on the real vault: a translation was flagged
     invalid and its paper silently downgraded to DEGRADED.)
 
-    So only the *complete* characters inside the sniff window are validated: a
-    trailing partial sequence is expected at the boundary and is not an error.
-    A file that is genuinely not UTF-8 still fails, because the invalid sequence
-    then appears somewhere before the cut.
+    An incremental decoder expresses exactly the needed semantics: invalid bytes
+    are rejected, while a sequence left incomplete *by the cut* is accepted because
+    the rest of it may simply be outside the window. That distinction is why a
+    blind trailing-byte trim is wrong - it also swallows genuinely invalid bytes,
+    so ``b"abc\\xff"`` was reported as valid UTF-8.
     """
     try:
         with path.open("rb") as handle:
@@ -324,19 +326,11 @@ def is_valid_utf8_text(path: Path, sniff_bytes: int = 4096) -> bool:
     except OSError:
         return False
 
-    if not chunk:
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(chunk, final=False)
         return True
-
-    # Drop at most 3 trailing bytes (UTF-8 sequences are at most 4 bytes, so a
-    # partial character straddling the cut can be no longer than that).
-    for trim in range(0, 4):
-        candidate = chunk[: len(chunk) - trim] if trim else chunk
-        try:
-            candidate.decode("utf-8")
-            return True
-        except UnicodeDecodeError:
-            continue
-    return False
+    except UnicodeDecodeError:
+        return False
 
 
 def discover_papers(config: ScanConfig) -> ScanResult:

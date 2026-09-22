@@ -1757,6 +1757,25 @@ def test_utf8_sniff_does_not_split_a_multibyte_character(env):
     broken.write_bytes(b"# heading\n\xff\xfe invalid latin-1 bytes\n")
     assert not is_valid_utf8_text(broken), "genuinely invalid UTF-8 must still be rejected"
 
+    # ...including when the invalid bytes are the LAST bytes. A blind trailing-byte
+    # trim accepted these: it could not tell "cut mid-character" from "bad byte at
+    # EOF", so b"abc\xff" was reported as valid UTF-8.
+    for tail, label in (
+        (b"abc\xff", "single invalid byte at EOF"),
+        (b"abc\xff\xff", "two invalid bytes at EOF"),
+        (b"abc\xe4\xff", "3-byte lead followed by an invalid continuation"),
+        (b"\xff", "file is a single invalid byte"),
+    ):
+        p = folder / "tail.bin"
+        p.write_bytes(tail)
+        assert not is_valid_utf8_text(p), f"must reject: {label}"
+
+    # A genuinely incomplete sequence at the cut is different: the rest may simply
+    # be outside the window, so it must be accepted.
+    truncated = folder / "truncated.bin"
+    truncated.write_bytes("汉".encode("utf-8")[:2])
+    assert is_valid_utf8_text(truncated), "a character cut by the window is not an error"
+
     # 空文件是合法文本。
     empty = folder / "empty.md"
     empty.write_bytes(b"")
