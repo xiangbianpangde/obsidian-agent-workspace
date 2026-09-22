@@ -97,6 +97,20 @@ def manifest_relpath(paper: Paper) -> str:
     return MANIFEST_FILENAME
 
 
+def manifest_payload(document: Dict[str, Any]) -> str:
+    """Canonical on-disk bytes for a manifest document.
+
+    One place decides the serialisation, so the digest a caller records in a
+    write intent is the same digest the reader will compute from the file.
+    """
+    return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+
+
+def manifest_payload_digest(document: Dict[str, Any]) -> str:
+    """Hex digest of exactly the bytes :func:`manifest_payload` produces."""
+    return sha256(manifest_payload(document).encode("utf-8")).hexdigest()
+
+
 def build_manifest(
     paper: Paper, sources: List[PaperSource], note_rel_path: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -444,6 +458,7 @@ def update_manifest(
     *,
     papers_root_rel: str = "",
     note_rel_path: Optional[str] = None,
+    document: Optional[Dict[str, Any]] = None,
     attempts: int = 5,
 ) -> Tuple[Paper, Optional[str]]:
     """Rewrite an adopted paper's manifest after its bindings change.
@@ -453,6 +468,12 @@ def update_manifest(
     write intent must store THAT digest: the recovery handler verifies the manifest
     on disk against the intent, so an intent holding the pre-write digest would
     compare the new manifest against the old hash and could never roll forward.
+
+    ``document`` lets a caller supply the exact document to publish. This exists so
+    the caller can hash it into a write intent BEFORE the write happens, closing
+    the window where a crash between "publish" and "record the digest" left an
+    unverifiable intent. ``build_manifest`` stamps ``updated_at``, so the document
+    must be built once and shared - building it twice yields different digests.
 
     `ensure_adopted` only writes when no manifest exists, which is correct for
     the adoption gate but wrong for the fields that keep changing afterwards. A
@@ -470,12 +491,13 @@ def update_manifest(
     rel = f"{base}/{paper.folder_relpath}/{MANIFEST_FILENAME}" if base else (
         f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
     )
-    document = build_manifest(paper, sources, note_rel_path)
-    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    document = document if document is not None else build_manifest(paper, sources, note_rel_path)
+    payload = manifest_payload(document)
     # The digest of the document this call intends to leave on disk. Every return
     # path below publishes exactly this content, so it is what the caller must
     # record in a write intent for recovery to verify against.
-    published_digest = sha256(payload.encode("utf-8"))
+    # `.hexdigest()`, not the hash object: the value is persisted as JSON.
+    published_digest = manifest_payload_digest(document)
 
     existing = read_manifest_file(service, rel)
     if existing is None:

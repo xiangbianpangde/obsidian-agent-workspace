@@ -468,7 +468,13 @@ def test_p0_d_legacy_unbound_sources_retired_when_manifest_present(env):
     # Re-index: bound.md must be active, and legacy_extra.md must be retired (active=0)!
     indexer.index_papers(dry_run=False)
 
-    sources = {s.rel_path: s for s in storage.list_sources(pid, include_inactive=True)}
+    # include_candidates because an undeclared file is now a candidate by
+    # definition (P0-1); the point here is that its row cannot stay a live
+    # non-candidate binding after the manifest stopped declaring it.
+    sources = {
+        s.rel_path: s
+        for s in storage.list_sources(pid, include_inactive=True, include_candidates=True)
+    }
     assert sources["bound.md"].active is True
     assert sources["legacy_extra.md"].active is False
 
@@ -882,7 +888,11 @@ def test_p0_m_rename_source_crash_recovery_handler_real_execution(env):
         "created_at": "2026-09-18T00:00:00Z",
         "updated_at": "2026-09-18T00:00:00Z",
     }
-    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+    # Written through the same serialiser the writer uses, so the digest recorded
+    # in the intent matches the bytes a real publish would have produced.
+    from backend.app.paper.manifest import manifest_payload, manifest_payload_digest
+
+    (folder / MANIFEST_FILENAME).write_text(manifest_payload(manifest_doc), encoding="utf-8")
 
     # DB state before recovery: Paper is DEGRADED, only has old.pdf (active=1)
     storage = PaperStorage(env["db"])
@@ -903,6 +913,10 @@ def test_p0_m_rename_source_crash_recovery_handler_real_execution(env):
         )
     )
 
+    # The intent must carry the digest of what was published; an intent that
+    # cannot prove which document it produced is refused as "unverifiable".
+    published_digest = manifest_payload_digest(manifest_doc)
+
     # Crash left a pending rename_source intent
     intent_id = storage.begin_write_intent(
         pid,
@@ -911,6 +925,7 @@ def test_p0_m_rename_source_crash_recovery_handler_real_execution(env):
             "old_path": "old.pdf",
             "new_path": "renamed.pdf",
             "source_id": sid,
+            "published_manifest_digest": published_digest,
             "folder_relpath": paper.folder_relpath,
             "papers_root_rel": "论文",
         },
@@ -1396,3 +1411,325 @@ def test_p0_s2_successful_publish_then_crash_rolls_forward(env):
     assert "paper_renamed.pdf" in live
     assert live["paper_renamed.pdf"].source_id == sid
     assert not storage.list_pending_write_intents(), "intent must be committed after recovery"
+
+
+def test_full_lifecycle_identity_source_id_and_state_are_stable(env):
+    """端到端生命周期：采纳 → 重建 → 改名 → 重建 → 丢失 → 恢复 → 反复重建。
+
+    单元探针各自覆盖一个侧面，这个探针覆盖它们的拼接：真实 adoption 之后，
+    paper_id 与 source_id 必须跨"删库重建"稳定，改名不得换 ID，缺失降级不得丢纸，
+    恢复后计数不得重复增长。它正是本次发现"全新数据库下 source 从不落库"的探针。
+    """
+    from backend.app.paper.manifest import ensure_adopted
+
+    folder = env["papers"] / "方向Z" / "LifecyclePaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+    (folder / "paper_全文翻译.md").write_text("# 译文\n", encoding="utf-8")
+
+    def reindex():
+        indexer.index_papers(dry_run=False)
+
+    def rebuild():
+        env["storage"].close()
+        env["db"].unlink()
+        for suffix in ("-wal", "-shm"):
+            Path(str(env["db"]) + suffix).unlink(missing_ok=True)
+        reindex()
+
+    # 1. Index, then adopt the way the UI does on first open.
+    reindex()
+    storage = PaperStorage(env["db"])
+    paper = storage.list_papers()[0]
+    ensure_adopted(
+        storage,
+        env["service"],
+        paper,
+        storage.list_sources(paper.paper_id),
+        operation="status_change",
+        papers_root_rel="论文",
+    )
+    storage.upsert_paper(storage.get_paper(paper.paper_id), allow_folder_move=True)
+    pid = paper.paper_id
+
+    # A fresh database must bind the paper's sources, not leave it empty.
+    assert len(storage.list_sources(pid)) == 2, "indexing must bind sources on a fresh database"
+
+    manifest = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert len(manifest["sources"]) == 2
+
+    # 2. Rebuild: identity and sources come back from the manifest.
+    rebuild()
+    storage = PaperStorage(env["db"])
+    assert storage.get_paper(pid) is not None, "identity must survive a rebuild"
+    assert len(storage.list_sources(pid)) == 2
+
+    # 3. Rename: same source_id, manifest updated, state stays ADOPTED.
+    (folder / "paper.pdf").rename(folder / "renamed.pdf")
+    reindex()
+    storage = PaperStorage(env["db"])
+    renamed = next(s for s in storage.list_sources(pid) if s.rel_path == "renamed.pdf")
+    old_pdf_id = renamed.source_id
+    updated = storage.get_paper(pid)
+    assert updated.binding_state == BindingState.ADOPTED
+    assert updated.primary_pdf_source_id == old_pdf_id
+
+    manifest = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert any(s["path"] == "renamed.pdf" for s in manifest["sources"])
+
+    # 4. Rebuild again: the rename is Vault-authoritative, identity intact.
+    rebuild()
+    storage = PaperStorage(env["db"])
+    live = {s.rel_path: s for s in storage.list_sources(pid)}
+    assert "renamed.pdf" in live
+    assert live["renamed.pdf"].source_id == old_pdf_id, "rename must not mint a new source_id"
+    assert len(live) == 2, "the retired path must not linger as a second live source"
+
+    # 5. Lose the PDF: DEGRADED, but the paper is never dropped.
+    (folder / "renamed.pdf").unlink()
+    reindex()
+    storage = PaperStorage(env["db"])
+    degraded = storage.get_paper(pid)
+    assert degraded is not None, "a paper with a missing source must not vanish"
+    assert degraded.binding_state == BindingState.DEGRADED
+
+    # 6. Restore it: ADOPTED again.
+    (folder / "renamed.pdf").write_bytes(PDF_SAMPLE)
+    reindex()
+    storage = PaperStorage(env["db"])
+    assert storage.get_paper(pid).binding_state == BindingState.ADOPTED
+
+    # 7. Repeated rebuilds must not grow the source count.
+    for _ in range(3):
+        rebuild()
+    storage = PaperStorage(env["db"])
+    assert len(storage.list_sources(pid)) == 2, "repeated rebuilds must not duplicate sources"
+
+
+def test_p0_u_digest_recorded_at_intent_creation_survives_crash(env):
+    """P0-U: 发布成功但"记录摘要"一步崩溃时，intent 必须已自带摘要，recovery 才能 roll-forward.
+
+    评审员指出的窗口：若先 begin intent、再发布、最后才补写摘要，中间崩溃会留下
+    "无摘要 + 新 Manifest" 的现场。修复是先把摘要写进 intent 再发布，因此本次
+    探针刻意只中断在发布之后、intent 提交之前，并断言 intent 一开始就带摘要。
+    """
+    folder = env["papers"] / "方向AA" / "DigestAtIntentPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    indexer.index_papers(dry_run=False)
+    (folder / "paper.pdf").rename(folder / "renamed.pdf")
+
+    storage = PaperStorage(env["db"])
+    real_commit = PaperStorage.commit_write_intent
+
+    def crash_before_commit(self, intent_id):
+        raise RuntimeError("simulated crash before intent commit")
+
+    PaperStorage.commit_write_intent = crash_before_commit
+    try:
+        indexer.index_papers(dry_run=False)
+    except RuntimeError:
+        pass
+    finally:
+        PaperStorage.commit_write_intent = real_commit
+
+    pending = [p for p in storage.list_pending_write_intents() if p["operation"] == "rename_source"]
+    assert pending, "the rename intent must be pending after the crash"
+    payload = json.loads(pending[0]["payload_json"])
+    # The digest must be there from the start, not back-filled after the write.
+    assert payload.get("published_manifest_digest"), (
+        "intent must carry the published digest from creation"
+    )
+    # And it must equal what is actually on disk, or recovery could never match.
+    from backend.app.paper.manifest import manifest_payload_digest
+
+    on_disk = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert payload["published_manifest_digest"] == manifest_payload_digest(on_disk)
+
+    report = recover_pending_writes(storage, env["service"])
+    assert report.resolved == 1, f"must roll forward, got {report.outcomes}"
+    assert storage.get_paper(pid).binding_state == BindingState.ADOPTED
+
+
+def test_p0_v_intent_without_digest_is_refused_not_guessed(env):
+    """P0-V: 缺少 published digest 的 intent 必须 fail-closed（unverifiable），不能凭路径猜测.
+
+    旧实现里 digest 缺失就跳过 CAS，仅凭 new_path 完成 roll-forward——等于把
+    无法证明来源的现场当成自己的成果提交。
+    """
+    folder = env["papers"] / "方向AB" / "NoDigestPaper"
+    folder.mkdir(parents=True)
+    (folder / "new.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "new.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    storage = PaperStorage(env["db"])
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向AB/NoDigestPaper",
+            display_title="NoDigestPaper",
+            binding_state=BindingState.DEGRADED,
+        ),
+        allow_folder_move=True,
+    )
+    storage.begin_write_intent(
+        pid,
+        "rename_source",
+        {
+            "old_path": "old.pdf",
+            "new_path": "new.pdf",
+            "source_id": sid,
+            "folder_relpath": "方向AB/NoDigestPaper",
+            "papers_root_rel": "论文",
+            # deliberately NO published_manifest_digest
+        },
+    )
+
+    report = recover_pending_writes(storage, env["service"])
+    assert report.resolved == 0
+    assert report.outcomes[0].action == "unverifiable"
+    assert storage.list_pending_write_intents(), "intent must stay pending for a human"
+
+
+def test_p0_t2_none_clears_tags_and_external_ids(env):
+    """P0-T2: 显式 None 必须清空 tags / external_ids，与 _UNSET 语义严格区分."""
+    storage = PaperStorage(env["db"])
+    pid = new_paper_id()
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向AC/NoneClearPaper",
+            display_title="NoneClear",
+            paper_tags=["old-tag"],
+            external_ids={"arxiv": "1234.5678"},
+        ),
+        allow_folder_move=True,
+    )
+
+    # Omitted -> preserved.
+    storage.commit_resolved_adoption(pid, sources=[], binding_state=BindingState.ADOPTED)
+    kept = storage.get_paper(pid)
+    assert kept.paper_tags == ["old-tag"]
+    assert kept.external_ids == {"arxiv": "1234.5678"}
+
+    # Explicit None -> cleared.
+    storage.commit_resolved_adoption(
+        pid,
+        sources=[],
+        paper_tags=None,
+        external_ids=None,
+        binding_state=BindingState.ADOPTED,
+    )
+    cleared = storage.get_paper(pid)
+    assert cleared.paper_tags == [], "explicit None must clear tags"
+    assert cleared.external_ids == {}, "explicit None must clear external ids"
+
+
+def test_p0_t3_update_manifest_digest_is_json_serialisable(env):
+    """P0-T3: update_manifest 返回的摘要必须是十六进制字符串，可直接进 JSON.
+
+    回归：曾经漏了 `.hexdigest()`，返回 hash 对象，序列化进 intent 时 TypeError。
+    """
+    from backend.app.paper.manifest import update_manifest, manifest_payload_digest
+
+    folder = env["papers"] / "方向AD" / "DigestSerialisablePaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    storage = PaperStorage(env["db"])
+    paper = Paper(paper_id=pid, folder_relpath="方向AD/DigestSerialisablePaper")
+    storage.upsert_paper(paper, allow_folder_move=True)
+    sources = [
+        PaperSource(
+            source_id=new_source_id(),
+            paper_id=pid,
+            role=SourceRole.TRANSLATION_FULL,
+            rel_path="doc.md",
+            is_primary=True,
+        )
+    ]
+    ensure_adopted(
+        storage, env["service"], paper, sources, operation="manual_binding", papers_root_rel="论文"
+    )
+
+    # Call it twice: the second call hits the "already identical" return path, which
+    # is the one that previously returned a hash object instead of a hex string.
+    for _ in range(2):
+        _p, digest = update_manifest(
+            storage, env["service"], paper, sources, papers_root_rel="论文"
+        )
+        assert isinstance(digest, str), f"digest must be a str, got {type(digest)}"
+        assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+        json.dumps({"published_manifest_digest": digest})  # must not raise
+
+    # The "already identical" branch is the one that previously returned a hash
+    # object instead of a hex string. It is only reachable when the caller supplies
+    # the exact document already on disk (build_manifest re-stamps updated_at, so a
+    # rebuilt document would differ) — hence passing it explicitly here.
+    from backend.app.paper.manifest import build_manifest, manifest_payload
+
+    identical = build_manifest(paper, sources)
+    rel = f"论文/{paper.folder_relpath}/{MANIFEST_FILENAME}"
+    env["service"].save(rel, manifest_payload(identical), expected_hash=env["service"].read(rel)[1])
+
+    _p, same_digest = update_manifest(
+        storage,
+        env["service"],
+        paper,
+        sources,
+        papers_root_rel="论文",
+        document=identical,
+    )
+    assert isinstance(same_digest, str), (
+        f"the already-identical branch must return a str, got {type(same_digest)}"
+    )
+    assert len(same_digest) == 64, f"must be a hex digest, got {same_digest!r}"
+    assert all(c in "0123456789abcdef" for c in same_digest)
+    json.dumps({"published_manifest_digest": same_digest})  # must not raise

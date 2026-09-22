@@ -561,30 +561,46 @@ def _recover_rename_source(
         )
 
     expected_digest = payload.get("published_manifest_digest")
-    if expected_digest:
-        try:
-            _raw, cur_digest = service.read(manifest_rel)
-        except Exception as exc:  # noqa: BLE001
-            return RecoveryOutcome(
-                intent_id=intent_id,
-                paper_id=paper.paper_id,
-                operation="rename_source",
-                resolved=False,
-                action="failed",
-                detail=f"cannot re-read manifest to verify published digest: {exc}",
-            )
-        if cur_digest != expected_digest:
-            # The manifest is not the document this intent published, so the
-            # binding changed underneath the rename. Committing would relabel
-            # unknown content as this rename's result.
-            return RecoveryOutcome(
-                intent_id=intent_id,
-                paper_id=paper.paper_id,
-                operation="rename_source",
-                resolved=False,
-                action="digest-mismatch",
-                detail="manifest on disk is not the document this intent published",
-            )
+    if not expected_digest:
+        # An intent that cannot say which document it published cannot prove the
+        # manifest on disk is its own work. Rolling forward on the path alone
+        # would relabel an externally edited binding as this rename's result, so
+        # this stays pending for a human instead.
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="unverifiable",
+            detail=(
+                "intent carries no published manifest digest; cannot prove the "
+                "manifest on disk came from this rename"
+            ),
+        )
+
+    try:
+        _raw, cur_digest = service.read(manifest_rel)
+    except Exception as exc:  # noqa: BLE001
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="failed",
+            detail=f"cannot re-read manifest to verify published digest: {exc}",
+        )
+    if cur_digest != expected_digest:
+        # The manifest is not the document this intent published, so the
+        # binding changed underneath the rename. Committing would relabel
+        # unknown content as this rename's result.
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="rename_source",
+            resolved=False,
+            action="digest-mismatch",
+            detail="manifest on disk is not the document this intent published",
+        )
 
     try:
         from .manifest import manifest_to_sources

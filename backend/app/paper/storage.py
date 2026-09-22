@@ -551,8 +551,25 @@ class PaperStorage:
         from .models import MediaKind
 
         stamp = utc_now()
-        tags_json = json.dumps(paper_tags, ensure_ascii=False) if isinstance(paper_tags, list) else _UNSET
-        ext_json = json.dumps(external_ids, ensure_ascii=False) if isinstance(external_ids, dict) else _UNSET
+        # Three states, matching the sentinel contract exactly:
+        #   _UNSET -> leave stored value alone
+        #   None   -> clear (stored as an empty container; the columns are NOT NULL)
+        #   value  -> set
+        # ``None`` previously fell into the _UNSET branch, so a caller passing an
+        # explicit None silently kept the old value instead of clearing it.
+        if paper_tags is _UNSET:
+            tags_json = _UNSET
+        elif paper_tags is None:
+            tags_json = json.dumps([], ensure_ascii=False)
+        else:
+            tags_json = json.dumps(paper_tags, ensure_ascii=False)
+
+        if external_ids is _UNSET:
+            ext_json = _UNSET
+        elif external_ids is None:
+            ext_json = json.dumps({}, ensure_ascii=False)
+        else:
+            ext_json = json.dumps(external_ids, ensure_ascii=False)
 
         with self._lock:
             cur = self._conn.cursor()

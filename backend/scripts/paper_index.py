@@ -24,7 +24,9 @@ from pathlib import Path
 from backend.app.config import load_config
 from backend.app.paper import ANNOTATION_STORE_FILENAME, MANIFEST_FILENAME
 from backend.app.paper.manifest import (
+    build_manifest,
     load_adopted_identity,
+    manifest_payload_digest,
     manifest_to_sources,
     read_manifest_file,
     update_manifest,
@@ -354,13 +356,24 @@ def index_papers(dry_run: bool = False) -> dict:
 
                     source.paper_id = paper.paper_id
 
-                    # P0-S: The intent must record the digest of the document we
-                    # INTEND to publish, not the one we are about to replace.
-                    # Recovery compares the manifest on disk against this value, so
-                    # recording the pre-write digest would make the normal crash
-                    # (publish succeeded, SQLite commit did not) permanently
-                    # unrecoverable: recovery would see the new manifest, compare it
-                    # against the old hash, and refuse to roll forward forever.
+                    # P0-S: Build the document ONCE and hash it into the intent
+                    # BEFORE the write. Recording the digest afterwards left a
+                    # crash window where recovery found an intent with no digest
+                    # and rolled forward on the path alone, which cannot prove the
+                    # manifest on disk is the one this rename produced.
+                    note_path = getattr(adopted, "note_path", None) if adopted else None
+                    canonical_manifest_sources = []
+                    for ms_key, ms_val in manifest_sources.items():
+                        if ms_key == matched_missing.rel_path:
+                            canonical_manifest_sources.append(source)
+                        elif (paper_dir / ms_key).is_file():
+                            canonical_manifest_sources.append(ms_val)
+
+                    pending_document = build_manifest(
+                        paper, canonical_manifest_sources, note_path
+                    )
+                    planned_digest = manifest_payload_digest(pending_document)
+
                     rename_intent = None
                     if storage is not None:
                         rename_intent = storage.begin_write_intent(
@@ -370,6 +383,7 @@ def index_papers(dry_run: bool = False) -> dict:
                                 "old_path": matched_missing.rel_path,
                                 "new_path": source.rel_path,
                                 "source_id": matched_missing.source_id,
+                                "published_manifest_digest": planned_digest,
                                 "papers_root_rel": papers_root_rel,
                                 "folder_relpath": paper.folder_relpath,
                             },
@@ -378,23 +392,15 @@ def index_papers(dry_run: bool = False) -> dict:
                     # Update manifest on disk FIRST before syncing SQLite!
                     manifest_ok = True
                     if service is not None:
-                        note_path = getattr(adopted, "note_path", None) if adopted else None
-                        canonical_manifest_sources = []
-                        for ms_key, ms_val in manifest_sources.items():
-                            if ms_key == matched_missing.rel_path:
-                                canonical_manifest_sources.append(source)
-                            elif (paper_dir / ms_key).is_file():
-                                canonical_manifest_sources.append(ms_val)
-
-                        published_digest = None
                         try:
-                            _, published_digest = update_manifest(
+                            update_manifest(
                                 storage,
                                 service,
                                 paper,
                                 canonical_manifest_sources,
                                 papers_root_rel=papers_root_rel,
                                 note_rel_path=note_path,
+                                document=pending_document,
                             )
                         except Exception as exc:
                             manifest_ok = False
@@ -402,13 +408,6 @@ def index_papers(dry_run: bool = False) -> dict:
                                 storage.fail_write_intent(rename_intent, str(exc))
                             result_errors.append(
                                 f"manifest rename update failed for {paper.folder_relpath}: {exc}"
-                            )
-
-                        # Record what we actually published so recovery can verify
-                        # the manifest it finds is the one this intent produced.
-                        if manifest_ok and rename_intent and published_digest:
-                            storage.set_write_intent_payload_digest(
-                                rename_intent, published_digest
                             )
 
                     # Only synchronize SQLite if manifest on disk was successfully updated!
@@ -437,13 +436,24 @@ def index_papers(dry_run: bool = False) -> dict:
 
                         if rename_intent:
                             storage.commit_write_intent(rename_intent)
-            elif prior is not None and adopted is None:
+            elif prior is not None:
                 # No manifest: the database row is the only identity we have.
                 source.source_id = prior.source_id
                 source.created_at = prior.created_at
                 source.source_version = _next_version(prior, source)
                 if _unchanged(prior, source):
                     source.sha256 = prior.sha256
+                source.paper_id = paper.paper_id
+                storage.upsert_source(source)
+                sources_written += 1
+                if source.active:
+                    confirmed_live_paths.add(source.rel_path)
+            else:
+                # Brand-new discovery on a fresh database: no manifest declared this
+                # file and no prior row exists, but it IS the paper's source. Without
+                # this branch the row is simply never written, and a paper can end up
+                # indexed as RESOLVED with an empty source list - the reader then has
+                # nothing to open.
                 source.paper_id = paper.paper_id
                 storage.upsert_source(source)
                 sources_written += 1
