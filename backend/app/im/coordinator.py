@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections import deque
 from dataclasses import asdict
@@ -31,6 +32,8 @@ from backend.app.im.models import (
 
 REPLAY_LIMIT = 200
 
+logger = logging.getLogger(__name__)
+
 
 class IngestionCoordinator(IMIngestSink):
     """
@@ -45,6 +48,9 @@ class IngestionCoordinator(IMIngestSink):
         self._subscribers: Set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
         self._started = False
+        #: dedupe_keys whose stored digest disagreed with the re-read one. Kept so
+        #: the divergence can be inspected instead of vanishing into a log line.
+        self._last_conflicts: list[str] = []
 
         # Initialize adapters and bind default sink
         wx_account = os.environ.get("WECHAT_ACCOUNT_ID", "wxid_hxwpag2k3qi122")
@@ -111,6 +117,21 @@ class IngestionCoordinator(IMIngestSink):
         """
         # WeCom backfill can be 20k records; SQLite commit must not block the event loop (Sol P1)
         receipt = await asyncio.to_thread(self.journal.commit_batch, batch)
+
+        if receipt.conflicted:
+            # Surface every quarantined message. A conflict means the stored copy
+            # and the re-read copy disagree, and ingestion continues around it -
+            # which is only safe if the divergence is actually visible. Silence here
+            # is what let a 5-row conflict freeze QQ ingestion for 13 days.
+            logger.warning(
+                "im ingest: %d record(s) quarantined for %s/%s (stored copy kept): %s",
+                len(receipt.conflicted),
+                batch.source,
+                batch.account_id,
+                ", ".join(receipt.conflicted[:5])
+                + (" …" if len(receipt.conflicted) > 5 else ""),
+            )
+            self._last_conflicts = list(receipt.conflicted)
 
         if receipt.inserted_count > 0:
             # Query the newly inserted messages

@@ -209,6 +209,26 @@ class IMJournal:
                 PRIMARY KEY (source, account_id)
             );
             """)
+
+            # Quarantined identity conflicts.
+            #
+            # A record whose dedupe_key already exists with a different digest is
+            # never written (the stored copy wins), but it must not block the rest
+            # of the batch either. Recording it here keeps the divergence durable
+            # and inspectable: a 5-row conflict once froze QQ ingestion for 13 days
+            # precisely because the failure left no queryable trace.
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingest_conflicts (
+                dedupe_key TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                existing_digest TEXT NOT NULL,
+                observed_digest TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                seen_count INTEGER NOT NULL DEFAULT 1
+            );
+            """)
             cur.close()
 
     def close(self) -> None:
@@ -236,6 +256,7 @@ class IMJournal:
 
                 inserted_count = 0
                 skipped_count = 0
+                conflicted: List[str] = []
 
                 for rec in batch.records:
                     # 0. Envelope-message consistency boundary (P1-IM-6-R3 & AT-5A, AT-5B)
@@ -265,10 +286,42 @@ class IMJournal:
                             skipped_count += 1
                             continue
                         else:
-                            # Severe Identity Conflict! Must rollback whole batch and not advance watermark
-                            raise IdentityConflictError(
-                                f"IdentityConflictError for {rec.source}/{rec.account_id}/{rec.dedupe_key}: existing digest {existing_digest} != new digest {server_digest}"
+                            # Quarantine this record and KEEP GOING.
+                            #
+                            # This used to raise, aborting the whole batch and
+                            # leaving the watermark unadvanced. One unreconcilable
+                            # row then froze ingestion permanently: QQ sat 13 days
+                            # with 5 such rows blocking 2771 new messages, and the
+                            # only user-visible symptom was a repeating one-line
+                            # warning. The message is NOT written and NOT replaced -
+                            # the stored copy wins - but its existence must not stop
+                            # every other message from arriving. The divergence is
+                            # reported instead.
+                            conflicted.append(rec.dedupe_key)
+                            now_stamp = datetime.now(timezone.utc).isoformat()
+                            cur.execute(
+                                """
+                                INSERT INTO ingest_conflicts (
+                                    dedupe_key, source, account_id,
+                                    existing_digest, observed_digest,
+                                    first_seen_at, last_seen_at, seen_count
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                                ON CONFLICT(dedupe_key) DO UPDATE SET
+                                    observed_digest = excluded.observed_digest,
+                                    last_seen_at = excluded.last_seen_at,
+                                    seen_count = ingest_conflicts.seen_count + 1;
+                                """,
+                                (
+                                    rec.dedupe_key,
+                                    rec.source,
+                                    rec.account_id,
+                                    existing_digest,
+                                    server_digest,
+                                    now_stamp,
+                                    now_stamp,
+                                ),
                             )
+                            continue
 
                     # 3. New record insertion
                     # Serialize complex fields to JSON
@@ -375,6 +428,7 @@ class IMJournal:
                     skipped_count=skipped_count,
                     committed_seq_head=head,
                     watermark_advanced=watermark_advanced,
+                    conflicted=conflicted,
                 )
 
             except Exception:
@@ -621,6 +675,42 @@ class IMJournal:
 
             next_cursor = last_seq if has_next else None
             return items, next_cursor
+
+    # -------------------------------------------------------------------------
+    # Quarantined identity conflicts
+    # -------------------------------------------------------------------------
+
+    def list_conflicts(self, source: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Records whose stored digest disagreed with a re-read one.
+
+        These are NOT written and NOT overwritten: the stored copy is kept. They
+        are listed so the divergence stays visible; before this existed a single
+        unreconcilable row could freeze ingestion indefinitely with no queryable
+        trace (QQ: 5 rows, 13 days).
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            if source:
+                cur.execute(
+                    "SELECT * FROM ingest_conflicts WHERE source = ? ORDER BY last_seen_at DESC;",
+                    (source,),
+                )
+            else:
+                cur.execute("SELECT * FROM ingest_conflicts ORDER BY last_seen_at DESC;")
+            rows = [dict(r) for r in cur.fetchall()]
+            cur.close()
+            return rows
+
+    def conflicts_for(self, source: str, account_id: str) -> int:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM ingest_conflicts WHERE source = ? AND account_id = ?;",
+                (source, account_id),
+            )
+            n = int(cur.fetchone()["n"])
+            cur.close()
+            return n
 
     def query_replay_events(self, after_seq: int, limit: int = 200) -> List[IMMessageItem]:
         """Replays events where ingest_seq > after_seq (Open interval, P2-1 & AT-7)."""

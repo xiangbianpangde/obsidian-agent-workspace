@@ -171,8 +171,23 @@ def test_at2_cross_path_canonical_digest_and_reply_to():
         batch_conflict = IMIngestBatch(
             source="wechat", account_id="wx_primary", records=[rec_conflict]
         )
-        with pytest.raises(IdentityConflictError):
-            journal.commit_batch(batch_conflict)
+        receipt_conflict = journal.commit_batch(batch_conflict)
+
+        # The conflicting record is quarantined, not written: the stored copy wins.
+        assert receipt_conflict.conflicted == [rec_conflict.dedupe_key]
+        assert receipt_conflict.inserted_count == 0
+
+        # ...and the stored row is untouched. This is the safety property the
+        # original `raise` was protecting, and it must survive the change: a
+        # divergent payload may never be accepted under an existing identity.
+        stored = journal.query_replay_events(after_seq=0, limit=10)
+        stored_msg = next(m for m in stored if m.source_message_id == "999888777")
+        assert stored_msg.text == "作业已提交", "the stored copy must not be overwritten"
+
+        # The divergence is reportable rather than silent. Previously the raise
+        # aborted the entire batch and pinned the watermark, so ONE unreconcilable
+        # row froze all ingestion - QQ lost 13 days to exactly that.
+        assert journal.conflicts_for("wechat", "wx_primary") >= 0
 
         journal.close()
 
@@ -988,3 +1003,67 @@ def test_at19_wecom_latest_snapshot_requires_complete_manifest(tmp_path):
     latest = adapter._latest_snapshot()
     assert latest is not None
     assert latest.name == "20251231-000000-000-complete"
+
+
+def test_one_unreconcilable_row_must_not_freeze_all_ingestion():
+    """回归：一条无法对齐的旧记录不得冻结全部摄入（QQ 曾因此阻塞 13 天）。
+
+    现场：库中已有某 dedupe_key 的旧摘要（由当时的解码器/元数据来源产出，事后
+    无法复现），新快照在同一 key 上算出不同摘要。旧实现直接 raise，于是：
+      - 整个批次回滚
+      - watermark 不推进
+      - 2771 条新消息永远进不来
+      - 用户只看到每分钟一行 "QQ_SNAPSHOT_INGEST_FAILED"
+
+    正确语义：该条隔离（保留库中原值、不覆盖），其余照常入库，并留下可查询痕迹。
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        journal = IMJournal(Path(td) / "im.db")
+
+        # 一条「陈旧不可对齐」的记录：先写入，再以不同摘要重放。
+        stale = make_sample_message(msg_id="msg_stale", text="旧版本内容", account_id="acc")
+        rec_stale = IMIngestRecord(
+            source="wechat", account_id="acc", dedupe_key="k_stale",
+            dedupe_basis="native_message_id", message=stale,
+        )
+        journal.commit_batch(IMIngestBatch(source="wechat", account_id="acc", records=[rec_stale]))
+
+        revised = make_sample_message(msg_id="msg_stale", text="新版本内容", account_id="acc")
+        rec_revised = IMIngestRecord(
+            source="wechat", account_id="acc", dedupe_key="k_stale",
+            dedupe_basis="native_message_id", message=revised,
+        )
+
+        # 同一批次里还有一条全新的、本应成功入库的消息。
+        fresh = make_sample_message(msg_id="msg_fresh", text="新消息", account_id="acc")
+        rec_fresh = IMIngestRecord(
+            source="wechat", account_id="acc", dedupe_key="k_fresh",
+            dedupe_basis="native_message_id", message=fresh,
+        )
+
+        wm = IMWatermark(kind="source_cursor", value="cursor_freeze_1")
+        batch = IMIngestBatch(
+            source="wechat", account_id="acc",
+            records=[rec_revised, rec_fresh], new_watermark=wm,
+        )
+
+        receipt = journal.commit_batch(batch)
+
+        # 1. 冲突被隔离并上报
+        assert receipt.conflicted == ["k_stale"], "conflict must be quarantined and reported"
+        # 2. 新消息照常入库 —— 这正是旧实现做不到的
+        assert receipt.inserted_count == 1, "the fresh record must still be ingested"
+        # 3. watermark 推进 —— 不再被一条坏记录卡死
+        assert receipt.watermark_advanced is True
+        # 4. 库中原值未被覆盖
+        stored = journal.query_replay_events(after_seq=0, limit=10)
+        s = next(m for m in stored if m.source_message_id == "msg_stale")
+        assert s.text == "旧版本内容", "the stored copy must win, never be overwritten"
+        # 5. 冲突留下可查询痕迹
+        assert journal.conflicts_for("wechat", "acc") == 1
+        conflicts = journal.list_conflicts(source="wechat")
+        assert conflicts and conflicts[0]["dedupe_key"] == "k_stale"
+
+        journal.close()

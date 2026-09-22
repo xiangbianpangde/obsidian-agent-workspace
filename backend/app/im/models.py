@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
 # -----------------------------------------------------------------------------
@@ -276,3 +276,7 @@ class IMCommitReceipt:
     skipped_count: int
     committed_seq_head: int
     watermark_advanced: bool
+    #: Records whose dedupe_key exists with a different digest. They are NOT
+    #: written and do NOT block the rest of the batch; the list is surfaced so
+    #: the divergence stays visible instead of freezing ingestion forever.
+    conflicted: List[str] = field(default_factory=list)

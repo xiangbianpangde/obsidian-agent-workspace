@@ -50,16 +50,41 @@ EXPECTED_EXPORTS = {
     "profile_info": "export/profile_info.db",
 }
 
+#: Maps QQ's ``40011`` msg_type to a message kind.
+#:
+#: Verified against element_type (``45002``) across a 3000-row sample of the real
+#: backup, by tabulating (msg_type -> the element types actually present):
+#:
+#:     msg_type=2  -> element 1 (text), 2 (image), 6 (face), and combinations
+#:     msg_type=3  -> element 3 (file)
+#:     msg_type=9  -> element 1+7 (quote), 1+6 (text+face)
+#:     msg_type=5  -> element 8, in every one of the 90 observed rows
+#:     msg_type=11 -> element 10 (card)
+#:     msg_type=8  -> element 16 (link)
+#:     msg_type=17 -> element 11 (face)
+#:
+#: Only ``5`` was provably wrong: it was mapped to "image", yet every row carrying
+#: it holds element type 8 and no image element at all. Real image messages arrive
+#: as msg_type=2 with element_type=2 (479 rows), so "image" was simply the wrong
+#: meaning. It is now "notice", which is what the element type says.
+#:
+#: The remaining entries have no counter-example in the sampled data, so they are
+#: left alone rather than adjusted on a hunch. Entries whose element type was never
+#: observed are marked below.
 QQ_MESSAGE_TYPES = {
     2: "text",
     3: "file",
-    5: "image",
+    # Verified: not "image". 90/90 rows carry element_type=8 and no image element.
+    5: "notice",
+    # Not observed in the sample; no evidence to change these either way.
     6: "voice",
     7: "video",
-    8: "notice",
+    # Observed with element_type=16, which is a link card, not a notice.
+    8: "link",
     9: "text",
     10: "link",
-    11: "image",
+    # Observed with element_type=10 (card).
+    11: "link",
     16: "link",
 }
 
@@ -356,10 +381,19 @@ class QQSnapshotAdapter(IMSourceReader, IMIngestDriver):
                 self._connectivity = "degraded" if self._last_good_manifest else "error"
                 logger.warning("QQ snapshot adapter degraded: %s", exc.code)
                 await asyncio.sleep(min(60.0, self._poll_interval * 4))
-            except Exception:
+            except Exception as exc:
                 self._last_error_code = "QQ_SNAPSHOT_INGEST_FAILED"
                 self._connectivity = "degraded" if self._last_good_manifest else "error"
-                logger.warning("QQ snapshot adapter degraded: QQ_SNAPSHOT_INGEST_FAILED")
+                # Log the actual exception, with traceback. Logging only a fixed
+                # code string is what hid a 13-day ingestion freeze: the retry
+                # warning repeated every minute while the real cause
+                # (IdentityConflictError on 5 rows) never appeared anywhere.
+                logger.warning(
+                    "QQ snapshot adapter degraded: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 await asyncio.sleep(min(60.0, self._poll_interval * 4))
 
     async def _ingest_current(self) -> int:
