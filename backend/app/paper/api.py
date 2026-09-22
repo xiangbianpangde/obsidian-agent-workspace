@@ -1038,6 +1038,17 @@ def create_note(paper_id: str, body: NoteCreate):
     # The adoption gate ran before this note had an id, so the manifest recorded
     # `note: null`. Without rewriting it, a database rebuild could not re-attach
     # the note — the identity property ADR-006 exists to provide.
+    #
+    # The digest is captured before the note is written and passed as a CAS
+    # precondition: this rewrite must not clobber a manifest that someone edited
+    # in the meantime. On conflict the note still exists (nothing is lost); only
+    # the binding waits, which is the failure direction we want.
+    expected_manifest_digest = None
+    try:
+        _raw, expected_manifest_digest = _service().read(_paper_rel(paper, MANIFEST_FILENAME))
+    except Exception:
+        expected_manifest_digest = None
+
     try:
         update_manifest(
             storage,
@@ -1048,6 +1059,7 @@ def create_note(paper_id: str, body: NoteCreate):
             # The note's actual filename, so a custom name is recorded rather
             # than assumed to be notes.md.
             note_rel_path=rel,
+            expected_manifest_digest=expected_manifest_digest,
         )
     except ManifestError as exc:
         # The note itself is safely on disk and in the row; a manifest failure

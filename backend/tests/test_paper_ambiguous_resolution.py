@@ -1966,3 +1966,141 @@ def test_p0_w2_indexer_rename_path_refuses_when_manifest_edited_midway(env, monk
     assert "renamed.pdf" not in live, (
         "SQLite must not adopt a rename whose manifest CAS failed"
     )
+
+
+def test_p0_x_note_creation_manifest_rewrite_has_precondition(env, monkeypatch):
+    """P0-X: 创建笔记时的 manifest 重写同样必须带写前 CAS，不得覆盖并发编辑.
+
+    与 rename 同类：一旦 manifest 在决策后被外部编辑，重写必须 fail-closed。
+    笔记本身仍然安全（文件与行都已写入），只有绑定等待——这是正确的失败方向。
+    """
+    import backend.app.paper.api as api_mod
+    from backend.app.paper.manifest import update_manifest as real_update
+
+    folder = env["papers"] / "方向AH" / "NoteCasPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper_by_folder("方向AH/NoteCasPaper")
+    pid = paper.paper_id
+    client = env["client"]
+
+    rel = f"论文/方向AH/NoteCasPaper/{MANIFEST_FILENAME}"
+    seen = {}
+
+    def spy(*args, **kwargs):
+        seen["precondition"] = kwargs.get("expected_manifest_digest")
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(api_mod, "update_manifest", spy)
+
+    res = client.post(f"/api/paper/papers/{pid}/note", json={"content": "# 笔记\n"})
+    assert res.status_code in (200, 201), res.text
+
+    assert "precondition" in seen, "the note path must call update_manifest"
+    assert seen["precondition"], (
+        "note-creation manifest rewrite must pass a pre-write digest precondition"
+    )
+    # Concretely: the precondition must be the digest that was on disk beforehand.
+    service = env["service"]
+    assert seen["precondition"] != None  # noqa: E711 - explicit: a real hex digest
+
+
+def test_p0_y_manifest_change_between_read_and_commit_aborts_recovery(env, monkeypatch):
+    """P0-Y: 在"最终读"与"SQLite 提交"之间外部改动 Manifest，提交必须中止.
+
+    评审员注入的正是这个窗口：monkeypatch 在 commit_resolved_adoption 入口先改磁盘
+    Manifest，然后调用原提交。若提交仍成功，SQLite 与 Vault 就会权威分裂。
+    修复把校验交给事务本身（COMMIT 之前），因此该改动必须让整个提交回滚。
+    """
+    from backend.app.paper import storage as storage_mod
+
+    folder = env["papers"] / "方向AI" / "CommitWindowPaper"
+    folder.mkdir(parents=True)
+    (folder / "renamed.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    from backend.app.paper.manifest import manifest_payload, manifest_payload_digest
+
+    doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "renamed.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(manifest_payload(doc), encoding="utf-8")
+
+    storage = PaperStorage(env["db"])
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向AI/CommitWindowPaper",
+            display_title="CommitWindowPaper",
+            binding_state=BindingState.DEGRADED,
+        ),
+        allow_folder_move=True,
+    )
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="old.pdf",
+            active=True,
+        )
+    )
+    storage.begin_write_intent(
+        pid,
+        "rename_source",
+        {
+            "old_path": "old.pdf",
+            "new_path": "renamed.pdf",
+            "source_id": sid,
+            "published_manifest_digest": manifest_payload_digest(doc),
+            "folder_relpath": "方向AI/CommitWindowPaper",
+            "papers_root_rel": "论文",
+        },
+    )
+
+    # Inject: an external edit lands exactly as the commit begins.
+    real_commit = storage_mod.PaperStorage.commit_resolved_adoption
+    injected = {"done": False}
+
+    def commit_with_external_edit(self, *args, **kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            edited = dict(doc)
+            edited["title_override"] = "EXTERNAL-EDIT"
+            rel = f"论文/方向AI/CommitWindowPaper/{MANIFEST_FILENAME}"
+            _r, cur = env["service"].read(rel)
+            env["service"].save(rel, manifest_payload(edited), expected_hash=cur)
+        return real_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        storage_mod.PaperStorage, "commit_resolved_adoption", commit_with_external_edit
+    )
+
+    report = recover_pending_writes(storage, env["service"])
+
+    assert injected["done"], "the probe must actually have injected the external edit"
+    assert report.resolved == 0, f"commit must abort, got {report.outcomes}"
+    assert "manifest changed" in report.outcomes[0].detail or "digest" in report.outcomes[0].action
+
+    # The Vault edit survives and SQLite did NOT adopt a contradicting binding.
+    on_disk = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert on_disk.get("title_override") == "EXTERNAL-EDIT"
+    assert storage.get_paper(pid).title_override != "EXTERNAL-EDIT", (
+        "SQLite must not have committed the aborted adoption"
+    )

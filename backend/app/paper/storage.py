@@ -533,8 +533,16 @@ class PaperStorage:
         external_ids: Any = _UNSET,
         binding_state: BindingState = BindingState.ADOPTED,
         expected_state: Optional[BindingState] = None,
+        verify_manifest: Optional[Any] = None,
     ) -> None:
         """Atomically persist resolved sources and advance paper state in one transaction with CAS.
+
+        ``verify_manifest`` is an optional zero-argument callable invoked INSIDE the
+        transaction, immediately before COMMIT. It closes the last cross-media
+        window: a caller can read and validate the manifest, but the manifest can
+        still change before this commit lands, leaving SQLite asserting one binding
+        while the Vault says another. A raise from the callback aborts the
+        transaction, so the two media cannot diverge.
 
         Manifest-owned fields use a three-state sentinel rather than ``None``:
 
@@ -684,6 +692,13 @@ class PaperStorage:
                     raise sqlite3.OperationalError(
                         f"CAS failure: paper {paper_id} state changed concurrently (expected {expected_state.value})"
                     )
+
+                # Last line of defence, still inside the transaction: if the
+                # manifest moved while these rows were being written, abort rather
+                # than commit a binding the Vault no longer agrees with.
+                if verify_manifest is not None:
+                    verify_manifest()
+
                 cur.execute("COMMIT;")
             except Exception:
                 cur.execute("ROLLBACK;")

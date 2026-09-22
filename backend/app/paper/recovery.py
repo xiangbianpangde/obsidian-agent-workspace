@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -640,44 +641,44 @@ def _recover_rename_source(
         # metadata fields the parser does not surface.
         raw_doc = json.loads(raw.decode("utf-8"))
 
-        # Re-verify immediately before committing. The check above validated the
-        # bytes this decision was based on, but the manifest can still be
-        # replaced while sources are hashed. Committing now would write SQLite
-        # bindings that no longer correspond to what the Vault says, which is the
-        # exact split-brain this handler exists to prevent.
+        # Re-verify INSIDE the transaction, immediately before COMMIT. Validating
+        # here and then committing on the next line still leaves a window where the
+        # manifest changes in between, and the commit would then assert a binding
+        # the Vault no longer holds. Handing the check to the transaction means a
+        # late change aborts the whole commit instead of splitting authority.
+        def _verify_manifest_unchanged() -> None:
+            try:
+                _final_raw, final_digest = service.read(manifest_rel)
+            except Exception as exc:  # noqa: BLE001
+                raise sqlite3.OperationalError(
+                    f"cannot re-verify manifest before commit: {exc}"
+                ) from exc
+            if final_digest != observed_digest:
+                raise sqlite3.OperationalError(
+                    "manifest changed while the rename recovery was committing; "
+                    "refusing to write SQLite bindings that no longer match the Vault"
+                )
+
         try:
-            _final_raw, final_digest = service.read(manifest_rel)
-        except Exception as exc:  # noqa: BLE001
-            return RecoveryOutcome(
-                intent_id=intent_id,
-                paper_id=paper.paper_id,
-                operation="rename_source",
-                resolved=False,
-                action="failed",
-                detail=f"cannot re-verify manifest before committing: {exc}",
+            storage.commit_resolved_adoption(
+                paper.paper_id,
+                resolved_sources,
+                title_override=raw_doc.get("title_override"),
+                paper_tags=list(raw_doc.get("tags") or []),
+                note_id=parsed.note_id,
+                external_ids=raw_doc.get("external_ids") or {},
+                binding_state=target_state,
+                verify_manifest=_verify_manifest_unchanged,
             )
-        if final_digest != observed_digest:
+        except Exception as exc:
             return RecoveryOutcome(
                 intent_id=intent_id,
                 paper_id=paper.paper_id,
                 operation="rename_source",
                 resolved=False,
                 action="digest-mismatch",
-                detail=(
-                    "manifest changed while the rename recovery was committing; "
-                    "refusing to write SQLite bindings that no longer match the Vault"
-                ),
+                detail=f"commit refused: {exc}",
             )
-
-        storage.commit_resolved_adoption(
-            paper.paper_id,
-            resolved_sources,
-            title_override=raw_doc.get("title_override"),
-            paper_tags=list(raw_doc.get("tags") or []),
-            note_id=parsed.note_id,
-            external_ids=raw_doc.get("external_ids") or {},
-            binding_state=target_state,
-        )
 
         if old_path:
             from .models import SourceRole, new_source_id
