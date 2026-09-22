@@ -459,6 +459,7 @@ def update_manifest(
     papers_root_rel: str = "",
     note_rel_path: Optional[str] = None,
     document: Optional[Dict[str, Any]] = None,
+    expected_manifest_digest: Optional[str] = None,
     attempts: int = 5,
 ) -> Tuple[Paper, Optional[str]]:
     """Rewrite an adopted paper's manifest after its bindings change.
@@ -474,6 +475,14 @@ def update_manifest(
     the window where a crash between "publish" and "record the digest" left an
     unverifiable intent. ``build_manifest`` stamps ``updated_at``, so the document
     must be built once and shared - building it twice yields different digests.
+
+    ``expected_manifest_digest`` is the CAS precondition: when supplied, the write
+    is refused unless the manifest currently on disk still hashes to that value.
+    Without it this function is optimistic in the wrong direction - it reads
+    whatever is there and overwrites it, so an edit made to the manifest after the
+    caller read it (but before this write) would be silently discarded and then
+    blessed by the caller's own intent digest. Pass the digest the caller actually
+    based its decision on, and a concurrent edit fails closed instead.
 
     `ensure_adopted` only writes when no manifest exists, which is correct for
     the adoption gate but wrong for the fields that keep changing afterwards. A
@@ -508,6 +517,32 @@ def update_manifest(
         except Exception as exc:  # noqa: BLE001
             raise ManifestError(f"cannot re-create manifest for {paper.paper_id}: {exc}") from exc
         return paper, result.new_hash
+
+    # When the caller states which digest it based its decision on, pin the write
+    # to it. Re-reading the hash here and saving against THAT is optimistic in the
+    # wrong direction: it accepts and then overwrites whatever arrived in the
+    # meantime, so an external edit made after the caller's read is silently
+    # discarded - and the caller's own intent digest would later bless the result.
+    if expected_manifest_digest is not None:
+        with _manifest_lock(rel):
+            existing = read_manifest_file(service, rel)
+            if existing is None:
+                # The caller expected a manifest that is no longer there.
+                raise ManifestError(
+                    f"manifest for {paper.paper_id} disappeared since it was read; "
+                    "refusing to write against a precondition that no longer holds"
+                )
+            _data, current = service.read(rel)
+            if current != expected_manifest_digest:
+                raise ManifestError(
+                    f"manifest for {paper.paper_id} changed since it was read "
+                    f"(expected {expected_manifest_digest[:12]}..., found {current[:12]}...); "
+                    "refusing to overwrite a concurrent edit"
+                )
+            if existing == document:
+                return paper, published_digest
+            result = service.save(rel, payload, expected_hash=current)
+            return paper, result.new_hash
 
     # Retry under a per-path lock. The optimistic hash makes a lost race
     # detectable, but detecting it is not the same as surviving it: without the

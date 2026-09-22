@@ -1733,3 +1733,217 @@ def test_p0_t3_update_manifest_digest_is_json_serialisable(env):
     assert len(same_digest) == 64, f"must be a hex digest, got {same_digest!r}"
     assert all(c in "0123456789abcdef" for c in same_digest)
     json.dumps({"published_manifest_digest": same_digest})  # must not raise
+
+
+def test_utf8_sniff_does_not_split_a_multibyte_character(env):
+    """回归：读取固定 4096 字节再 decode 会把合法中文 Markdown 误判为非法.
+
+    真实 Vault 上命中过：UTF-8 的 CJK 多为 3 字节，任意截断点常落在字符中间，
+    `UnicodeDecodeError` 于是把一个完全合法的翻译文件标成 invalid，令其论文被
+    静默降级为 DEGRADED。校验必须只判定窗口内"完整"的字符。
+    """
+    from backend.app.paper.scanner import is_valid_utf8_text
+
+    folder = env["papers"] / "方向AE" / "Utf8BoundaryPaper"
+    folder.mkdir(parents=True)
+
+    # 2000 个三字节汉字 = 6000 字节，截断点 4096 必然落在字符中间。
+    straddling = folder / "straddle.md"
+    straddling.write_bytes(("汉" * 2000).encode("utf-8"))
+    assert is_valid_utf8_text(straddling), "valid UTF-8 must not be rejected by an arbitrary cut"
+
+    # 真正非 UTF-8 的内容仍必须被拒绝。
+    broken = folder / "broken.md"
+    broken.write_bytes(b"# heading\n\xff\xfe invalid latin-1 bytes\n")
+    assert not is_valid_utf8_text(broken), "genuinely invalid UTF-8 must still be rejected"
+
+    # 空文件是合法文本。
+    empty = folder / "empty.md"
+    empty.write_bytes(b"")
+    assert is_valid_utf8_text(empty)
+
+    # 端到端：一份跨越边界的翻译文件不得把论文拖成 DEGRADED。
+    folder2 = env["papers"] / "方向AE" / "Utf8EndToEndPaper"
+    folder2.mkdir(parents=True)
+    (folder2 / "paper.pdf").write_bytes(PDF_SAMPLE)
+    (folder2 / "paper_全文翻译.md").write_bytes(("译" * 2000).encode("utf-8"))
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper_by_folder("方向AE/Utf8EndToEndPaper")
+    assert paper is not None
+    # No manifest yet: the scanner's own verdict is what matters here.
+    assert paper.binding_state == BindingState.RESOLVED, (
+        f"a valid multibyte translation must not degrade the paper, got {paper.binding_state}"
+    )
+
+
+def test_p0_w_concurrent_manifest_edit_is_not_silently_overwritten(env):
+    """P0-W: intent 创建后 Manifest 被外部编辑，rename 写入必须 fail-closed 而非静默覆盖.
+
+    这是评审员指出的最后一个 CAS 边界：update_manifest 若只是"读当前 hash 再用它作
+    expected_hash"，就等于接受并覆盖中间发生的外部编辑，而 intent 里自己的 planned
+    digest 事后还会为这次覆盖背书。修复后 rename 主路径把「决策所依据的写前摘要」作为
+    CAS precondition 传入，外部编辑必须让写入失败。
+    """
+    from backend.app.paper.writer import VaultWriteService
+
+    folder = env["papers"] / "方向AF" / "ConcurrentEditPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    indexer.index_papers(dry_run=False)
+    service = VaultWriteService(env["vault"])
+
+    # Baseline: the digest the rename decision is based on.
+    rel = f"论文/{folder.relative_to(env['papers']).as_posix()}/{MANIFEST_FILENAME}"
+    _raw, baseline = service.read(rel)
+
+    # Someone else edits the manifest in between.
+    _raw2, current = service.read(rel)
+    service.save(
+        rel,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "title_override": "Edited Elsewhere",
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        )
+        + "\n",
+        expected_hash=current,
+    )
+
+    # Now attempt the rename write pinned to the STALE baseline digest.
+    from backend.app.paper.manifest import build_manifest, update_manifest, ManifestError
+
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper(pid)
+    sources = storage.list_sources(pid)
+    doc = build_manifest(paper, sources)
+
+    with pytest.raises(ManifestError) as exc_info:
+        update_manifest(
+            storage,
+            service,
+            paper,
+            sources,
+            papers_root_rel="论文",
+            document=doc,
+            expected_manifest_digest=baseline,  # stale precondition
+        )
+    assert "changed since it was read" in str(exc_info.value)
+
+    # And the external edit must still be intact - not overwritten.
+    on_disk = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert on_disk.get("title_override") == "Edited Elsewhere", (
+        "the concurrent external edit must survive"
+    )
+
+
+def test_p0_w2_indexer_rename_path_refuses_when_manifest_edited_midway(env, monkeypatch):
+    """P0-W2: 走真实 indexer rename 主路径，写入前的 CAS 必须生效并如实报告失败.
+
+    单点探针只证明 update_manifest 会拒绝；本探针证明**主路径确实接入了该前置条件**，
+    并且失败被计入 report errors（而不是静默当成成功）。
+    """
+    import backend.scripts.paper_index as index_mod
+    from backend.app.paper.manifest import update_manifest as real_update
+
+    folder = env["papers"] / "方向AG" / "MidwayEditPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    indexer.index_papers(dry_run=False)
+    (folder / "paper.pdf").rename(folder / "renamed.pdf")
+
+    rel = f"论文/{folder.relative_to(env['papers']).as_posix()}/{MANIFEST_FILENAME}"
+    edits = {"done": False}
+
+    def edit_then_delegate(*args, **kwargs):
+        """Simulate an external edit landing between the caller's read and the write."""
+        service = args[1]
+        if not edits["done"]:
+            edits["done"] = True
+            _r, cur = service.read(rel)
+            doc = json.loads(_r.decode("utf-8"))
+            doc["title_override"] = "Edited Between Read And Write"
+            service.save(rel, json.dumps(doc, ensure_ascii=False, indent=2) + "\n", expected_hash=cur)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(index_mod, "update_manifest", edit_then_delegate)
+
+    report = index_mod.index_papers(dry_run=False)
+
+    assert edits["done"], "the probe must actually have simulated the concurrent edit"
+    assert any("changed since it was read" in e for e in report["errors"]), (
+        f"the CAS refusal must be reported, got {report['errors']}"
+    )
+
+    # The external edit survives; nothing claims it was superseded.
+    on_disk = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert on_disk.get("title_override") == "Edited Between Read And Write"
+
+    # And the rename must not have been committed into SQLite behind the refusal.
+    storage = PaperStorage(env["db"])
+    live = {s.rel_path for s in storage.list_sources(pid)}
+    assert "renamed.pdf" not in live, (
+        "SQLite must not adopt a rename whose manifest CAS failed"
+    )

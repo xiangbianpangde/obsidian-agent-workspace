@@ -356,6 +356,23 @@ def index_papers(dry_run: bool = False) -> dict:
 
                     source.paper_id = paper.paper_id
 
+                    # The digest of the manifest this rename decision is based on.
+                    # Read HERE, before choosing to write, and passed to
+                    # update_manifest as a CAS precondition: if the manifest is
+                    # edited between this read and the write, the write fails
+                    # closed instead of discarding someone else's edit.
+                    prior_manifest_digest = None
+                    if service is not None:
+                        _mrel = (
+                            f"{papers_root_rel}/{paper.folder_relpath}/{MANIFEST_FILENAME}"
+                            if papers_root_rel
+                            else f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
+                        )
+                        try:
+                            _prior_raw, prior_manifest_digest = service.read(_mrel)
+                        except Exception:
+                            prior_manifest_digest = None
+
                     # P0-S: Build the document ONCE and hash it into the intent
                     # BEFORE the write. Recording the digest afterwards left a
                     # crash window where recovery found an intent with no digest
@@ -384,6 +401,7 @@ def index_papers(dry_run: bool = False) -> dict:
                                 "new_path": source.rel_path,
                                 "source_id": matched_missing.source_id,
                                 "published_manifest_digest": planned_digest,
+                                "prior_manifest_digest": prior_manifest_digest,
                                 "papers_root_rel": papers_root_rel,
                                 "folder_relpath": paper.folder_relpath,
                             },
@@ -401,6 +419,7 @@ def index_papers(dry_run: bool = False) -> dict:
                                 papers_root_rel=papers_root_rel,
                                 note_rel_path=note_path,
                                 document=pending_document,
+                                expected_manifest_digest=prior_manifest_digest,
                             )
                         except Exception as exc:
                             manifest_ok = False

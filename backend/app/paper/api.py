@@ -63,7 +63,7 @@ from .models import (
     new_source_id,
     utc_now,
 )
-from .scanner import _LAYOUT_RE, _looks_like_pdf, _sha256_file
+from .scanner import _LAYOUT_RE, _looks_like_pdf, _sha256_file, is_valid_utf8_text
 from .writer import (
     AlreadyExistsError,
     ConflictError,
@@ -582,12 +582,8 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
                                 else:
                                     if not s.rel_path.lower().endswith(".md"):
                                         semantic_invalid = True
-                                    else:
-                                        try:
-                                            with t.open("rb") as f:
-                                                f.read(4096).decode("utf-8")
-                                        except UnicodeDecodeError:
-                                            semantic_invalid = True
+                                    elif not is_valid_utf8_text(t):
+                                        semantic_invalid = True
                         else:
                             if s.active:
                                 missing_active = True
@@ -715,10 +711,7 @@ def resolve_paper(paper_id: str, body: ResolvePaperRequest):
             else:
                 if not rel.lower().endswith(".md"):
                     raise HTTPException(400, f"role {role.value} requires a .md file, got: {rel}")
-                try:
-                    with open(resolved_target, "rb") as f:
-                        f.read(4096).decode("utf-8")
-                except UnicodeDecodeError:
+                if not is_valid_utf8_text(resolved_target):
                     raise HTTPException(400, f"file {rel} is not valid UTF-8 text")
 
         # Check primary constraints

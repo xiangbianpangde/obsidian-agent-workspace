@@ -54,6 +54,7 @@ __all__ = [
     "discover_papers",
     "classify_markdown_role",
     "is_mineru_artifact_dir",
+    "is_valid_utf8_text",
     "normalize_title",
 ]
 
@@ -303,6 +304,41 @@ def _looks_like_pdf(path: Path) -> bool:
         return False
 
 
+def is_valid_utf8_text(path: Path, sniff_bytes: int = 4096) -> bool:
+    """True when the file looks like readable UTF-8 text.
+
+    Decoding a fixed-size prefix used to reject perfectly valid Chinese files:
+    UTF-8 encodes most CJK characters in 3 bytes, so an arbitrary cut can land in
+    the middle of a character and raise ``UnicodeDecodeError`` on a file that is
+    entirely well-formed. (Measured on the real vault: a translation was flagged
+    invalid and its paper silently downgraded to DEGRADED.)
+
+    So only the *complete* characters inside the sniff window are validated: a
+    trailing partial sequence is expected at the boundary and is not an error.
+    A file that is genuinely not UTF-8 still fails, because the invalid sequence
+    then appears somewhere before the cut.
+    """
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(sniff_bytes)
+    except OSError:
+        return False
+
+    if not chunk:
+        return True
+
+    # Drop at most 3 trailing bytes (UTF-8 sequences are at most 4 bytes, so a
+    # partial character straddling the cut can be no longer than that).
+    for trim in range(0, 4):
+        candidate = chunk[: len(chunk) - trim] if trim else chunk
+        try:
+            candidate.decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            continue
+    return False
+
+
 def discover_papers(config: ScanConfig) -> ScanResult:
     """Walk ``config.root`` and return discovered papers.
 
@@ -432,12 +468,8 @@ def discover_papers(config: ScanConfig) -> ScanResult:
                         else:
                             if not rel_path.lower().endswith(_MD_SUFFIX):
                                 semantic_invalid = True
-                            else:
-                                try:
-                                    with target_file.open("rb") as f:
-                                        f.read(4096).decode("utf-8")
-                                except UnicodeDecodeError:
-                                    semantic_invalid = True
+                            elif not is_valid_utf8_text(target_file):
+                                semantic_invalid = True
                 else:
                     if act:
                         missing_active = True

@@ -513,16 +513,25 @@ def _recover_rename_source(
     If Manifest was not published, retire intent without modifying SQLite.
     """
     from . import MANIFEST_FILENAME
-    from .manifest import parse_manifest, read_manifest_file
+    from .manifest import manifest_payload_digest, parse_manifest
 
     base = _papers_root_rel(payload)
     manifest_rel = str(Path(base, paper.folder_relpath, MANIFEST_FILENAME)) if base else str(
         Path(paper.folder_relpath, MANIFEST_FILENAME)
     )
 
+    # Read ONCE and derive both the document and its digest from the same bytes.
+    # Reading twice (parse here, digest there) is a TOCTOU: the manifest can be
+    # replaced between the two reads, letting the code parse one document and
+    # then validate a different one's digest - so a CAS on a file it never
+    # actually examined would pass.
     doc = None
+    observed_digest = None
     try:
-        doc = read_manifest_file(service, manifest_rel)
+        raw, observed_digest = service.read(manifest_rel)
+        doc = parse_manifest(json.loads(raw.decode("utf-8")))
+    except FileNotFoundError:
+        doc = None
     except Exception as exc:
         return RecoveryOutcome(
             intent_id=intent_id,
@@ -547,7 +556,8 @@ def _recover_rename_source(
     old_path = payload.get("old_path")
     source_id = payload.get("source_id")
 
-    parsed = parse_manifest(doc)
+    # `parsed` came from the same bytes whose digest is `observed_digest`.
+    parsed = doc
     has_new_path = any(s.get("path") == new_path for s in parsed.sources)
 
     if not has_new_path:
@@ -578,21 +588,11 @@ def _recover_rename_source(
             ),
         )
 
-    try:
-        _raw, cur_digest = service.read(manifest_rel)
-    except Exception as exc:  # noqa: BLE001
-        return RecoveryOutcome(
-            intent_id=intent_id,
-            paper_id=paper.paper_id,
-            operation="rename_source",
-            resolved=False,
-            action="failed",
-            detail=f"cannot re-read manifest to verify published digest: {exc}",
-        )
-    if cur_digest != expected_digest:
-        # The manifest is not the document this intent published, so the
+    if observed_digest != expected_digest:
+        # The manifest on disk is not the document this intent published, so the
         # binding changed underneath the rename. Committing would relabel
-        # unknown content as this rename's result.
+        # unknown content as this rename's result. (Both values come from the
+        # single read above, so this cannot pass on bytes never examined.)
         return RecoveryOutcome(
             intent_id=intent_id,
             paper_id=paper.paper_id,
@@ -636,13 +636,46 @@ def _recover_rename_source(
 
         target_state = BindingState.DEGRADED if missing_active else BindingState.ADOPTED
 
+        # Parsed once alongside the digest; keep the raw document for the
+        # metadata fields the parser does not surface.
+        raw_doc = json.loads(raw.decode("utf-8"))
+
+        # Re-verify immediately before committing. The check above validated the
+        # bytes this decision was based on, but the manifest can still be
+        # replaced while sources are hashed. Committing now would write SQLite
+        # bindings that no longer correspond to what the Vault says, which is the
+        # exact split-brain this handler exists to prevent.
+        try:
+            _final_raw, final_digest = service.read(manifest_rel)
+        except Exception as exc:  # noqa: BLE001
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="failed",
+                detail=f"cannot re-verify manifest before committing: {exc}",
+            )
+        if final_digest != observed_digest:
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="digest-mismatch",
+                detail=(
+                    "manifest changed while the rename recovery was committing; "
+                    "refusing to write SQLite bindings that no longer match the Vault"
+                ),
+            )
+
         storage.commit_resolved_adoption(
             paper.paper_id,
             resolved_sources,
-            title_override=doc.get("title_override"),
-            paper_tags=list(doc.get("tags") or []),
+            title_override=raw_doc.get("title_override"),
+            paper_tags=list(raw_doc.get("tags") or []),
             note_id=parsed.note_id,
-            external_ids=doc.get("external_ids") or {},
+            external_ids=raw_doc.get("external_ids") or {},
             binding_state=target_state,
         )
 
