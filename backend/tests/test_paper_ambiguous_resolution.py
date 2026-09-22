@@ -784,7 +784,10 @@ def test_p0_i_source_id_and_version_stability_across_rename(env):
     assert src_after is not None, "source_id must not be lost or changed on rename!"
     assert src_after.rel_path == "renamed.pdf"
     assert src_after.active is True
-    assert src_after.source_version > version_before
+    # A rename that leaves the bytes untouched is the SAME revision, so the
+    # version is preserved: existing annotations still address these bytes.
+    # P0-P only requires a bump when the content actually changed.
+    assert src_after.source_version == version_before
 
     # 2. Verify Manifest on disk records the exact same source_id!
     mf = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -975,6 +978,286 @@ def test_p0_o_api_race_winner_source_id_preserved(env):
     # Check that SQLite still matches winner_sid
     db_sources_after = storage.list_sources(pid)
     assert db_sources_after[0].source_id == winner_sid
+
+
+def test_p0_p_version_monotonicity_preseeded_version_seven(env):
+    """P0-P: 既有 source_version=7 改名后必须单调保持或自增，绝不能回退为 1 或 2."""
+    folder = env["papers"] / "方向T" / "VersionMonotonicityPaper"
+    folder.mkdir(parents=True)
+    (folder / "old.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "old.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Seed SQLite with source_version=7
+    storage = PaperStorage(env["db"])
+    paper = Paper(paper_id=pid, folder_relpath="方向T/VersionMonotonicityPaper", display_title="T")
+    storage.upsert_paper(paper, allow_folder_move=True)
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="old.pdf",
+            source_version=7,  # Preseeded version 7!
+            sha256=hashlib.sha256(PDF_SAMPLE).hexdigest(),
+            active=True,
+        )
+    )
+
+    # Rename old.pdf -> renamed.pdf (content unchanged)
+    (folder / "old.pdf").rename(folder / "renamed.pdf")
+
+    # Index: rename recovery must keep version=7 because hash is unchanged!
+    indexer.index_papers(dry_run=False)
+
+    src_after = storage.get_source(sid)
+    assert src_after is not None
+    assert src_after.source_version == 7, f"expected version 7, got {src_after.source_version}"
+
+    # Now modify bytes on disk and reindex -> must increment 7 -> 8!
+    (folder / "renamed.pdf").write_bytes(PDF_SAMPLE + b"%new-bytes\n")
+    indexer.index_papers(dry_run=False)
+
+    src_bumped = storage.get_source(sid)
+    assert src_bumped.source_version == 8, f"expected version 8, got {src_bumped.source_version}"
+
+
+def test_p0_q_normal_rename_advances_paper_state_to_adopted(env):
+    """P0-Q: 单次 index 后，成功 rename recovery 的 Paper 聚合状态直接变为 ADOPTED，不残留 DEGRADED."""
+    folder = env["papers"] / "方向U" / "StateAdvanceRenamePaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    manifest_doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "paper.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    # Initial index
+    indexer.index_papers(dry_run=False)
+
+    # Rename paper.pdf -> paper_renamed.pdf
+    (folder / "paper.pdf").rename(folder / "paper_renamed.pdf")
+
+    # Exactly ONE index run!
+    indexer.index_papers(dry_run=False)
+
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper(pid)
+    # Must be ADOPTED immediately on the first pass!
+    assert paper.binding_state == BindingState.ADOPTED
+    assert paper.primary_pdf_source_id == sid
+
+
+def _race_worker(process_name, title, db_str, vault_str, papers_str, pid, q, b):
+    """Module-level so the target survives the macOS spawn pickler.
+
+    Two of these run concurrently against one Vault and database, which is the
+    only way to exercise the FileExists race: ``_paper_lock`` serialises threads
+    inside a single process, so an in-process thread probe never reaches it.
+    """
+    try:
+        import backend.app.state as app_state
+        import backend.app.paper.api as pa
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from backend.app.paper.api import router as pr
+        from backend.app.paper.storage import PaperStorage
+        from backend.app.paper.writer import VaultWriteService
+
+        class _C:
+            vault_root = Path(vault_str)
+            papers_root = Path(papers_str)
+            papers_max_depth = 6
+
+            @property
+            def papers_root_or_default(self):
+                return self.papers_root
+
+        app_state._state["cfg"] = _C()
+        pa._storage = lambda: PaperStorage(Path(db_str))
+        pa._service = lambda: VaultWriteService(Path(vault_str))
+
+        app_local = FastAPI()
+        app_local.include_router(pr)
+        client = TestClient(app_local)
+
+        b.wait(timeout=30)
+        res = client.post(
+            f"/api/paper/papers/{pid}/resolve",
+            json={
+                "sources": [
+                    {"rel_path": "doc.md", "role": "TRANSLATION_FULL", "is_primary": True, "active": True}
+                ],
+                "title_override": title,
+            },
+        )
+        q.put((process_name, res.status_code, res.text[:200]))
+    except Exception as exc:  # noqa: BLE001
+        q.put((process_name, -1, f"{type(exc).__name__}: {exc}"))
+
+
+def test_p0_r_multiprocessing_race_winner_source_id_preserved(env):
+    """P0-R: 真实跨进程并发探针：两个独立进程同时 resolve，胜者 source_id 必须在 Manifest 与 SQLite 中一致."""
+    import multiprocessing
+
+    folder = env["papers"] / "方向V" / "MultiprocessRacePaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Multi-Process Doc\n", encoding="utf-8")
+
+    indexer.index_papers(dry_run=False)
+    storage = PaperStorage(env["db"])
+    paper = storage.get_paper_by_folder("方向V/MultiprocessRacePaper")
+    pid = paper.paper_id
+    storage.close()
+
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+
+    procs = [
+        ctx.Process(
+            target=_race_worker,
+            args=(
+                name,
+                title,
+                str(env["db"]),
+                str(env["vault"]),
+                str(env["papers"]),
+                pid,
+                queue,
+                barrier,
+            ),
+        )
+        for name, title in (("ProcA", "TitleA"), ("ProcB", "TitleB"))
+    ]
+
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+    for p in procs:
+        if p.is_alive():
+            p.terminate()
+            pytest.fail("race worker did not finish within 60s")
+
+    results = [queue.get(timeout=10) for _ in procs]
+    codes = sorted(r[1] for r in results)
+
+    # Different title_override means the loser must be rejected, not silently
+    # committed: exactly one 200 and one 409 — never two 200s, never a 500.
+    assert codes == [200, 409], f"expected one winner and one rejection, got {results}"
+
+    # The surviving Manifest and the surviving SQLite row must agree on identity.
+    mf = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    winner_sid = mf["sources"][0]["source_id"]
+
+    storage = PaperStorage(env["db"])
+    db_paper = storage.get_paper(pid)
+    assert db_paper.binding_state == BindingState.ADOPTED
+    db_sources = storage.list_sources(pid)
+    assert db_sources[0].source_id == winner_sid, (
+        "SQLite source_id must match the winning Manifest source_id exactly"
+    )
+
+
+def test_p0_s_recovery_digest_cas_rejects_externally_edited_manifest(env):
+    """P0-L/S: 若 Manifest 在 intent 记录后又被外部编辑，recovery 必须 fail-closed，不能盲目提交."""
+    folder = env["papers"] / "方向W" / "DigestCasPaper"
+    folder.mkdir(parents=True)
+    (folder / "new.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    storage = PaperStorage(env["db"])
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向W/DigestCasPaper",
+            display_title="DigestCasPaper",
+            binding_state=BindingState.DEGRADED,
+        ),
+        allow_folder_move=True,
+    )
+
+    # Intent records the digest of the manifest AS IT WAS at write time.
+    stale_digest = "0" * 64
+    storage.begin_write_intent(
+        pid,
+        "rename_source",
+        {
+            "old_path": "old.pdf",
+            "new_path": "new.pdf",
+            "source_id": sid,
+            "expected_manifest_digest": stale_digest,
+            "folder_relpath": "方向W/DigestCasPaper",
+            "papers_root_rel": "论文",
+        },
+    )
+
+    # Meanwhile someone edits the manifest on disk to something else entirely.
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "new.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = recover_pending_writes(storage, env["service"])
+
+    # Must NOT roll forward: the manifest the intent was written against is gone.
+    assert report.resolved == 0
+    assert report.unresolved == 1
+    assert report.outcomes[0].action == "digest-mismatch"
+
+    # And the intent stays pending so an operator can still see the divergence.
+    assert len(storage.list_pending_write_intents()) == 1
+
 
 
 

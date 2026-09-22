@@ -342,10 +342,32 @@ def index_papers(dry_run: bool = False) -> dict:
                     source.is_candidate = False
                     source.binding_origin = BindingOrigin.MANIFEST
                     source.created_at = prior.created_at if prior else source.created_at
-                    source.source_version = _next_version(matched_missing, source)
+
+                    # P0-P: Preserve source_version monotonically from SQLite prior!
+                    old_prior = existing_sources.get(matched_missing.rel_path)
+                    if old_prior is not None:
+                        source.source_version = _next_version(old_prior, source)
+                        if _unchanged(old_prior, source):
+                            source.source_version = old_prior.source_version
+                    else:
+                        source.source_version = _next_version(matched_missing, source)
+
                     source.paper_id = paper.paper_id
 
                     # P0-G: Intent-backed controlled write transaction!
+                    # Record expected manifest digest before write
+                    expected_manifest_digest = None
+                    if service is not None:
+                        try:
+                            manifest_ptr = (
+                                f"{papers_root_rel}/{paper.folder_relpath}/{MANIFEST_FILENAME}"
+                                if papers_root_rel
+                                else f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
+                            )
+                            _data, expected_manifest_digest = service.read(manifest_ptr)
+                        except Exception:
+                            pass
+
                     rename_intent = None
                     if storage is not None:
                         rename_intent = storage.begin_write_intent(
@@ -355,6 +377,7 @@ def index_papers(dry_run: bool = False) -> dict:
                                 "old_path": matched_missing.rel_path,
                                 "new_path": source.rel_path,
                                 "source_id": matched_missing.source_id,
+                                "expected_manifest_digest": expected_manifest_digest,
                                 "papers_root_rel": papers_root_rel,
                                 "folder_relpath": paper.folder_relpath,
                             },
@@ -407,6 +430,10 @@ def index_papers(dry_run: bool = False) -> dict:
                         sources_written += 1
                         confirmed_live_paths.add(source.rel_path)
                         missing_manifest_sources.remove(matched_missing)
+
+                        # P0-Q: If all active sources are now accounted for on disk, advance state to ADOPTED!
+                        if not missing_manifest_sources:
+                            paper.binding_state = BindingState.ADOPTED
 
                         if rename_intent:
                             storage.commit_write_intent(rename_intent)

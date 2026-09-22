@@ -560,6 +560,22 @@ def _recover_rename_source(
             detail=f"manifest does not contain new path {new_path}; rename never landed",
         )
 
+    expected_digest = payload.get("expected_manifest_digest")
+    if expected_digest:
+        try:
+            _raw, cur_digest = service.read(manifest_rel)
+            if cur_digest != expected_digest:
+                return RecoveryOutcome(
+                    intent_id=intent_id,
+                    paper_id=paper.paper_id,
+                    operation="rename_source",
+                    resolved=False,
+                    action="digest-mismatch",
+                    detail="manifest was modified externally after rename intent was recorded",
+                )
+        except Exception:
+            pass
+
     try:
         from .manifest import manifest_to_sources
         from .models import BindingOrigin, BindingState, MediaKind, SourceRole
@@ -572,6 +588,9 @@ def _recover_rename_source(
         resolved_sources = manifest_to_sources(paper.paper_id, parsed.sources)
         missing_active = False
 
+        # P0-P: Monotonically preserve source_version from SQLite prior!
+        old_prior = storage.get_source(source_id) if source_id else None
+
         for s in resolved_sources:
             t = paper_dir / s.rel_path
             if t.is_file():
@@ -581,6 +600,11 @@ def _recover_rename_source(
                 from .scanner import _sha256_file
 
                 s.sha256 = _sha256_file(t)
+                if s.source_id == source_id and old_prior:
+                    if old_prior.sha256 == s.sha256:
+                        s.source_version = old_prior.source_version
+                    else:
+                        s.source_version = old_prior.source_version + 1
             elif s.active:
                 missing_active = True
 
