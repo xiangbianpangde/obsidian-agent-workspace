@@ -82,8 +82,54 @@ P0 结项、处理评审要求的「47 篇待确认项」时，我最初把它�
 
 核查方式：按**目录路径**遍历（非按 `paper_id`——删库重建后 ID 会重分配，按 ID 核查会得到虚假的「row missing」）。
 
-## 六、待决策问题
+## 六、三问裁定（2026-09-22，评审员）
 
-1. 判定信号：显式 frontmatter 标记 vs 启发式文本匹配？
-2. 状态命名：`NO_CONTENT_AVAILABLE` vs `CONTENT_UNAVAILABLE`？
-3. 是否需要在 P0.5 同时支持「补齐文献后自动转为可采纳」（如用户放入 PDF 后自动重新判定）？
+评审员已就本提案的三个待决策问题给出裁定，以下为其内容，构成本提案的**权威输入**：
+
+### 6.1 判定信号：只用显式结构化标记
+
+**裁定**：显式结构化 frontmatter/property 是**唯一**可进入 `NO_CONTENT_AVAILABLE` 的信号。建议稳定枚举，例如：
+
+```yaml
+content_availability: metadata_only
+# 或
+content_status: unavailable
+```
+
+- 文件名或正文启发式**只能作提示**，不能据以宣称 `NO_CONTENT`；
+- 无法确定时**一律回退 `AMBIGUOUS`**（fail-closed）。
+
+这印证了我在 §3.2 中提出的 fail-closed 方向，并把「启发式」从候选方案降为提示性辅助。
+
+**含义**：现有的 17 篇 `00-元数据.md`（仅文本内含「尚未获取」字样）**不会**因此被自动判为 `NO_CONTENT_AVAILABLE`——它们仍属 `AMBIGUOUS`，直到显式标记被写入。这是有意的保守。
+
+> 实测校准（2026-09-22）：Vault 中共 18 个 `00-元数据.md`，其中 **17 个**位于「仅此一文件」的目录（即本提案対象）；第 18 个所在目录另有可读来源，且已于早前 canary 阶段被采纳。全 18 个文件**均无** YAML frontmatter、**均无** `content_availability` / `content_status` 枚举，因此按裁定全部不会进入 `NO_CONTENT_AVAILABLE`。
+
+### 6.2 命名：`NO_CONTENT_AVAILABLE`
+
+**裁定**：选 `NO_CONTENT_AVAILABLE`。语义比 `CONTENT_UNAVAILABLE` 更精确——明确是「尚无**可读内容**」，而非「下载/服务暂时不可用」。
+
+### 6.3 自动重判定：仅重新分类，不自动采纳
+
+**裁定**：支持「补齐 PDF / 可读全文后自动重新判定」，但**仅限于 reclassify / 重新进入 adoption gate**：
+
+- **不得**自动创建 Manifest；
+- **不得**自动绑定来源；
+- 新出现的可读来源仍按 **P0 既有规则**进入 `DISCOVERED` / `PDF_ONLY` / `AMBIGUOUS` 等人工流程。
+
+**含义**：补齐文献后，该论文会重新回到正常的 P0 发现/采纳路径，而不是被 P0.5 特殊对待——P0.5 只负责「正确分类」，不接管「如何采纳」。
+
+### 6.4 约束确认
+
+评审同时确认：当前 17 篇「候选 only、无 Manifest、非 DEGRADED」的现状**安全**；**P0 不变、不回滚启用**，P0.5 独立推进。
+
+---
+
+## 七、实现前置待办（P0.5 立项后）
+
+基于 §6 的裁定，实现前需要先确定：
+
+1. **枚举的确切名称与取值**（`content_availability: metadata_only` vs `content_status: unavailable`）；
+2. **标记写在哪里**：论文夹内的哪个文件？现有 `00-元数据.md` 的 frontmatter，还是独立元数据文件？
+3. **谁写入该标记**：用户手工标，还是工作台在某条件下提议？
+4. **与 ADR-006「合法 Paper 的最低条件」的关系**：`NO_CONTENT_AVAILABLE` 是一种新的最低条件形态（合法但不采纳），需确认是否需修正 ADR-006 的表述。
