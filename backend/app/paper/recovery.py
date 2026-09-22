@@ -439,16 +439,22 @@ def _recover_resolve(
     and advance SQLite from AMBIGUOUS to ADOPTED in one transaction.
     """
     from . import MANIFEST_FILENAME
-    from .manifest import manifest_to_sources, parse_manifest, read_manifest_file
+    from .manifest import manifest_to_sources, parse_manifest
 
     base = _papers_root_rel(payload)
     manifest_rel = str(Path(base, paper.folder_relpath, MANIFEST_FILENAME)) if base else str(
         Path(paper.folder_relpath, MANIFEST_FILENAME)
     )
 
+    # Read once and derive both the document and its digest from the same bytes,
+    # then keep that digest to re-verify inside the commit (below).
     doc = None
+    observed_digest = None
     try:
-        doc = read_manifest_file(service, manifest_rel)
+        raw, observed_digest = service.read(manifest_rel)
+        doc = json.loads(raw.decode("utf-8"))
+    except FileNotFoundError:
+        doc = None
     except Exception as exc:
         return RecoveryOutcome(
             intent_id=intent_id,
@@ -477,6 +483,27 @@ def _recover_resolve(
         note_id = parsed.note_id
         ext_ids = doc.get("external_ids") or {}
 
+        def _verify_manifest_unchanged() -> None:
+            """Refuse to commit a binding the Vault no longer holds.
+
+            The same cross-media window that bit the rename path applies here: a
+            check made outside the transaction leaves room for the manifest to
+            change before the commit lands.
+            """
+            try:
+                _raw, current = service.read(manifest_rel)
+            except Exception as exc:  # noqa: BLE001
+                raise sqlite3.OperationalError(
+                    f"cannot re-verify manifest before commit: {exc}"
+                ) from exc
+            # Compare raw file hashes: `observed_digest` is the writer's hash of
+            # the bytes on disk, not a re-serialisation of the parsed document.
+            if current != observed_digest:
+                raise sqlite3.OperationalError(
+                    "manifest changed while resolve recovery was committing; refusing "
+                    "to write SQLite bindings that no longer match the Vault"
+                )
+
         storage.commit_resolved_adoption(
             paper.paper_id,
             resolved_sources,
@@ -484,6 +511,7 @@ def _recover_resolve(
             paper_tags=paper_tags,
             note_id=note_id,
             external_ids=ext_ids,
+            verify_manifest=_verify_manifest_unchanged,
         )
     except Exception as exc:
         return RecoveryOutcome(
@@ -493,6 +521,38 @@ def _recover_resolve(
             resolved=False,
             action="failed",
             detail=f"commit_resolved_adoption failed: {exc}",
+        )
+
+    # Post-commit re-read. An in-process callback cannot make two media atomic: the
+    # manifest can still change between the callback's read and COMMIT, and no
+    # amount of checking inside this process closes that. What it CAN guarantee is
+    # detection: if the manifest no longer matches what was committed, the intent
+    # stays pending so the divergence is visible and the normal index pass will
+    # reconcile the paper from the manifest (the authority) instead of the two
+    # silently disagreeing.
+    try:
+        _after_raw, after_digest = service.read(manifest_rel)
+    except Exception as exc:  # noqa: BLE001
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="resolve",
+            resolved=False,
+            action="failed",
+            detail=f"cannot confirm manifest after commit: {exc}",
+        )
+    if after_digest != observed_digest:
+        return RecoveryOutcome(
+            intent_id=intent_id,
+            paper_id=paper.paper_id,
+            operation="resolve",
+            resolved=False,
+            action="post-commit-drift",
+            detail=(
+                "manifest changed during the commit window; SQLite bindings were "
+                "written but no longer match the Vault. Left pending so the next "
+                "index reconciles from the manifest (the authority)."
+            ),
         )
 
     return RecoveryOutcome(
@@ -678,6 +738,33 @@ def _recover_rename_source(
                 resolved=False,
                 action="digest-mismatch",
                 detail=f"commit refused: {exc}",
+            )
+
+        # Same post-commit detection as the resolve path: the callback cannot make
+        # the two media atomic, so a change landing inside the commit window must
+        # at least stay visible instead of being reported as a clean completion.
+        try:
+            _after_raw, after_digest = service.read(manifest_rel)
+        except Exception as exc:  # noqa: BLE001
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="failed",
+                detail=f"cannot confirm manifest after commit: {exc}",
+            )
+        if after_digest != observed_digest:
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="post-commit-drift",
+                detail=(
+                    "manifest changed during the commit window; left pending so the "
+                    "next index reconciles from the manifest (the authority)"
+                ),
             )
 
         if old_path:

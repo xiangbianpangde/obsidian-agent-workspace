@@ -2104,3 +2104,269 @@ def test_p0_y_manifest_change_between_read_and_commit_aborts_recovery(env, monke
     assert storage.get_paper(pid).title_override != "EXTERNAL-EDIT", (
         "SQLite must not have committed the aborted adoption"
     )
+
+
+def test_p0_y2_resolve_recovery_aborts_if_manifest_changes_at_commit(env, monkeypatch):
+    """P0-Y2: resolve recovery 也必须把校验放进事务——提交瞬间的 Manifest 改动要中止.
+
+    与 test_p0_y 同一窗口，只是换到 resolve 的 recovery handler：说明这是**形状问题**
+    而非某一处遗漏，两个 handler 现都统一走事务内 verify_manifest。
+    """
+    from backend.app.paper import storage as storage_mod
+
+    folder = env["papers"] / "方向AJ" / "ResolveCommitWindowPaper"
+    folder.mkdir(parents=True)
+    (folder / "doc.md").write_text("# Doc\n", encoding="utf-8")
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "TRANSLATION_FULL",
+                "path": "doc.md",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    (folder / MANIFEST_FILENAME).write_text(json.dumps(doc), encoding="utf-8")
+
+    storage = PaperStorage(env["db"])
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向AJ/ResolveCommitWindowPaper",
+            display_title="ResolveCommitWindowPaper",
+            binding_state=BindingState.AMBIGUOUS,
+        ),
+        allow_folder_move=True,
+    )
+    storage.begin_write_intent(
+        pid,
+        "resolve",
+        {"folder_relpath": "方向AJ/ResolveCommitWindowPaper", "papers_root_rel": "论文"},
+    )
+
+    real_commit = storage_mod.PaperStorage.commit_resolved_adoption
+    injected = {"done": False}
+
+    def commit_with_external_edit(self, *args, **kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            edited = dict(doc)
+            edited["title_override"] = "EXTERNAL-EDIT"
+            rel = f"论文/方向AJ/ResolveCommitWindowPaper/{MANIFEST_FILENAME}"
+            _r, cur = env["service"].read(rel)
+            env["service"].save(rel, json.dumps(edited, ensure_ascii=False, indent=2) + "\n", expected_hash=cur)
+        return real_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        storage_mod.PaperStorage, "commit_resolved_adoption", commit_with_external_edit
+    )
+
+    report = recover_pending_writes(storage, env["service"])
+    assert injected["done"], "the probe must actually have injected the external edit"
+    assert report.resolved == 0, f"commit must abort, got {report.outcomes}"
+    assert storage.get_paper(pid).binding_state == BindingState.AMBIGUOUS, (
+        "SQLite must not have committed the aborted adoption"
+    )
+
+
+def test_p0_z_manifest_change_after_callback_read_is_detected(env):
+    """P0-Z: callback 的 read 返回后、SQLite COMMIT 前改动 Manifest —— 必须被检测并保持 pending.
+
+    评审员的关键论证：**进程内 callback 无法让两种介质成为原子**。callback 内再读一次也
+    只是把窗口推后（read 返回 → COMMIT 之间仍在）。本探针用他的手法：服务在 callback 的
+    read 返回后立刻改写 Manifest，断言系统不再谎报 completed，而是报告 post-commit-drift
+    并保留 pending，交由下一次 index 从 Manifest（权威）收敛。
+    """
+    folder = env["papers"] / "方向AK" / "AfterCallbackPaper"
+    folder.mkdir(parents=True)
+    (folder / "renamed.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    from backend.app.paper.manifest import manifest_payload, manifest_payload_digest
+
+    doc = {
+        "schema_version": 1,
+        "paper_id": pid,
+        "sources": [
+            {
+                "source_id": sid,
+                "role": "ORIGINAL_PDF",
+                "path": "renamed.pdf",
+                "primary": True,
+                "active": True,
+            }
+        ],
+        "created_at": "2026-09-18T00:00:00Z",
+        "updated_at": "2026-09-18T00:00:00Z",
+    }
+    rel = f"论文/方向AK/AfterCallbackPaper/{MANIFEST_FILENAME}"
+    (folder / MANIFEST_FILENAME).write_text(manifest_payload(doc), encoding="utf-8")
+
+    storage = PaperStorage(env["db"])
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向AK/AfterCallbackPaper",
+            display_title="AfterCallbackPaper",
+            binding_state=BindingState.DEGRADED,
+        ),
+        allow_folder_move=True,
+    )
+    storage.upsert_source(
+        PaperSource(
+            source_id=sid,
+            paper_id=pid,
+            role=SourceRole.ORIGINAL_PDF,
+            rel_path="old.pdf",
+            active=True,
+        )
+    )
+    storage.begin_write_intent(
+        pid,
+        "rename_source",
+        {
+            "old_path": "old.pdf",
+            "new_path": "renamed.pdf",
+            "source_id": sid,
+            "published_manifest_digest": manifest_payload_digest(doc),
+            "folder_relpath": "方向AK/AfterCallbackPaper",
+            "papers_root_rel": "论文",
+        },
+    )
+
+    real_service = env["service"]
+
+    class RaceService:
+        """Delegates to the real service, but edits the file right after a read returns.
+
+        This is the reviewer's reproduction: the mutation lands after the check has
+        already read the bytes, so no in-process check can prevent the commit - only
+        detect it.
+        """
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.reads = 0
+            self._fired = False
+
+        def read(self, path):
+            raw, digest = self._inner.read(path)
+            self.reads += 1
+            # Fire after the verification read (2nd read) has returned.
+            if self.reads == 2 and not self._fired:
+                self._fired = True
+                edited = dict(doc)
+                edited["title_override"] = "AFTER-CALLBACK"
+                _r, cur = self._inner.read(rel)
+                self._inner.save(rel, manifest_payload(edited), expected_hash=cur)
+            return raw, digest
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    race = RaceService(real_service)
+    report = recover_pending_writes(storage, race)
+
+    assert race._fired, "the probe must have injected the edit after a read returned"
+
+    # The commit itself may have landed; what must NOT happen is a clean "completed"
+    # while the Vault disagrees.
+    assert report.resolved == 0, (
+        f"a manifest change inside the commit window must not be reported as clean "
+        f"completion, got {report.outcomes}"
+    )
+    assert report.outcomes[0].action == "post-commit-drift"
+    assert storage.list_pending_write_intents(), (
+        "the intent must stay pending so the next index reconciles from the manifest"
+    )
+
+
+def test_p0_z2_drift_converges_to_manifest_on_next_index(env):
+    """P0-Z2: 漂移后的收敛保证 —— 下一次 index 必须把 SQLite 拉回与 Manifest 一致.
+
+    这是本问题的正确定性：进程内代码无法让文件系统与 SQLite 原子（外部编辑器也不受任何
+    锁约束），因此可实现的保证是「检测 → 保持 pending → 由权威源收敛」。本探针证明最后一环
+    确实成立：制造漂移后跑一次 index，SQLite 必须与 Manifest 一致。
+    """
+    folder = env["papers"] / "方向AL" / "ConvergencePaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    indexer.index_papers(dry_run=False)
+
+    # Simulate drift: SQLite says one thing, the manifest another. This is exactly
+    # the state a commit-window edit can leave behind.
+    storage = PaperStorage(env["db"])
+    drifted = storage.get_paper(pid)
+    drifted.title_override = "SQLITE-ONLY-TITLE"
+    storage.upsert_paper(drifted, allow_folder_move=True)
+
+    # The authority now says something different.
+    _r, cur = env["service"].read(f"论文/方向AL/ConvergencePaper/{MANIFEST_FILENAME}")
+    env["service"].save(
+        f"论文/方向AL/ConvergencePaper/{MANIFEST_FILENAME}",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "title_override": "MANIFEST-TITLE",
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        expected_hash=cur,
+    )
+
+    # One index pass must reconcile SQLite to the manifest.
+    indexer.index_papers(dry_run=False)
+
+    storage = PaperStorage(env["db"])
+    reconciled = storage.get_paper(pid)
+    assert reconciled.title_override == "MANIFEST-TITLE", (
+        f"the manifest is the authority; SQLite must converge to it, got {reconciled.title_override!r}"
+    )
