@@ -354,20 +354,13 @@ def index_papers(dry_run: bool = False) -> dict:
 
                     source.paper_id = paper.paper_id
 
-                    # P0-G: Intent-backed controlled write transaction!
-                    # Record expected manifest digest before write
-                    expected_manifest_digest = None
-                    if service is not None:
-                        try:
-                            manifest_ptr = (
-                                f"{papers_root_rel}/{paper.folder_relpath}/{MANIFEST_FILENAME}"
-                                if papers_root_rel
-                                else f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
-                            )
-                            _data, expected_manifest_digest = service.read(manifest_ptr)
-                        except Exception:
-                            pass
-
+                    # P0-S: The intent must record the digest of the document we
+                    # INTEND to publish, not the one we are about to replace.
+                    # Recovery compares the manifest on disk against this value, so
+                    # recording the pre-write digest would make the normal crash
+                    # (publish succeeded, SQLite commit did not) permanently
+                    # unrecoverable: recovery would see the new manifest, compare it
+                    # against the old hash, and refuse to roll forward forever.
                     rename_intent = None
                     if storage is not None:
                         rename_intent = storage.begin_write_intent(
@@ -377,7 +370,6 @@ def index_papers(dry_run: bool = False) -> dict:
                                 "old_path": matched_missing.rel_path,
                                 "new_path": source.rel_path,
                                 "source_id": matched_missing.source_id,
-                                "expected_manifest_digest": expected_manifest_digest,
                                 "papers_root_rel": papers_root_rel,
                                 "folder_relpath": paper.folder_relpath,
                             },
@@ -386,16 +378,17 @@ def index_papers(dry_run: bool = False) -> dict:
                     # Update manifest on disk FIRST before syncing SQLite!
                     manifest_ok = True
                     if service is not None:
-                        try:
-                            note_path = getattr(adopted, "note_path", None) if adopted else None
-                            canonical_manifest_sources = []
-                            for ms_key, ms_val in manifest_sources.items():
-                                if ms_key == matched_missing.rel_path:
-                                    canonical_manifest_sources.append(source)
-                                elif (paper_dir / ms_key).is_file():
-                                    canonical_manifest_sources.append(ms_val)
+                        note_path = getattr(adopted, "note_path", None) if adopted else None
+                        canonical_manifest_sources = []
+                        for ms_key, ms_val in manifest_sources.items():
+                            if ms_key == matched_missing.rel_path:
+                                canonical_manifest_sources.append(source)
+                            elif (paper_dir / ms_key).is_file():
+                                canonical_manifest_sources.append(ms_val)
 
-                            update_manifest(
+                        published_digest = None
+                        try:
+                            _, published_digest = update_manifest(
                                 storage,
                                 service,
                                 paper,
@@ -409,6 +402,13 @@ def index_papers(dry_run: bool = False) -> dict:
                                 storage.fail_write_intent(rename_intent, str(exc))
                             result_errors.append(
                                 f"manifest rename update failed for {paper.folder_relpath}: {exc}"
+                            )
+
+                        # Record what we actually published so recovery can verify
+                        # the manifest it finds is the one this intent produced.
+                        if manifest_ok and rename_intent and published_digest:
+                            storage.set_write_intent_payload_digest(
+                                rename_intent, published_digest
                             )
 
                     # Only synchronize SQLite if manifest on disk was successfully updated!

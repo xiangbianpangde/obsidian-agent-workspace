@@ -560,21 +560,31 @@ def _recover_rename_source(
             detail=f"manifest does not contain new path {new_path}; rename never landed",
         )
 
-    expected_digest = payload.get("expected_manifest_digest")
+    expected_digest = payload.get("published_manifest_digest")
     if expected_digest:
         try:
             _raw, cur_digest = service.read(manifest_rel)
-            if cur_digest != expected_digest:
-                return RecoveryOutcome(
-                    intent_id=intent_id,
-                    paper_id=paper.paper_id,
-                    operation="rename_source",
-                    resolved=False,
-                    action="digest-mismatch",
-                    detail="manifest was modified externally after rename intent was recorded",
-                )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="failed",
+                detail=f"cannot re-read manifest to verify published digest: {exc}",
+            )
+        if cur_digest != expected_digest:
+            # The manifest is not the document this intent published, so the
+            # binding changed underneath the rename. Committing would relabel
+            # unknown content as this rename's result.
+            return RecoveryOutcome(
+                intent_id=intent_id,
+                paper_id=paper.paper_id,
+                operation="rename_source",
+                resolved=False,
+                action="digest-mismatch",
+                detail="manifest on disk is not the document this intent published",
+            )
 
     try:
         from .manifest import manifest_to_sources

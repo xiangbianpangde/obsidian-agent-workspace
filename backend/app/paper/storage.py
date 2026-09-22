@@ -929,6 +929,32 @@ class PaperStorage:
                 (error[:2000], intent_id),
             )
 
+    def set_write_intent_payload_digest(self, intent_id: str, digest: str) -> None:
+        """Record what a write intent actually published.
+
+        The payload is written once when the intent is created, before the files
+        exist. The published digest is only known afterwards, and recovery needs
+        it to tell "my write landed" from "someone edited the manifest since" -
+        so it is stored into the existing payload rather than needing a schema
+        change.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_json FROM paper_write_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except ValueError:
+                payload = {}
+            payload["published_manifest_digest"] = digest
+            self._conn.execute(
+                "UPDATE paper_write_intents SET payload_json = ? WHERE intent_id = ?",
+                (json.dumps(payload, ensure_ascii=False), intent_id),
+            )
+
     def list_pending_write_intents(self) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(

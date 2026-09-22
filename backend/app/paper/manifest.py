@@ -20,6 +20,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -444,8 +445,14 @@ def update_manifest(
     papers_root_rel: str = "",
     note_rel_path: Optional[str] = None,
     attempts: int = 5,
-) -> Paper:
+) -> Tuple[Paper, Optional[str]]:
     """Rewrite an adopted paper's manifest after its bindings change.
+
+    Returns ``(paper, published_digest)``. The digest is the hash of the document
+    this call published (or found already published). A caller that recorded a
+    write intent must store THAT digest: the recovery handler verifies the manifest
+    on disk against the intent, so an intent holding the pre-write digest would
+    compare the new manifest against the old hash and could never roll forward.
 
     `ensure_adopted` only writes when no manifest exists, which is correct for
     the adoption gate but wrong for the fields that keep changing afterwards. A
@@ -457,25 +464,28 @@ def update_manifest(
     still the gate that decides when the manifest first appears.
     """
     if not is_adopted(paper):
-        return paper
+        return paper, None
 
     base = papers_root_rel or _configured_prefix()
     rel = f"{base}/{paper.folder_relpath}/{MANIFEST_FILENAME}" if base else (
         f"{paper.folder_relpath}/{MANIFEST_FILENAME}"
     )
     document = build_manifest(paper, sources, note_rel_path)
+    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    # The digest of the document this call intends to leave on disk. Every return
+    # path below publishes exactly this content, so it is what the caller must
+    # record in a write intent for recovery to verify against.
+    published_digest = sha256(payload.encode("utf-8"))
 
     existing = read_manifest_file(service, rel)
     if existing is None:
         # The manifest vanished (deleted externally). Re-create rather than
         # leave the paper unanchored.
         try:
-            service.create(rel, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+            result = service.create(rel, payload)
         except Exception as exc:  # noqa: BLE001
             raise ManifestError(f"cannot re-create manifest for {paper.paper_id}: {exc}") from exc
-        return paper
-
-    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+        return paper, result.new_hash
 
     # Retry under a per-path lock. The optimistic hash makes a lost race
     # detectable, but detecting it is not the same as surviving it: without the
@@ -490,17 +500,18 @@ def update_manifest(
                 raise
             if existing is None:
                 try:
-                    service.create(rel, payload)
-                    return paper
+                    result = service.create(rel, payload)
+                    return paper, result.new_hash
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
                     continue
             if existing == document:
-                return paper
+                # Someone else already published exactly this content.
+                return paper, published_digest
             try:
                 _data, digest = service.read(rel)
-                service.save(rel, payload, expected_hash=digest)
-                return paper
+                result = service.save(rel, payload, expected_hash=digest)
+                return paper, result.new_hash
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 continue

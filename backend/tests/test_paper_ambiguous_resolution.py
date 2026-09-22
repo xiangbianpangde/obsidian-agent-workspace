@@ -1193,7 +1193,11 @@ def test_p0_r_multiprocessing_race_winner_source_id_preserved(env):
 
 
 def test_p0_s_recovery_digest_cas_rejects_externally_edited_manifest(env):
-    """P0-L/S: 若 Manifest 在 intent 记录后又被外部编辑，recovery 必须 fail-closed，不能盲目提交."""
+    """P0-S: 若 Manifest 在 intent 记录后又被外部编辑，recovery 必须 fail-closed，不能盲目提交.
+
+    这里 intent 记录的是本次写入打算发布的文档摘要（published_manifest_digest）。
+    探针故意让磁盘上的 Manifest 与它不符，以模拟"写入后又被人手改了"。
+    """
     folder = env["papers"] / "方向W" / "DigestCasPaper"
     folder.mkdir(parents=True)
     (folder / "new.pdf").write_bytes(PDF_SAMPLE)
@@ -1211,8 +1215,8 @@ def test_p0_s_recovery_digest_cas_rejects_externally_edited_manifest(env):
         allow_folder_move=True,
     )
 
-    # Intent records the digest of the manifest AS IT WAS at write time.
-    stale_digest = "0" * 64
+    # Intent records the digest of a document that is NOT what ends up on disk.
+    unrelated_digest = "1" * 64
     storage.begin_write_intent(
         pid,
         "rename_source",
@@ -1220,7 +1224,7 @@ def test_p0_s_recovery_digest_cas_rejects_externally_edited_manifest(env):
             "old_path": "old.pdf",
             "new_path": "new.pdf",
             "source_id": sid,
-            "expected_manifest_digest": stale_digest,
+            "published_manifest_digest": unrelated_digest,
             "folder_relpath": "方向W/DigestCasPaper",
             "papers_root_rel": "论文",
         },
@@ -1307,3 +1311,88 @@ def test_p0_t_sentinel_distinguishes_keep_from_clear(env):
     assert cleared.title_override is None, "explicit null must clear the title"
     assert cleared.paper_tags == [], "explicit empty list must clear the tags"
     assert cleared.note_id is None, "explicit null must clear the note binding"
+
+
+def test_p0_s2_successful_publish_then_crash_rolls_forward(env):
+    """P0-S 反向探针：Manifest 已成功发布、SQLite 提交前崩溃，recovery 必须 roll-forward.
+
+    这是 review 指出的真实缺陷：intent 若记录发布【前】的摘要，recovery 拿到的是
+    发布【后】的 Manifest，比对必然失败，正常崩溃现场会永远卡在 pending。
+    探针走完整 indexer 路径（真实产出 rename_source intent），再模拟崩溃后恢复。
+    """
+    folder = env["papers"] / "方向Y" / "HappyPathCrashPaper"
+    folder.mkdir(parents=True)
+    (folder / "paper.pdf").write_bytes(PDF_SAMPLE)
+
+    pid = new_paper_id()
+    sid = new_source_id()
+    (folder / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "paper_id": pid,
+                "sources": [
+                    {
+                        "source_id": sid,
+                        "role": "ORIGINAL_PDF",
+                        "path": "paper.pdf",
+                        "primary": True,
+                        "active": True,
+                    }
+                ],
+                "created_at": "2026-09-18T00:00:00Z",
+                "updated_at": "2026-09-18T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    indexer.index_papers(dry_run=False)
+    (folder / "paper.pdf").rename(folder / "paper_renamed.pdf")
+
+    # Run the rename path but stop before the SQLite commit, exactly where a crash
+    # between the two media would leave things. Only the Vault write is allowed.
+    # Patched on the CLASS: the indexer builds its own PaperStorage instance.
+    storage = PaperStorage(env["db"])
+    real_commit = PaperStorage.commit_write_intent
+
+    def crash_before_commit(self, intent_id):
+        raise RuntimeError("simulated crash between manifest publish and SQLite commit")
+
+    PaperStorage.commit_write_intent = crash_before_commit
+    try:
+        indexer.index_papers(dry_run=False)
+    except RuntimeError:
+        # The process dies here in reality. What survives is what matters: a
+        # published manifest plus a still-pending intent.
+        pass
+    finally:
+        PaperStorage.commit_write_intent = real_commit
+
+    # Precondition: the manifest DID get published with the new path, and the
+    # intent is still pending — the real crash shape.
+    mf = json.loads((folder / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert mf["sources"][0]["path"] == "paper_renamed.pdf"
+    pending = storage.list_pending_write_intents()
+    rename_pending = [p for p in pending if p["operation"] == "rename_source"]
+    assert rename_pending, "the rename intent must survive the crash as pending"
+
+    # The intent must carry the digest of what was published, not of what was replaced.
+    payload = json.loads(rename_pending[0]["payload_json"])
+    assert payload.get("published_manifest_digest"), (
+        "intent must record the published digest, otherwise recovery can never match"
+    )
+
+    # Recover: this MUST roll forward, not dead-end on digest-mismatch.
+    report = recover_pending_writes(storage, env["service"])
+    assert report.resolved == 1, f"normal crash must roll forward, got {report.outcomes}"
+    assert report.outcomes[0].action == "completed"
+
+    recovered = storage.get_paper(pid)
+    assert recovered.binding_state == BindingState.ADOPTED
+    assert recovered.primary_pdf_source_id == sid
+
+    live = {s.rel_path: s for s in storage.list_sources(pid)}
+    assert "paper_renamed.pdf" in live
+    assert live["paper_renamed.pdf"].source_id == sid
+    assert not storage.list_pending_write_intents(), "intent must be committed after recovery"
