@@ -164,3 +164,4 @@ MARKDOWN_Position {
 
 - `backend/app/paper/schemas/paper.workbench.schema.json`
 - ADR-006（身份与 manifest）、ADR-008（Annotation 存储与 anchor）
+- **ADR-010（跨介质一致性）** —— 本 ADR 定义了两个权威源各自管辖什么，但没有定义「两者暂时不一致时怎么办」。ADR-010 补上了这一环：检测 + 收敛，收敛方向恒为 Manifest → SQLite。
