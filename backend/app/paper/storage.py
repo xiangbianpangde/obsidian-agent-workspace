@@ -41,6 +41,11 @@ from .models import (
 DEFAULT_PAPER_DIR = Path.home() / ".personal-ai-workspace" / "papers"
 DEFAULT_DB_PATH = DEFAULT_PAPER_DIR / "papers.db"
 
+#: Sentinel for "the caller has no opinion about this field".
+#: Distinguishes keep (this) from clear (``None``) - a distinction ``COALESCE``
+#: cannot express, and whose absence made a deliberate clear impossible.
+_UNSET: Any = object()
+
 #: Bump together with ``_MIGRATIONS``.
 SCHEMA_VERSION = 2
 
@@ -522,20 +527,32 @@ class PaperStorage:
         self,
         paper_id: str,
         sources: List[PaperSource],
-        title_override: Optional[str] = None,
-        paper_tags: Optional[List[str]] = None,
-        note_id: Optional[str] = None,
-        external_ids: Optional[Dict[str, Any]] = None,
+        title_override: Any = _UNSET,
+        paper_tags: Any = _UNSET,
+        note_id: Any = _UNSET,
+        external_ids: Any = _UNSET,
         binding_state: BindingState = BindingState.ADOPTED,
         expected_state: Optional[BindingState] = None,
     ) -> None:
-        """Atomically persist resolved sources and advance paper state in one transaction with CAS."""
+        """Atomically persist resolved sources and advance paper state in one transaction with CAS.
+
+        Manifest-owned fields use a three-state sentinel rather than ``None``:
+
+        * ``_UNSET``  - leave the stored value alone (the caller has no opinion);
+        * ``None``   - explicitly clear it (the manifest now says null);
+        * a value     - set it.
+
+        ``COALESCE(?, column)`` collapsed the first two into one, so a manifest
+        that deliberately dropped its title, tags, note or external ids could
+        never actually clear them in SQLite - the stale value survived every
+        rebuild.
+        """
         from . import MANIFEST_FILENAME
         from .models import MediaKind
 
         stamp = utc_now()
-        tags_json = json.dumps(paper_tags, ensure_ascii=False) if paper_tags is not None else None
-        ext_json = json.dumps(external_ids, ensure_ascii=False) if external_ids is not None else None
+        tags_json = json.dumps(paper_tags, ensure_ascii=False) if isinstance(paper_tags, list) else _UNSET
+        ext_json = json.dumps(external_ids, ensure_ascii=False) if isinstance(external_ids, dict) else _UNSET
 
         with self._lock:
             cur = self._conn.cursor()
@@ -605,30 +622,44 @@ class PaperStorage:
                 tr_id = pri_tr.source_id if pri_tr else None
 
                 where_clause = "WHERE paper_id = ?"
-                where_params = [
+                where_params: List[Any] = [
                     binding_state.value,
                     MANIFEST_FILENAME,
                     pdf_id,
                     tr_id,
-                    title_override,
-                    tags_json,
-                    note_id,
-                    ext_json,
-                    stamp,
-                    paper_id,
                 ]
+
+                # Manifest-owned fields: keep / set / clear, decided per field by
+                # the caller's sentinel. Assembled as SQL fragments so an _UNSET
+                # field is genuinely absent from the statement instead of being
+                # "written" with its old value.
+                set_parts = [
+                    "binding_state = ?",
+                    "ambiguity_reason = NULL",
+                    "manifest_relpath = ?",
+                    "primary_pdf_source_id = ?",
+                    "primary_translation_source_id = ?",
+                ]
+                for column, value in (
+                    ("title_override", title_override),
+                    ("paper_tags_json", tags_json),
+                    ("note_id", note_id),
+                    ("external_ids_json", ext_json),
+                ):
+                    if value is _UNSET:
+                        continue
+                    set_parts.append(f"{column} = ?")
+                    where_params.append(value)
+
+                where_params.append(stamp)
+                where_params.append(paper_id)
+
                 if expected_state is not None:
                     where_clause += " AND binding_state = ?"
                     where_params.append(expected_state.value)
 
                 cur.execute(
-                    f"UPDATE papers SET binding_state = ?, ambiguity_reason = NULL, "
-                    f"manifest_relpath = ?, primary_pdf_source_id = ?, primary_translation_source_id = ?, "
-                    f"title_override = COALESCE(?, title_override), "
-                    f"paper_tags_json = COALESCE(?, paper_tags_json), "
-                    f"note_id = COALESCE(?, note_id), "
-                    f"external_ids_json = COALESCE(?, external_ids_json), "
-                    f"updated_at = ? "
+                    f"UPDATE papers SET {', '.join(set_parts)}, updated_at = ? "
                     f"{where_clause}",
                     where_params,
                 )

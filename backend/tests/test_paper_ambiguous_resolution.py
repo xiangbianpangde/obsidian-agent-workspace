@@ -1263,3 +1263,47 @@ def test_p0_s_recovery_digest_cas_rejects_externally_edited_manifest(env):
 
 
 
+
+
+def test_p0_t_sentinel_distinguishes_keep_from_clear(env):
+    """P0-T: _UNSET 与 None 必须语义分明 —— 省略字段保留旧值，显式 None 清空.
+
+    批量解析时题目：COALESCE 把两者压成一个，于是 Manifest 主动写 null 的字段
+    永远清不掉，陈旧值会活过每一次重建。
+    """
+    from backend.app.paper.storage import _UNSET
+
+    storage = PaperStorage(env["db"])
+    pid = new_paper_id()
+    storage.upsert_paper(
+        Paper(
+            paper_id=pid,
+            folder_relpath="方向X/SentinelPaper",
+            display_title="Sentinel",
+            title_override="Original Title",
+            paper_tags=["keep-me"],
+            note_id="note_aaaa1111-1111-4111-8111-111111111111",
+        ),
+        allow_folder_move=True,
+    )
+
+    # 1. Omitting a field (sentinel) preserves the stored value.
+    storage.commit_resolved_adoption(pid, sources=[], binding_state=BindingState.ADOPTED)
+    kept = storage.get_paper(pid)
+    assert kept.title_override == "Original Title"
+    assert kept.paper_tags == ["keep-me"]
+    assert kept.note_id == "note_aaaa1111-1111-4111-8111-111111111111"
+
+    # 2. Passing None explicitly clears the field.
+    storage.commit_resolved_adoption(
+        pid,
+        sources=[],
+        title_override=None,
+        paper_tags=[],
+        note_id=None,
+        binding_state=BindingState.ADOPTED,
+    )
+    cleared = storage.get_paper(pid)
+    assert cleared.title_override is None, "explicit null must clear the title"
+    assert cleared.paper_tags == [], "explicit empty list must clear the tags"
+    assert cleared.note_id is None, "explicit null must clear the note binding"
