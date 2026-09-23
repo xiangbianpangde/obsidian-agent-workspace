@@ -13,7 +13,7 @@
 ## 🌟 核心特性 (P0 全部落地)
 
 1. **Vault 秒级全量索引 & 增量监听**：
-   - 采用高性能批量遍历与 SQLite WAL 架构，真实 Vault **2435 篇 Markdown 笔记 2.8 秒全量索引**完毕；
+   - 采用高性能批量遍历与 SQLite WAL 架构，真实 Vault **2300+ 篇 Markdown 笔记 2.8 秒全量索引**完毕（勘测值；Vault 持续增长）；
    - 内置 Watchdog 增量事件监听器（CREATE / MODIFY / MOVE / DELETE），Per-path 智能去抖与扫描互斥，毫秒级自同步；
 2. **标签中心与工作流生命周期管理**：
    - 彻底划清 `tags`（主题分类属性，如 `#AI`、`#机器学习`）与 `状态`（工作流生命周期，如 `未整理`、`进行中`、`已完成`）的职责边界；
@@ -67,7 +67,7 @@
          ┌──────────────────────┼──────────────────────┐
          ▼                      ▼                      ▼
   【知识中心 (Obsidian)】 【AI 会话中心 (AgentsView)】 【统一消息中心 (IM Hub)】
-   2435+ 笔记 / 标签 / 状态  1821 场会话 / 20万+ 消息     微信 · 企微 · QQ 聚合流
+   2300+ 笔记 / 标签 / 状态  1821 场会话 / 20万+ 消息     微信 · 企微 · QQ 聚合流
          │                      │                      │
          │ REST (127.0.0.1:8787)│                      │ SSE & REST
          ▼                      ▼                      ▼
@@ -103,7 +103,7 @@
 3. **全量扫描与建立索引**：
    ```bash
    python -m backend.scripts.scan
-   # 输出示例: scan done: files=2435 tags=1480 secret_skipped=10 duration=2800ms
+   # 输出示例: scan done: files=2300+ tags=1480 secret_skipped=10 duration=2800ms
    ```
 
 4. **启动工作台服务**：
@@ -154,6 +154,18 @@ python -m unittest discover -s backend/tests -v
 
 ---
 
+## 📌 从这里开始（接手者入口）
+
+| 想了解 | 读这个 |
+|---|---|
+| **当前运行状态与下一步** | [`HANDOFF.md`](HANDOFF.md) —— 全库唯一当前交接 |
+| **用户是谁、要什么** | [`docs/用户与需求画像/00_索引.md`](docs/用户与需求画像/00_索引.md) |
+| **为什么这样设计** | [`docs/architecture/ADR/`](docs/architecture/ADR/)（ADR-001 ~ ADR-010） |
+| **Vault 治理约束** | [`docs/governance/AGENTS.md`](docs/governance/AGENTS.md) |
+| **验收标准** | [`docs/10-cross-medium-consistency-acceptance.md`](docs/10-cross-medium-consistency-acceptance.md) |
+
+---
+
 ## 📚 架构设计与决策记录 (ADRs)
 
 关于本系统的核心架构权衡与技术推导，请参阅：
@@ -162,3 +174,9 @@ python -m unittest discover -s backend/tests -v
 - [ADR-002: 为什么系统层全局禁止删除文件](docs/architecture/ADR/ADR-002-why-no-delete.md)
 - [ADR-003: 模板兼容层子集与优雅降级设计](docs/architecture/ADR/ADR-003-template-degradation.md)
 - [ADR-004: 权限模型与乐观锁防覆盖边界](docs/architecture/ADR/ADR-004-permission-model.md)
+- [ADR-005: QQ 本地快照读取器（零出站）](docs/architecture/ADR/ADR-005-qq-local-snapshot-reader.md)
+- [ADR-006: Paper 身份与版本化 manifest](docs/architecture/ADR/ADR-006-paper-identity-and-manifest.md)
+- [ADR-007: 权威分层 —— Vault 与 SQLite 的职责边界](docs/architecture/ADR/ADR-007-authority-split.md)
+- [ADR-008: Annotation 存储与 anchor](docs/architecture/ADR/ADR-008-annotation-storage-and-anchor.md)
+- [ADR-009: PDF 阅读器与零出站边界](docs/architecture/ADR/ADR-009-pdf-viewer-and-zero-egress.md)
+- [ADR-010: 跨介质一致性 —— 检测与收敛](docs/architecture/ADR/ADR-010-cross-medium-consistency.md)
